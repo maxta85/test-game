@@ -1,0 +1,13 @@
+# Godot
+.godot/
+.import/
+*.translation
+
+# Local captures and exports
+shots/
+build/
+*.tmp
+
+# Python
+__pycache__/
+*.pyc

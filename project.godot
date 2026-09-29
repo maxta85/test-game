@@ -1,0 +1,56 @@
+; CAIRNS AFTER DARK - Godot 4.3 project configuration
+; Input actions are registered in code (see Game/input_map.gd) rather than here,
+; because project.godot's serialised InputEvent form is fragile to hand-edit.
+
+config_version=5
+
+[application]
+
+config/name="Cairns After Dark"
+config/description="Underground street racing through a fictionalised Manunda, Cairns QLD."
+config/version="0.1.0"
+run/main_scene="res://Game/main.tscn"
+config/features=PackedStringArray("4.3", "Forward Plus")
+
+[autoload]
+
+Cfg="*res://Game/cfg.gd"
+
+[debug]
+
+gdscript/warnings/unused_parameter=0
+gdscript/warnings/untyped_declaration=0
+gdscript/warnings/inferred_declaration=0
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=900
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/vsync/vsync_mode=1
+
+[layer_names]
+
+3d_physics/layer_1="world"
+3d_physics/layer_2="vehicle"
+3d_physics/layer_3="traffic"
+3d_physics/layer_4="ai"
+3d_physics/layer_5="player"
+
+[physics]
+
+3d/default_gravity=9.8
+common/physics_ticks_per_second=60
+common/max_physics_steps_per_frame=8
+3d/solver/solver_iterations=12
+
+[rendering]
+
+renderer/rendering_method="forward_plus"
+textures/default_filters/anisotropic_filtering_level=3
+anti_aliasing/quality/msaa_3d=1
+lights_and_shadows/directional_shadow/soft_shadow_filter_quality=2
+lights_and_shadows/positional_shadow/soft_shadow_filter_quality=2
+environment/defaults/default_clear_color=Color(0.016, 0.02, 0.035, 1)
+occlusion_culling/use_occlusion_culling=true
