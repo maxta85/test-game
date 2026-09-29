@@ -58,15 +58,25 @@ def ask(paths, prompt: str, model: str) -> str:
 
 
 def main() -> int:
-    args = [a for a in sys.argv[1:] if a != "-m"]
-    model, prompt = DEFAULT_MODEL, DEFAULT_PROMPT
-    if "-m" in sys.argv:
-        model = sys.argv[sys.argv.index("-m") + 1]
-        args.remove(model)
-    if any(not a.endswith(".png") and not a.endswith(".jpg") for a in args):
-        prompt = args[0]
-        args = args[1:]
-    images = [a for a in args if a.endswith((".png", ".jpg"))]
+    argv = sys.argv[1:]
+    model, prompt = DEFAULT_MODEL, None
+    images = []
+
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-m", "--model") and i + 1 < len(argv):
+            model = argv[i + 1]
+            i += 2
+            continue
+        # An argument is an image if it is an existing image file; everything
+        # else is part of the prompt. Order does not matter.
+        if os.path.exists(a) and a.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            images.append(a)
+        else:
+            prompt = (prompt + " " + a).strip() if prompt else a
+        i += 1
+
     if not images:
         print(__doc__)
         return 2
@@ -75,7 +85,7 @@ def main() -> int:
             print(f"missing: {p}")
             return 1
     try:
-        print(ask(images, prompt, model))
+        print(ask(images, prompt or DEFAULT_PROMPT, model))
     except urllib.error.HTTPError as e:
         print(f"HTTP {e.code}: {e.read().decode()[:400]}")
         return 1

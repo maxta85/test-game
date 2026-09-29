@@ -11,3 +11,7 @@ build/
 # Python
 __pycache__/
 *.pyc
+
+# Cross-agent coordination channel (filesystem only, never committed - two
+# agents committing each other's half-written messages would conflict)
+.agent_mailbox/
