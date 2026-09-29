@@ -19,6 +19,10 @@ const OFFSETS := {
 	Mode.COCKPIT: Vector3(-0.32, 1.14, -0.15),
 }
 
+## When true this node stops driving the camera entirely, so a fixed viewpoint
+## (a screenshot, a photo mode) can take the wheel without being fought.
+var tracking := true
+
 var _camera: Camera3D
 var _car: CarBody
 var _look_ahead := Vector3.ZERO
@@ -52,10 +56,14 @@ func impulse(strength: float) -> void:
 
 
 func _snap() -> void:
+	if not tracking:
+		return
 	_update(0.0, true)
 
 
 func _process(delta: float) -> void:
+	if not tracking:
+		return
 	_update(delta, false)
 
 

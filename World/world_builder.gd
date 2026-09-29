@@ -704,7 +704,7 @@ func _streetlights() -> void:
 			continue
 		var dir := seg / length
 		var nrm := Vector2(-dir.y, dir.x)
-		var n := maxi(int(length / 34.0), 1)
+		var n := maxi(int(length / 21.0), 1)
 		for i in n:
 			var mid: Vector2 = a.lerp(b, (float(i) + 0.5) / float(n))
 			var side: float = 1.0 if (ei + i) % 2 == 0 else -1.0
