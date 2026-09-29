@@ -47,8 +47,9 @@ func _ready() -> void:
 	probe.name = "WetProbe"
 	probe.size = Vector3(180, 90, 180)
 	probe.update_mode = ReflectionProbe.UPDATE_ALWAYS
-	probe.blur_amount = 0.6
-	probe.interval = 0.0
+	probe.intensity = 0.9
+	probe.ambient_mode = ReflectionProbe.AMBIENT_DISABLED
+	probe.origin_offset = Vector3(0, 8, 0)
 	probe.position = Vector3(0, 12, 40)
 	add_child(probe)
 
@@ -65,6 +66,10 @@ func _ready() -> void:
 	print("[Boot] world built in %.1f s" % ((Time.get_ticks_msec() - t0) / 1000.0))
 
 	if shot_path != "":
+		var preset := _shot_preset()
+		if preset != "":
+			await get_tree().process_frame
+			ShotPoser.apply(camera, preset)
 		_capture(shot_path)
 
 
@@ -106,6 +111,15 @@ func _spawn_player() -> void:
 	ai.graph = graph
 	ai.skill = 0.72
 	add_child(ai)
+
+
+## The camera preset name, given as the second value after --shot.
+func _shot_preset() -> String:
+	var args := OS.get_cmdline_user_args()
+	var i := args.find(SHOT_MODE)
+	if i >= 0 and i + 2 < args.size():
+		return String(args[i + 2])
+	return ""
 
 
 func _shot_request() -> String:

@@ -18,8 +18,12 @@ Game/probe.gd         Tests/harness.gd  Tests/run_tests.gd
 project.godot         Tools/see.py
 ```
 
-**You own:** `Systems/race/**`, `Tests/test_race.gd`, and you may add new files
-to `Tests/`. Nothing else.
+**You own:** `Systems/race/**`, `Tests/test_race.gd`. Nothing else.
+
+**Registering your test suite:** do nothing. The runner now auto-discovers every
+`Tests/test_*.gd` at startup, so simply creating `Tests/test_race.gd` is enough.
+Do not edit `Tests/run_tests.gd` (and do not edit another agent's `test_*.gd` -
+a second agent is working here concurrently).
 
 **Tools:**
 ```

@@ -25,7 +25,7 @@ func _ready() -> void:
 	# glow on the underside of the cloud, and that is what lights the scene.
 	_sky_mat = ProceduralSkyMaterial.new()
 	_sky_mat.sky_top_color = Color(0.030, 0.038, 0.062)
-	_sky_mat.sky_horizon_color = Color(0.30, 0.235, 0.195)
+	_sky_mat.sky_horizon_color = Color(0.42, 0.315, 0.245)
 	_sky_mat.ground_bottom_color = Color(0.014, 0.013, 0.014)
 	_sky_mat.ground_horizon_color = Color(0.20, 0.155, 0.125)
 	_sky_mat.sun_angle_max = 0.0
@@ -39,7 +39,7 @@ func _ready() -> void:
 	# Warm, dim, and mostly from the horizon where the city glow is.
 	_env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	_env.ambient_light_sky_contribution = 1.0
-	_env.ambient_light_energy = 2.2
+	_env.ambient_light_energy = 3.0
 	_env.ambient_light_color = Color(0.62, 0.58, 0.62)
 
 	# --- fog --------------------------------------------------------------
@@ -91,6 +91,23 @@ func _ready() -> void:
 	_env.tonemap_exposure = 1.30
 	_env.tonemap_white = 1.2
 
+	# --- volumetrics --------------------------------------------------------
+	# This is the single most important setting in the whole file for the brief.
+	# "Hot tropical night, humid air, dense atmospheric fog" is not a fog colour -
+	# it is light *scattering through* the air. Without volumetrics the streetlights
+	# are point specks on black tarmac; with them the air itself glows and you get
+	# the light cones over the road that make a wet street look wet.
+	_env.volumetric_fog_enabled = true
+	_env.volumetric_fog_density = 0.030
+	_env.volumetric_fog_albedo = Color(0.72, 0.66, 0.60)
+	_env.volumetric_fog_emission = Color(0.10, 0.075, 0.055)
+	_env.volumetric_fog_emission_energy = 1.4
+	_env.volumetric_fog_gi_inject = 0.0
+	_env.volumetric_fog_anisotropy = 0.35
+	_env.volumetric_fog_length = 90.0
+	_env.volumetric_fog_detail_spread = 2.0
+	_env.volumetric_fog_ambient_inject = 0.35
+
 	environment = _env
 	_apply_rain()
 
@@ -102,11 +119,11 @@ func _apply_rain() -> void:
 		return
 	var r: float = clampf(rain_intensity, 0.0, 1.0)
 	_env.fog_density = 0.0
-	_env.fog_depth_end = lerpf(430.0, 120.0, r)
+	_env.fog_depth_end = lerpf(360.0, 150.0, r)
 	_env.fog_depth_begin = lerpf(20.0, 6.0, r)
 	_env.fog_light_color = Color(0.075, 0.065, 0.070).lerp(Color(0.055, 0.052, 0.058), r)
 	_env.glow_intensity = lerpf(0.45, 0.58, r)
-	_sky_mat.sky_horizon_color = Color(0.30, 0.235, 0.195).lerp(Color(0.17, 0.155, 0.165), r)
+	_sky_mat.sky_horizon_color = Color(0.42, 0.315, 0.245).lerp(Color(0.17, 0.155, 0.165), r)
 
 
 ## Cycles through the four weather states the brief asks for.
