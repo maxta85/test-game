@@ -11,7 +11,12 @@ var world: WorldBuilder
 var night: NightEnv
 var camera: ChaseCamera
 var player_car: CarBody
+var race: RaceDirector
+var hud: RaceHUD
+var _rivals: Array = []
+var player_controller: PlayerController
 var _sun: DirectionalLight3D
+var _stuck_time := 0.0
 
 
 func _ready() -> void:
@@ -65,12 +70,57 @@ func _ready() -> void:
 
 	print("[Boot] world built in %.1f s" % ((Time.get_ticks_msec() - t0) / 1000.0))
 
+	_start_first_race()
+
 	if shot_path != "":
 		var preset := _shot_preset()
 		if preset != "":
 			await get_tree().process_frame
 			ShotPoser.apply(camera, preset)
 		_capture(shot_path)
+
+
+## Builds the first race from the road graph and drops both cars on the grid.
+## The route is generated from the streets themselves, not authored, so it is
+## always consistent with the map the player is actually driving on.
+func _start_first_race() -> void:
+	var catalogue: Array = RaceDef.catalogue(graph)
+	if catalogue.is_empty():
+		push_warning("no races could be built from the road graph")
+		return
+	var race_def: RaceDef = catalogue[1] if catalogue.size() > 1 else catalogue[0]
+	print("[Race] %s: %s, %d laps, %.0f m of street" % [
+		race_def.display_name, race_def.kind_name(), race_def.laps,
+		race_def.length_m(graph)])
+
+	race = RaceDirector.new()
+	race.def = race_def
+	if not race.try_enter(race_def):
+		print("[Race] could not enter (entry fee %d, have %d) - running as a free race" % [
+			race_def.entry_fee, Cfg.money])
+		race_def.entry_fee = 0
+
+	hud = RaceHUD.new()
+	hud.name = "RaceHUD"
+	add_child(hud)
+
+	# The player is entrant 0, which is what the director treats as "the race
+	# ends when they cross the line".
+	var entrants: Array = [RaceEntrant.new(player_car)]
+	entrants.append(RaceEntrant.new(_rivals[0]) if _rivals.size() > 0 else null)
+	entrants = entrants.filter(func(e): return e != null)
+	race.start(race_def, graph, entrants)
+
+
+func _process(delta: float) -> void:
+	if race != null:
+		for e in race.entrants:
+			if e is RaceEntrant:
+				(e as RaceEntrant).sync()
+		race.tick(delta)
+		_recover_from_stuck(delta)
+	if hud != null:
+		hud.update(player_car, race, delta)
 
 
 func _spawn_player() -> void:
@@ -90,11 +140,11 @@ func _spawn_player() -> void:
 	add_child(camera)
 	camera.set_car(player_car)
 
-	var pc := PlayerController.new()
-	pc.name = "PlayerController"
-	pc.car = player_car
-	pc.camera = camera
-	add_child(pc)
+	player_controller = PlayerController.new()
+	player_controller.name = "PlayerController"
+	player_controller.car = player_car
+	player_controller.camera = camera
+	add_child(player_controller)
 
 	# A rival already on the grid, so there is something to race against.
 	var rival_spec := CarDB.get_spec("shinobi_rs")
@@ -105,6 +155,7 @@ func _spawn_player() -> void:
 	rival.spec = rival_spec
 	add_child(rival)
 	rival.reset_to(rival_spec.start_position, rival_spec.start_rotation)
+	_rivals.append(rival)
 	var ai := AIRacer.new()
 	ai.name = "AIRacer"
 	ai.car = rival
@@ -120,6 +171,24 @@ func _shot_preset() -> String:
 	if i >= 0 and i + 2 < args.size():
 		return String(args[i + 2])
 	return ""
+
+
+## Nudges a car that has been pinned against scenery back onto the road. A
+## prototype needs this because a car wedged in a wall ends the player's night.
+func _recover_from_stuck(delta: float) -> void:
+	if player_car == null or race == null:
+		return
+	if race.state != RaceDirector.State.RACING:
+		_stuck_time = 0.0
+		return
+	var wedged: bool = player_car.wheels_on_ground < 2 and player_car.speed_kph < 4.0
+	_stuck_time = (_stuck_time + delta) if wedged else 0.0
+	if _stuck_time > 3.0:
+		_stuck_time = 0.0
+		if player_controller:
+			player_controller.reset_to_road()
+		if hud:
+			hud.flash("RECOVERED")
 
 
 func _shot_request() -> String:

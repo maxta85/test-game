@@ -10,6 +10,11 @@ Usage:
   ./Tools/see.py shot.png "What is wrong with this render?"
   ./Tools/see.py shot.png -m gemini-3.5-flash
   ./Tools/see.py a.png b.png c.png          # compare several frames
+  ./Tools/see.py shot.png -b openrouter     # route via OpenRouter instead
+
+Backends: litellm (default, http://100.81.147.15:4000) or openrouter.
+The OpenRouter key is read from $OPENROUTER_API_KEY or
+~/.config/cairns/openrouter.key - never from inside the repo.
 """
 import base64
 import json
@@ -21,6 +26,21 @@ import urllib.request
 ENDPOINT = os.environ.get("LITELLM_URL", "http://100.81.147.15:4000/v1/chat/completions")
 API_KEY = os.environ.get("LITELLM_KEY", "dummy")
 DEFAULT_MODEL = os.environ.get("LITELLM_VISION_MODEL", "gemini-3.5-flash")
+
+# Second, independent backend. Same OpenAI-shaped payload, different host.
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_VISION_MODEL", "stealth/space-bunny-alpha")
+OPENROUTER_KEY_FILE = os.path.expanduser("~/.config/cairns/openrouter.key")
+
+
+def _openrouter_key() -> str:
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return os.environ["OPENROUTER_API_KEY"]
+    try:
+        with open(OPENROUTER_KEY_FILE) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
 
 DEFAULT_PROMPT = (
     "You are the art director for a night-time street racing game set in tropical "
@@ -37,10 +57,21 @@ def encode(path: str) -> str:
         return base64.b64encode(fh.read()).decode("ascii")
 
 
-def ask(paths, prompt: str, model: str) -> str:
+def ask(paths, prompt: str, model: str, backend: str = "litellm") -> str:
     content = [{"type": "text", "text": prompt}]
     for p in paths:
         content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encode(p)}"}})
+
+    if backend == "openrouter":
+        url, key = OPENROUTER_URL, _openrouter_key()
+        if not key:
+            raise RuntimeError("no OpenRouter key: set OPENROUTER_API_KEY or write ~/.config/cairns/openrouter.key")
+        model = model or OPENROUTER_MODEL
+        headers = {"HTTP-Referer": "https://cairnsafterdark.local", "X-Title": "CAIRNS AFTER DARK"}
+    else:
+        url, key = ENDPOINT, API_KEY
+        model = model or DEFAULT_MODEL
+        headers = {}
 
     body = {
         "model": model,
@@ -48,18 +79,18 @@ def ask(paths, prompt: str, model: str) -> str:
         "max_tokens": 1200,
     }
     req = urllib.request.Request(
-        ENDPOINT,
+        url,
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"},
+        headers={**headers, "Content-Type": "application/json", "Authorization": f"Bearer {key}"},
     )
-    with urllib.request.urlopen(req, timeout=180) as resp:
+    with urllib.request.urlopen(req, timeout=240) as resp:
         data = json.loads(resp.read().decode())
     return data["choices"][0]["message"]["content"]
 
 
 def main() -> int:
     argv = sys.argv[1:]
-    model, prompt = DEFAULT_MODEL, None
+    model, prompt, backend = "", None, "litellm"
     images = []
 
     i = 0
@@ -67,6 +98,10 @@ def main() -> int:
         a = argv[i]
         if a in ("-m", "--model") and i + 1 < len(argv):
             model = argv[i + 1]
+            i += 2
+            continue
+        if a in ("-b", "--backend") and i + 1 < len(argv):
+            backend = argv[i + 1]
             i += 2
             continue
         # An argument is an image if it is an existing image file; everything
@@ -85,7 +120,7 @@ def main() -> int:
             print(f"missing: {p}")
             return 1
     try:
-        print(ask(images, prompt or DEFAULT_PROMPT, model))
+        print(ask(images, prompt or DEFAULT_PROMPT, model, backend))
     except urllib.error.HTTPError as e:
         print(f"HTTP {e.code}: {e.read().decode()[:400]}")
         return 1
