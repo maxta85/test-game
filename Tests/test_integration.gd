@@ -95,6 +95,16 @@ func _full_lap_completes(t: TestHarness) -> void:
 	var world: Node = r[0]
 	var car: CarBody = r[1]
 
+	# The assertions in this case are a statement about the car/director seam,
+	# and that only holds if this case is driving in a world of its own. A car
+	# left in the tree by an earlier suite can be sitting on this circuit, and
+	# then the car below is stopped by something this case never built - which
+	# reads, from the assertion alone, exactly like a broken seam. So the
+	# precondition is asserted rather than assumed: a contaminated world now
+	# says so, instead of failing a lap assertion 120 simulated seconds later.
+	t.eq(t.foreign_nodes(), ["IntegrationWorld"],
+		"this case has the world to itself (nodes in the tree: %s)" % str(t.foreign_nodes()))
+
 	var circuit: RaceDef = null
 	for d in RaceDef.catalogue(_graph):
 		if d.kind == RaceDef.Kind.CIRCUIT:
@@ -162,7 +172,12 @@ func _full_lap_completes(t: TestHarness) -> void:
 		if dr.is_finished(0):
 			break
 
-	t.gt(dr.laps(0), 0, "a real car driven around a real circuit banks a lap (peak %.0f kph)" % car.speed_kph)
+	# Checkpoint progress goes in the failure label: "no lap" is a much weaker
+	# report than "stuck at checkpoint 3 of 10, 22 kph", and the second one says
+	# whether the car never left, whether it left and got stuck, or whether it
+	# ran the whole route and the director failed to notice.
+	t.gt(dr.laps(0), 0, "a real car driven around a real circuit banks a lap (checkpoint %d/%d, peak %.0f kph)" % [
+		dr.next_checkpoint(0), dr.checkpoint_count(), car.speed_kph])
 	t.gt(car.speed_kph, 15.0, "the car is genuinely moving, not creeping")
 	t.eq(dr.is_wrong_way(0), false, "an autopilot following the route is not flagged as wrong way")
 	t.gt(car.global_position.y, -2.0, "the car stayed on the surface (y=%.2f)" % car.global_position.y)
