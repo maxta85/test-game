@@ -47,6 +47,12 @@ func run(t: TestHarness) -> void:
 	Cfg.money = 2000
 	Cfg.owned_cars = ["kairo_s13", "hayate_turbo"]
 	Cfg.active_car = "kairo_s13"
+	# The header is painted from Cfg when the screens are built, which happened
+	# during add_child above - before the wallet was ours to set. Re-show the
+	# front page so the chrome is derived from the state the rest of the suite
+	# assumes, exactly as it would be if the host opened the menu after a save.
+	flow.show_main_menu()
+	await tree.process_frame
 
 	await _boot(t)
 	await _main_menu(t)

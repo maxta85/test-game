@@ -196,7 +196,7 @@ func show_named(name: String) -> void:
 		"results":
 			_enter(_results)
 		_:
-	show_main_menu()
+			show_main_menu()
 
 
 ## The screens are built in `_ready`, which runs the moment the flow is added to
