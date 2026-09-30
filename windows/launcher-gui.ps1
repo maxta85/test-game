@@ -421,7 +421,14 @@ function Update-RemoteNote {
         [System.Windows.Forms.Application]::DoEvents()
         $remote = Get-RemoteManifest -Repo (Get-ManifestRepo $Manifest)
         if ($null -eq $remote) {
-            $script:RemoteNote = 'Could not reach GitHub - staying on the installed build.'
+            # Wording depends on whether there is anything installed to stay on.
+            # The unconditional version told a first-run player it was keeping
+            # their installed build when no build existed yet.
+            if (Test-ManifestMatchesFile -Manifest $Manifest -Path $GameExe) {
+                $script:RemoteNote = 'Could not reach GitHub - staying on the installed build.'
+            } else {
+                $script:RemoteNote = 'Could not reach GitHub - cannot check for updates.'
+            }
         } elseif (([string]$remote.version -eq [string]$Manifest.version) -and
                   ([string]$remote.tag    -eq [string]$Manifest.tag)) {
             $script:RemoteNote = 'Up to date.'
@@ -504,7 +511,11 @@ $btnUpdate.Add_Click({
         return
     }
     if ($null -eq $remote) {
-        Show-Note 'Could not reach GitHub, so there is nothing to check. Staying on the installed build.'
+        if (Test-ManifestMatchesFile -Manifest $Manifest -Path $GameExe) {
+            Show-Note 'Could not reach GitHub, so there is nothing to check. Staying on the installed build.'
+        } else {
+            Show-Note 'Could not reach GitHub, so there is nothing to check. Nothing is installed yet - press Install / Repair.'
+        }
     } elseif (([string]$remote.version -eq [string]$Manifest.version) -and
               ([string]$remote.tag    -eq [string]$Manifest.tag)) {
         Show-Note "You are up to date ($($Manifest.version))."
