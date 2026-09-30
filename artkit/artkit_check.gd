@@ -28,6 +28,17 @@ func _ok(cond: bool, label: String, detail: String = "") -> bool:
 	return cond
 
 
+## Copies of the whole prop set that the batching walk places. Shared by the walk
+## and by `_expected_instances()` so the two can never disagree, which is how
+## the 1650 in this file came to be stale: the multiplier was typed in twice.
+const SCATTER_REPS := 25
+
+## Copies of one prop, for the "adding 1000 copies must not add a draw call"
+## regression guard. Same reason: the loop bound and the assertion have to be
+## one number.
+const REPEAT_COPIES := 1300
+
+
 ## Total parts one full pass over the registry produces, i.e. the instance count
 ## a correct batch must end up with.
 func _expected_instances(reg: Dictionary) -> int:
@@ -35,7 +46,7 @@ func _expected_instances(reg: Dictionary) -> int:
 	for name in reg:
 		for v in ArtKitProps.VARIANTS:
 			n += ArtKitProps.variant(name, v).size()
-	return n * 25
+	return n * SCATTER_REPS
 
 
 func _section(title: String) -> void:
@@ -54,6 +65,11 @@ const PROP_BUDGETS := {
 	"bus_shelter": 130, "power_pole": 140, "tree_fern": 160,
 	"palm_alexandrine": 200, "tree_cedar": 260, "tree_rain_tree": 280,
 	"palm_coco": 300, "palm_fan": 350, "palm_areca": 560,
+	# Measured at 4, not 2: the contact decal is a quad plus its multiply skirt.
+	# Set to the measurement on purpose. Every other budget here is a ceiling with
+	# headroom, but this one's whole job is to be nearly free - a decal that costs
+	# as much as a bollard is a decal nobody can afford to put under 1600 palms.
+	"contact_shadow": 4,
 }
 const BUILDING_BUDGETS := {
 	"industrial_shed": 200, "qld_shop": 220, "qld_house": 780,
@@ -61,6 +77,13 @@ const BUILDING_BUDGETS := {
 }
 ## Per storey, because an OSM footprint's cost is a function of its height.
 const WRAP_BUDGET_PER_STOREY := 350
+
+## How many footprints the real OSM extract holds. Declared, not derived: this
+## is the world's size, owned by the map data, and artkit deliberately has no
+## dependency on `World/` so that this suite runs on its own. Quoted in one place
+## so that if the extract grows, one number here is what goes stale - and it will
+## fail loudly rather than quietly. See the budget section.
+const OSM_FOOTPRINTS := 2198
 
 ## `ART_DIRECTION.md`: saturated colour is a light source, not a surface. A
 ## surface role above this saturation is a wall somebody painted cyan at 3am.
@@ -80,6 +103,7 @@ func _initialize() -> void:
 	_check_geometry()
 	_check_budgets()
 	_check_batching()
+	_check_consumer()
 	_check_no_external_assets()
 	_report()
 
@@ -252,23 +276,37 @@ func _check_materials() -> void:
 			too_hot.append("%s leaf emission %.2f" % [k, e])
 	_ok(too_hot.is_empty(), "foliage emission stays under 0.10", str(too_hot))
 
-	# The hero surface.
-	var roughs: Array[float] = []
+	# The hero surface. How many wet states exist is derived from the palette and
+	# checked in both directions - every wet-asphalt role has a material, and
+	# every wet-asphalt material traces back to a role - rather than being
+	# asserted as "4", which is only ever the number the palette happened to hold
+	# on the day somebody typed it.
+	var wet_roles := ArtKitPalette.family_keys("asphalt_wet_")
+	var wet_mats: Array[String] = []
+	var wet_orphans: Array[String] = []
+	for r in wet_roles:
+		var mk := "surface_" + String(r)
+		if keys.has(mk):
+			wet_mats.append(mk)
+		else:
+			wet_orphans.append(mk + " has no material")
 	for k in keys:
-		if String(k).begins_with("surface_asphalt_wet"):
-			roughs.append(ArtKitMaterials.roughness_of(k))
-	_ok(roughs.size() == 4, "four wet-asphalt variants", "got %d" % roughs.size())
+		if String(k).begins_with("surface_asphalt_wet") and not wet_mats.has(String(k)):
+			wet_orphans.append(String(k) + " has no palette role")
+	_ok(wet_orphans.is_empty(),
+			"wet asphalt: all %d palette roles are materialised, none orphaned"
+			% wet_roles.size(), str(wet_orphans))
+
 	# The band is where the wet variants' *texture* ramps sit; the scalar is a
 	# multiplier and is 1.0. 1e-4 of slack because these are float32.
 	var lo: float = ASPHALT_ROUGHNESS[0]
 	var hi: float = ASPHALT_ROUGHNESS[1]
-	var in_band := true
-	for k in keys:
-		if not String(k).begins_with("surface_asphalt_wet"):
-			continue
+	var in_band := not wet_mats.is_empty()
+	for k in wet_mats:
 		var w: Array = ArtKitMaterials._SPECS[k]["wet"]
 		in_band = in_band and float(w[0]) >= lo - 0.0001 and float(w[1]) <= hi + 0.0001
-	_ok(in_band, "wet asphalt roughness ramp stays in %.2f-%.2f" % [lo, hi], str(roughs))
+	_ok(in_band, "every wet-asphalt ramp stays in %.2f-%.2f (%d variants)"
+			% [lo, hi, wet_mats.size()])
 	_ok(ArtKitMaterials.roughness_of("surface_asphalt_dry") > 0.6,
 			"dry asphalt is matte (rough=%.2f)" % ArtKitMaterials.roughness_of("surface_asphalt_dry"))
 
@@ -400,12 +438,17 @@ func _check_geometry() -> void:
 	_ok(no_uv.is_empty(), "every mesh has UVs in metres", str(no_uv))
 	_ok(under_spec.is_empty(), "the registry's declared material is used", str(under_spec))
 
-	# Buildings, across the full variant set, plus the OSM wrapper.
+	# Buildings, across the full variant set, plus the OSM wrapper. Driven by the
+	# building registry, not a hand-typed list: a design added to `buildings.gd`
+	# used to land here unchecked, in the same way `contact_shadow` escaped the
+	# budget walk. An empty geometry, unwelded, or floating building is the bug
+	# this section exists to catch, and it only catches it for the names it lists.
+	var breg := ArtKitBuildings.registry()
 	var b_empty: Array[String] = []
 	var b_unwelded: Array[String] = []
 	var b_missing: Array[String] = []
 	var b_ground: Array[String] = []
-	for bname in ["qld_house", "qld_shop", "industrial_shed", "walk_up_block"]:
+	for bname in breg:
 		for i in ArtKitBuildings.HOUSE_VARIANTS:
 			var parts: Array = ArtKitBuildings.variant(bname, i)
 			var tag := "%s/%d" % [bname, i]
@@ -484,9 +527,35 @@ func _check_geometry() -> void:
 
 func _check_budgets() -> void:
 	_section("triangle budgets")
+	# Separate lists, because sharing one meant a prop over budget also failed the
+	# *building* budget check and printed a prop's name under "all building
+	# budgets hold". A check that reports the wrong subsystem is how people learn
+	# to ignore checks.
 	var over: Array[String] = []
+	var b_over: Array[String] = []
 	var worst := 0
+	var worst_name := ""
+	# The *registry* drives this walk, not the budget table. Iterating the budget
+	# table instead - which is what this used to do - means a prop with no
+	# entry is never checked at all: `contact_shadow` had none, so its triangle
+	# count was never held to anything, silently. Coverage is asserted first so
+	# that hole is loud, and an unbudgeted prop is skipped here rather than
+	# cascading into a pile of bogus "0 tris over budget" failures.
+	var prop_reg := ArtKitProps.registry()
+	var missing: Array[String] = []
+	for name in prop_reg:
+		if not PROP_BUDGETS.has(name):
+			missing.append(String(name))
 	for name in PROP_BUDGETS:
+		if not prop_reg.has(name):
+			missing.append("budget for unregistered prop '%s'" % name)
+	_ok(missing.is_empty(),
+			"every one of the %d registered props has a budget, and no budget is an orphan"
+			% prop_reg.size(), str(missing))
+
+	for name in prop_reg:
+		if not PROP_BUDGETS.has(name):
+			continue
 		var budget: int = PROP_BUDGETS[name]
 		var peak := 0
 		for v in ArtKitProps.VARIANTS:
@@ -496,10 +565,30 @@ func _check_budgets() -> void:
 			peak = maxi(peak, t)
 		if peak > budget:
 			over.append("%s %d > %d" % [name, peak, budget])
-		worst = maxi(worst, peak)
-	_ok(over.is_empty(), "all %d prop budgets hold across all variants" % PROP_BUDGETS.size(), str(over))
+		if peak > worst:
+			worst = peak
+			worst_name = String(name)
+	_ok(over.is_empty(),
+			"all %d prop budgets hold across all variants" % prop_reg.size(), str(over))
 
+	# Same story for buildings: registry-driven, coverage asserted.
+	var bld_reg := ArtKitBuildings.registry()
+	var b_missing: Array[String] = []
+	for name in bld_reg:
+		if not BUILDING_BUDGETS.has(name):
+			b_missing.append(String(name))
 	for name in BUILDING_BUDGETS:
+		if not bld_reg.has(name):
+			b_missing.append("budget for unregistered building '%s'" % name)
+	_ok(b_missing.is_empty(),
+			"every one of the %d registered buildings has a budget, and no budget is an orphan"
+			% bld_reg.size(), str(b_missing))
+
+	var heaviest_building := 0
+	var heaviest_building_name := ""
+	for name in bld_reg:
+		if not BUILDING_BUDGETS.has(name):
+			continue
 		var budget: int = BUILDING_BUDGETS[name]
 		var peak := 0
 		for i in ArtKitBuildings.HOUSE_VARIANTS:
@@ -508,22 +597,33 @@ func _check_budgets() -> void:
 				t += p.tri
 			peak = maxi(peak, t)
 		if peak > budget:
-			over.append("%s %d > %d" % [name, peak, budget])
+			b_over.append("%s %d > %d" % [name, peak, budget])
+		if peak > heaviest_building:
+			heaviest_building = peak
+			heaviest_building_name = String(name)
 	# The OSM wrapper scales with storeys, so it is budgeted per storey.
 	var w0 := 0
 	for p in ArtKitBuildings.wrap_footprint(
 			PackedVector2Array([Vector2(0, 0), Vector2(12, 0), Vector2(12, 9), Vector2(0, 9)]), 1, 0.4, 5):
 		w0 += p.tri
 	if w0 > WRAP_BUDGET_PER_STOREY:
-		over.append("wrap_footprint %d > %d/storey" % [w0, WRAP_BUDGET_PER_STOREY])
-	_ok(over.is_empty(), "all building budgets hold", str(over))
-	print("       heaviest prop %d tris, heaviest building %d tris, OSM footprint %d/storey"
-			% [worst, 1100, w0])
+		b_over.append("wrap_footprint %d > %d/storey" % [w0, WRAP_BUDGET_PER_STOREY])
+	_ok(b_over.is_empty(), "all building budgets hold", str(b_over))
+	# Measured, not quoted. This used to print a hardcoded 1100 for "heaviest
+	# building", which is `walk_up_block`'s *budget* - so the number in the output
+	# would have kept claiming 1100 no matter what the kit actually built.
+	print("       heaviest prop %s %d tris, heaviest building %s %d tris, OSM footprint %d/storey"
+			% [worst_name, worst, heaviest_building_name, heaviest_building, w0])
 
 	# The city's total, which is the number that actually decides whether this is
-	# affordable: 2198 OSM footprints at one storey each.
-	_ok(w0 * 2198 < 2_000_000,
-			"2198 OSM footprints stay under 2 M triangles (%d)" % (w0 * 2198))
+	# affordable. 2198 is the world's footprint count, not the kit's: it belongs to
+	# the OSM data, and artkit cannot read World/ without making a kit that is
+	# supposed to stand alone depend on files other agents are still writing. It is
+	# a declared input, quoted once here. What the kit owns is `w0`, and that is
+	# measured directly above. 2 M is a design budget.
+	_ok(w0 * OSM_FOOTPRINTS < 2_000_000,
+			"%d OSM footprints stay under 2 M triangles (%d)"
+			% [OSM_FOOTPRINTS, w0 * OSM_FOOTPRINTS])
 
 
 # =============================================================================
@@ -537,7 +637,7 @@ func _check_batching() -> void:
 	var reg := ArtKitProps.registry()
 	var b := ArtKitBatch.new("test")
 	var placed := 0
-	for rep in 25:
+	for rep in SCATTER_REPS:
 		for name in reg:
 			for v in ArtKitProps.VARIANTS:
 				var xform := ArtKitBatch.place(Vector3(float(rep) * 40.0, 0.0, 0.0),
@@ -546,34 +646,50 @@ func _check_batching() -> void:
 				placed += 1
 	print("       %d placements, %d parts, %d M triangles"
 			% [placed, placed, b.triangles() / 1000000])
-	# 25 copies of 22 props x 3 variants = 1650 objects, each 1-3 parts. The point
-	# is the ratio: if anything here regressed, group_count() would climb toward
-	# the instance count and the draw calls would go with it.
+	# Every registered prop, in every variant, once per repetition, and nothing
+	# else. Derived from the registry and `VARIANTS` rather than typed in: this
+	# used to say 1650, which is 25 x 22 x 3, and `contact_shadow` made it 1725
+	# the moment it was added to the registry. A count that only changes when a
+	# prop is added tests nothing except "somebody remembered to edit a number" -
+	# the two checks below it are the ones that actually catch a regression.
+	var expected_placements := reg.size() * ArtKitProps.VARIANTS * SCATTER_REPS
+	_ok(placed == expected_placements,
+			"every registered prop placed once per variant, %d times (%d of %d)"
+			% [SCATTER_REPS, placed, expected_placements])
+	# The count the batching claim actually rests on, derived the same way: the
+	# distinct (mesh, material) signatures the whole prop set can produce. The
+	# point is the ratio - if anything regressed, group_count() would climb
+	# toward the instance count and the draw calls would go with it.
 	var signatures := {}
 	for name in reg:
 		for v in ArtKitProps.VARIANTS:
 			for p in ArtKitProps.variant(name, v):
 				signatures[p.signature()] = true
-	_ok(placed == 1650, "1650 objects placed (%d)" % placed)
 	_ok(b.group_count() == signatures.size(),
 			"exactly one group per distinct (mesh, material): %d groups, not %d"
 			% [b.group_count(), b.instances()])
 	_ok(b.instances() == _expected_instances(reg),
 			"every part became an instance (%d)" % b.instances())
+	# 20x is a design budget, not a measurement: it is the ratio standards.md
+	# claims, and the number that would move if the kit regressed is the measured
+	# group count above.
 	_ok(b.group_count() * 20 <= b.instances(),
 			"draw calls are at least 20x fewer than instances (%d vs %d)"
 			% [b.group_count(), b.instances()])
+	# 4 M is the scene triangle ceiling, a design budget.
 	_ok(b.triangles() < 4_000_000, "the scatter stays under 4 M triangles (%d)" % b.triangles())
 
-	# Adding 1000 copies of one prop must not add a single draw call. This is the
-	# regression guard for the footgun the memoisation exists to kill.
+	# Adding a thousand-odd copies of one prop must not add a single draw call.
+	# This is the regression guard for the footgun the memoisation exists to kill.
 	var one := ArtKitBatch.new("one")
 	var parts := ArtKitProps.variant("streetlight", 0)
-	for i in 1300:
+	for i in REPEAT_COPIES:
 		one.add_array(parts, ArtKitBatch.place(Vector3(float(i) * 8.0, 0.0, 0.0), 0.0, 1.0))
 	_ok(one.group_count() == parts.size(),
-			"1300 streetlights are %d draw calls, one per material" % one.group_count())
-	_ok(one.instances() == 1300 * parts.size(), "all 1300 streetlights instanced")
+			"%d streetlights are %d draw calls, one per material"
+			% [REPEAT_COPIES, one.group_count()])
+	_ok(one.instances() == REPEAT_COPIES * parts.size(),
+			"all %d streetlights instanced" % REPEAT_COPIES)
 
 	# The built node tree has to be right, not just the counters: one child per
 	# group, a material on each, a culling box that covers the batch.
@@ -611,11 +727,15 @@ func _check_batching() -> void:
 	# at one draw call per material rather than 2198.
 	var mb := ArtKitBatch.new("city")
 	var count := 400
+	var city_mats := {}
 	for i in count:
 		var w := 9.0 + float(i % 7) * 1.3
 		var d := 8.0 + float(i % 5) * 1.7
 		var poly := PackedVector2Array([Vector2(0, 0), Vector2(w, 0), Vector2(w, d), Vector2(0, d)])
-		mb.add_array(ArtKitBuildings.wrap_footprint(poly, 1 + i % 2, 0.4, i),
+		var fp: Array = ArtKitBuildings.wrap_footprint(poly, 1 + i % 2, 0.4, i)
+		for p in fp:
+			city_mats[p.mat] = true
+		mb.add_array(fp,
 				ArtKitBatch.place(Vector3(float(i % 20) * 30.0, 0.0, float(i / 20) * 30.0),
 						ArtKitBatch.scatter_yaw(i), 1.0))
 	# Every footprint is its own mesh, so the group count is the part count and
@@ -627,9 +747,20 @@ func _check_batching() -> void:
 	root.add_child(mparent)
 	var merged := mb.build_merged(mparent)
 	print("       %d unique buildings -> %d draw calls" % [count, merged.get_child_count()])
-	# 15 is not a guess: 6 wall colours + 5 roof colours + concrete + dark glass +
-	# lit glass + interior glow. It is the size of the palette, not the size of
-	# the city, which is the entire point.
+	# The invariant, derived: baking collapses the whole city to exactly one node
+	# per distinct material it used. Stated this way it survives a palette change,
+	# and it is the claim that actually matters - 400 buildings, 8000-odd meshes,
+	# 15 draw calls. The old check only said "<= 16" and would have been equally
+	# happy with 16 nodes for 16 buildings.
+	_ok(merged.get_child_count() == city_mats.size(),
+			"baking collapses %d buildings to one node per material (%d nodes, %d materials)"
+			% [count, merged.get_child_count(), city_mats.size()])
+	# The ceiling on that number is a design budget: it is the size of the
+	# building palette (wall colours, roof colours, concrete, dark glass, lit
+	# glass, interior glow), not the size of the city, which is the entire point.
+	# It is the one number here that must be raised by hand when a building
+	# material is added, and it is a palette budget rather than a data-dependent
+	# count, so it is deliberately left as a typed constant.
 	_ok(merged.get_child_count() <= 16,
 			"baking %d unique buildings gives <= 16 draw calls (got %d)"
 			% [count, merged.get_child_count()])
@@ -669,7 +800,142 @@ func _check_batching() -> void:
 
 
 # =============================================================================
-# 6. NO EXTERNAL ASSETS
+# 6. THE CONSUMER
+# =============================================================================
+
+## The kit had no consumer: nine files, no caller, and a check that proved the
+## library works while nothing proved it is *callable*. `scatter.gd` is the one
+## line the world builder adds, so it is checked the way a library is checked -
+## by calling it, including the way it is meant to be called.
+func _check_consumer() -> void:
+	_section("consumer - ArtKitScatter")
+	var placements: Array = []
+	# 600 props across four names: enough that a per-placement mesh would show up
+	# as a node count in the hundreds, which is the whole failure being guarded.
+	var prop_names := ["palm_coco", "tree_rain_tree", "streetlight", "wire_span"]
+	for i in 600:
+		placements.append({
+			"prop": String(prop_names[i % prop_names.size()]),
+			"pos": Vector3(float(i) * 3.0, 0.0, float(i / 40) * 3.0),
+			"yaw": ArtKitBatch.scatter_yaw(i),
+		})
+	# 120 real-ish footprints, half as bare polygons (the OSM shape a consumer
+	# actually has) and half as dictionaries with a storey count.
+	for i in 120:
+		var poly := PackedVector2Array([Vector2(0, 0), Vector2(9.0 + i % 5, 0.0),
+				Vector2(9.0 + i % 5, 8.0 + i % 3), Vector2(0, 8.0 + i % 3)])
+		if i % 2 == 0:
+			placements.append(poly)
+		else:
+			placements.append({"footprint": poly, "storeys": 1 + i % 3, "seed": i})
+	# A named building, and then the malformed entries a trust boundary has to
+	# survive: an unknown prop, an unknown building, a two-point polygon, a
+	# string, a dict with no key, a non-Vector3 pos and a negative scale.
+	placements.append({"building": "qld_house", "pos": Vector3(0, 0, 500)})
+	var bad_from := placements.size()
+	placements.append({"prop": "not_a_prop", "pos": Vector3.ZERO})
+	placements.append({"building": "not_a_building", "pos": Vector3.ZERO})
+	placements.append(PackedVector2Array([Vector2(0, 0), Vector2(1, 1)]))
+	placements.append("a string")
+	placements.append({"nothing": 1})
+	placements.append({"prop": "bollard", "pos": "not a vector"})
+	placements.append({"prop": "bollard", "pos": Vector3.ZERO, "scale": -1.0})
+	placements.append({"prop": "bollard"})
+	placements.append({"footprint": "not an array"})
+	var bad := placements.size() - bad_from
+
+	var scatter := ArtKitScatter.new()
+	root.add_child(scatter)
+	var st := scatter.populate(placements)
+
+	# Nothing malformed is allowed through, and everything malformed is reported
+	# rather than thrown: a scatter that raises halfway leaves a half-built suburb
+	# with no way to tell a bad entry from a bug in the kit.
+	_ok(int(st["props"]) == 600 and int(st["buildings"]) == 121,
+			"every valid placement is placed: %d props, %d buildings"
+			% [int(st["props"]), int(st["buildings"])])
+	_ok((st["skipped"] as Array).size() == bad,
+			"all %d malformed entries are skipped and reported, not thrown (%s)"
+			% [bad, str(st["skipped"])])
+
+	# The regression that matters, stated as two derived counts rather than a
+	# guessed threshold. The instanced side must equal the number of distinct
+	# (mesh, material) signatures the placements can produce - computed here
+	# independently, from `variant()` directly - so it is bounded by the variant
+	# set and not by the 600. The baked side must equal the number of distinct
+	# materials, because every footprint is a unique mesh and baking is the only
+	# thing that collapses them.
+	var expect_sigs := {}
+	for i in 600:
+		var sig_name := String(prop_names[i % prop_names.size()])
+		for p in ArtKitProps.variant(sig_name, posmod(i, ArtKitProps.VARIANTS)):
+			expect_sigs[p.signature()] = true
+	_ok(int(st["prop_nodes"]) == expect_sigs.size(),
+			"600 props collapse to one node per distinct signature (%d nodes, %d signatures)"
+			% [int(st["prop_nodes"]), expect_sigs.size()])
+	_ok(int(st["prop_nodes"]) < int(st["props"]),
+			"prop draw calls do not scale with placements (%d nodes for %d props)"
+			% [int(st["prop_nodes"]), int(st["props"])])
+
+	var expect_mats := {}
+	for i in 120:
+		var fp := PackedVector2Array([Vector2(0, 0), Vector2(9.0 + i % 5, 0.0),
+				Vector2(9.0 + i % 5, 8.0 + i % 3), Vector2(0, 8.0 + i % 3)])
+		# Mirrors the placement loop above exactly, including the storey count,
+		# so this is a second derivation and not a copy of the first one.
+		var storeys := 1 if i % 2 == 0 else 1 + i % 3
+		for p in ArtKitBuildings.wrap_footprint(fp, storeys, 0.4, i):
+			expect_mats[p.mat] = true
+	for p in ArtKitBuildings.variant("qld_house", 0):
+		expect_mats[p.mat] = true
+	_ok(int(st["building_nodes"]) == expect_mats.size(),
+			"121 buildings bake to one node per material (%d nodes, %d materials)"
+			% [int(st["building_nodes"]), expect_mats.size()])
+	_ok(int(st["triangles"]) > 0 and int(st["instances"]) > 0,
+			"the consumer reports real counts (%d instances, %d triangles)"
+			% [int(st["instances"]), int(st["triangles"])])
+
+	# The node tree the caller ends up parenting into must actually be built.
+	var mmi := 0
+	var mi := 0
+	for child in scatter.get_children():
+		for grand in child.get_children():
+			if grand is MultiMeshInstance3D:
+				mmi += 1
+			elif grand is MeshInstance3D:
+				mi += 1
+	_ok(mmi == int(st["prop_nodes"]) and mi == int(st["building_nodes"]),
+			"the emitted node tree matches the reported draw calls (%d instanced, %d baked)"
+			% [mmi, mi])
+
+	# Determinism. An RNG in the variant choice would make every number above
+	# unreproducible, including this suite's own.
+	var again := ArtKitScatter.new()
+	root.add_child(again)
+	var st2 := again.populate(placements)
+	_ok(int(st2["triangles"]) == int(st["triangles"]) \
+			and int(st2["nodes"]) == int(st["nodes"]),
+			"the same placements give the same city (%d nodes, %d triangles)"
+			% [int(st2["nodes"]), int(st2["triangles"])])
+
+	# An empty list is not an error and must not emit a draw call.
+	var empty := ArtKitScatter.new()
+	root.add_child(empty)
+	var st3 := empty.populate([])
+	_ok(int(st3["nodes"]) == 0 and empty.get_child_count() == 0,
+			"an empty placement list emits nothing")
+
+	print("       %d placements -> %d draw calls, %d triangles, %d skipped"
+			% [placements.size(), int(st["nodes"]), int(st["triangles"]),
+			(st["skipped"] as Array).size()])
+
+	scatter.free()
+	again.free()
+	empty.free()
+
+
+# =============================================================================
+# 7. NO EXTERNAL ASSETS
 # =============================================================================
 
 ## The brief forbids downloaded models and textures. The only way to keep it that

@@ -41,7 +41,8 @@ rules below are checked, not documented-and-hoped-for.
 | `batch.gd` | the MultiMesh collapser. Turns parts into draw calls. |
 | `props.gd` | street furniture and vegetation. |
 | `buildings.gd` | buildings, including the wrapper for the 2198 real OSM footprints. |
-| `artkit_check.gd` | this document's enforceable claims. 78 checks. |
+| `scatter.gd` | the consumer. One node, one line at the call site: placements in, draw calls out. |
+| `artkit_check.gd` | this document's enforceable claims. 92 checks. |
 
 ## 3. Units, axes, origin
 
@@ -129,7 +130,7 @@ for the life of the process.
 4. **One material per part.** Generators call `ArtKitPart.weld()`, which merges
    same-material parts into one mesh and drops empty ones, so a returned array
    has exactly one entry per distinct material. The check asserts
-   `parts.size() == distinct material count` for all 26 props and 5 buildings,
+   `parts.size() == distinct material count` for all 23 props and 4 buildings,
    because a generator that quietly returns two parts in the same material is a
    generator that doubled one building's draw calls.
 
@@ -143,8 +144,9 @@ vanishes when you turn away from one particular house), and sets
 
 - **`build()` — instancing**, for anything repeated. Meshes must be shared
   resources, which is why every generator is memoised and why `variant()` is the
-  front door. Measured: the whole prop set placed 1650 times comes to **126 draw
-  calls for 3150 instances**, and 1300 streetlights come to **2**.
+  front door. Measured: the whole prop set — 23 props × 3 variants, placed 25
+  times over, 1725 placements — comes to **129 draw calls for 3225 instances**,
+  and 1300 streetlights come to **2**.
 - **`build_merged()` — baking**, for anything unique, which includes all 2198 OSM
   footprints because every one of them is a different mesh. Measured: 400 unique
   wrapped footprints bake to **15 draw calls** — 6 wall colours + 5 roof colours +
@@ -164,6 +166,30 @@ are the documented front doors. The check asserts both the sharing and that two
 variants are genuinely different meshes, because a cache that returns the same
 mesh for every variant would pass a naive sharing test and render one tree 1600
 times.
+
+### The consumer, and the one line that installs it
+
+`scatter.gd` is the kit's own caller, so the four rules above are enforced once
+instead of being a thing every consumer has to remember:
+
+```gdscript
+ArtKitScatter.attach(self, placements)
+```
+
+`placements` is an array of bare `PackedVector2Array` OSM footprints (already in
+world coordinates), or dictionaries for anything else — `{"prop": …, "pos": …}`,
+`{"building": …, "pos": …}`, `{"footprint": …, "storeys": …}`. The node picks the
+strategy (props instanced, buildings and footprints baked), picks the mesh variant
+from the entry's index so the same placements always give the same city, and
+returns a stats dictionary of draw calls, instances, triangles and skipped
+entries. Malformed entries are skipped and named, never thrown: a scatter that
+raises halfway leaves a half-built suburb with no way to tell a caller's bad
+entry from a bug in the kit.
+
+One detail cost real debugging, so it is written down. `variant()` is memoised
+per index *within* the variant set, so the index has to be wrapped:
+`posmod(i, VARIANTS)`. Pass the raw placement index and every placement generates
+its own mesh — measured, 600 props went from 24 draw calls to 1200. Nothing errors.
 
 ## 7. Triangle budgets
 
@@ -197,6 +223,7 @@ at 7000 is not, and no amount of draw-call collapsing saves it.
 | `palm_coco` | 300 | 9.5–13 m, heavy crown, fruit bunch |
 | `palm_fan` | 350 | |
 | `palm_areca` | 560 | clumps of stems; the mass filler that is not a clone |
+| `contact_shadow` | 4 | the decal under everything. Exactly its measured cost, no headroom: a contact shadow that costs what a bollard does is one nobody can afford to put under 1600 palms |
 
 | Building | Budget | |
 |---|---:|---|
@@ -235,6 +262,13 @@ Listed rather than quietly shipped.
 - **No per-instance colour.** See §5.
 - **No vehicles, no pedestrians, no road surface.** Those are other briefs; this
   kit supplies the asphalt materials and nothing else.
+- **Nothing in the game calls the kit yet.** `scatter.gd` is written, checked and
+  ready — `ArtKitScatter.attach(self, placements)` is the whole integration — but
+  `World/world_builder.gd` is owned by the road agent and three agents are
+  building into it at once, so the line has not been added. Until it is, this is
+  still a library with no consumer, and the batching it proves is not yet paying
+  for itself. It is one line, in someone else's file, and that is the whole of
+  the remaining work.
 - **`artkit_check.gd` reads `ART_DIRECTION.md` from `res://`.** Fine in the
   editor and in headless runs; if this ever needs to run from an exported PCK,
   the doc has to be added to the export filter first.
