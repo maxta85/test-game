@@ -611,6 +611,16 @@ def check_gui_bat():
     check("pauses when the GUI file is missing",
           "pause" in src and "exit /b 1" in src)
     check("falls back to pwsh when powershell.exe is absent", "where powershell" in src)
+    # Regression: this used to be `start "" /min "%PSEXE%" ...`. `start`
+    # detaches, so stdout and stderr went to a minimised console that closed
+    # when the .bat exited - a launcher that crashed on launch was
+    # indistinguishable from one that had never started. It cost three failed
+    # attempts to diagnose a real WinForms bug. `code` has rem lines stripped,
+    # so the prose explaining the old form cannot satisfy or fail this.
+    check("does not detach the launcher, so failures stay visible",
+          not re.search(r"^\s*start\s", code, re.I | re.M),
+          "a detached launcher cannot say why it failed")
+    check("pauses on a non-zero exit", "if errorlevel 1" in code)
 
     # The same bug this launcher shipped once: an unbound argument. The GUI has
     # no -Action at all, so this only guards against one being introduced.
