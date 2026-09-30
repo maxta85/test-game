@@ -39,8 +39,60 @@ func build(g: RoadGraph) -> void:
 	_streetlights()
 	_power_lines()
 	_car_meet()
+	_skyline()
 	_flush_batches()
 	_bake_collision()
+
+
+## The Cairns CBD, on the horizon.
+##
+## Manunda is low-rise, so without something to look at the sky is a flat empty
+## band and the suburb reads as a diorama. Cairns has a real CBD a few km inland
+## and it is honest to put it there: a ring of towers with lit window grids and
+## aircraft warning beacons. It is also the cheapest depth cue in the game - the
+## whole thing is unlit boxes in two MultiMeshes, and it gives every long shot a
+## floor and every straight a vanishing point.
+func _skyline() -> void:
+	var tower_mesh := _box_mesh(Vector3(1, 1, 1), Vector3.ZERO)
+	var glass_key := "tower_glass"
+	_materials[glass_key] = MatLib.wall(Color(0.055, 0.060, 0.075))
+	var win_key := "tower_window"
+	if not _materials.has(win_key):
+		_materials[win_key] = MatLib.emissive(Color(0.85, 0.88, 1.0), 0.9)
+	var beacon_key := "tower_beacon"
+	if not _materials.has(beacon_key):
+		_materials[beacon_key] = MatLib.emissive(Color(1.0, 0.15, 0.10), 6.0)
+
+	var centre := Vector2(-150.0, 620.0)      ## inland, the way Cairns actually is
+	var towers := 0
+	for i in 46:
+		var a: float = TAU * float(i) / 46.0 + rng.randf_range(-0.05, 0.05)
+		var dist: float = rng.randf_range(1500.0, 2300.0)
+		var p: Vector2 = centre + Vector2(cos(a), sin(a)) * dist
+		var w: float = rng.randf_range(26.0, 52.0)
+		var d: float = rng.randf_range(26.0, 52.0)
+		# A few real towers, mostly low CBD blocks. Uniform height reads as a fence.
+		var h: float = rng.randf_range(45.0, 150.0) if rng.randf() < 0.3 else rng.randf_range(18.0, 55.0)
+		var basis := Basis.from_euler(Vector3(0, a, 0))
+		var base := Vector3(p.x, 0.0, p.y)
+		_add("skyline", tower_mesh,
+			Transform3D(basis, base + Vector3(0, h * 0.5, 0)).scaled_local(Vector3(w, h, d)), glass_key)
+
+		# Window bands. A tower with no lit windows is a black rectangle at night,
+		# which is worse than no tower at all.
+		var bands: int = clampi(int(h / 14.0), 2, 9)
+		for b in bands:
+			if rng.randf() < 0.35:
+				continue
+			var y: float = h * (float(b) + 0.5) / float(bands)
+			_add("skyline", tower_mesh,
+				Transform3D(basis, base + basis * Vector3(0, y, -d * 0.5 - 0.3))
+					.scaled_local(Vector3(w * 0.86, h / float(bands) * 0.42, 0.4)), win_key)
+		if h > 90.0:
+			_add("skyline", tower_mesh,
+				Transform3D(basis, base + Vector3(0, h + 1.5, 0)).scaled_local(Vector3(1.6, 3.0, 1.6)), beacon_key)
+		towers += 1
+	print("[World] %d CBD towers on the horizon" % towers)
 
 
 # --------------------------------------------------------------------- batches
@@ -506,11 +558,24 @@ func _blocks() -> Array:
 			if ok and r > 0.0:
 				out.append({
 					"centre": p, "half": Vector2(r, r), "angle": 0.0,
-					"commercial": absf(p.x) < 120.0 and p.y < 150.0 and p.y > -160.0,
+					# Shops follow the big roads, not a hardcoded patch of the map.
+					# The first pass put the commercial strip near the origin while
+					# the racing happens three blocks west, so the streets anyone
+					# actually drives were the only ones with nothing on them.
+					"commercial": _road_class_at(p) >= RoadGraph.RoadClass.ARTERIAL,
 					"industrial": p.x < -280.0 and p.y > 200.0,
 				})
 				break
 	return out
+
+
+## Class of the road nearest a point, or LANE if the block is nowhere near one.
+func _road_class_at(p: Vector2) -> int:
+	var near: Dictionary = graph.nearest_road(Vector3(p.x, 0, p.y))
+	var eid: int = int(near["edge"])
+	if eid < 0 or eid >= graph.edges.size():
+		return RoadGraph.RoadClass.LANE
+	return int(graph.edges[eid]["class"])
 
 
 func _house(p: Vector2, ang: float, wall_mesh: ArrayMesh, roof_mesh: ArrayMesh,
@@ -602,8 +667,23 @@ func _shopfront(p: Vector2, ang: float, wall_mesh: ArrayMesh, roof_mesh: ArrayMe
 	l.light_color = MatLib.SODIUM if glow != "neon_cyan" else MatLib.NEON_CYAN
 	l.light_energy = 4.5
 	l.omni_range = 26.0
+	l.light_volumetric_fog_energy = 0.0
 	l.position = base + basis * Vector3(0, 3.2, -d * 0.5 - 2.0)
 	lights.append(l)
+
+	# A vertical sign on the corner. This is the single cheapest thing that makes
+	# a street read as a city at night: a saturated bar of light standing above
+	# the roofline, doubled in the wet road, visible from three blocks away.
+	if rng.randf() < 0.85:
+		var sign_col: Color = [MatLib.NEON_PINK, MatLib.NEON_CYAN, MatLib.SODIUM, Color(1.0, 0.25, 0.12)][rng.randi() % 4]
+		var sign_key := "sign_%s" % sign_col.to_html(false)
+		if not _materials.has(sign_key):
+			_materials[sign_key] = MatLib.emissive(sign_col, 3.2)
+		var sh := rng.randf_range(4.5, 8.0)
+		var side_x: float = (w * 0.5 - 0.5) * (1.0 if rng.randf() < 0.5 else -1.0)
+		_add("signs", window_mesh,
+			Transform3D(basis, base + basis * Vector3(side_x, h + sh * 0.5 - 0.3, -d * 0.5 - 0.2))
+				.scaled_local(Vector3(0.6, sh, 0.4)), sign_key)
 
 
 func _industrial_shed(p: Vector2, ang: float, wall_mesh: ArrayMesh, roof_mesh: ArrayMesh,
@@ -623,6 +703,7 @@ func _industrial_shed(p: Vector2, ang: float, wall_mesh: ArrayMesh, roof_mesh: A
 		l.light_color = MatLib.MERCURY
 		l.light_energy = 3.0
 		l.omni_range = 28.0
+		l.light_volumetric_fog_energy = 0.0
 		l.position = base + Vector3(0, h - 0.5, -d * 0.5 - 1.0)
 		lights.append(l)
 
@@ -721,9 +802,14 @@ func _streetlights() -> void:
 
 			var l := OmniLight3D.new()
 			l.light_color = MatLib.SODIUM
-			l.light_energy = 7.0
-			l.omni_range = 30.0
+			l.light_energy = 45.0
+			l.omni_range = 34.0
 			l.omni_attenuation = 1.25
+			# 1121 lamps all injecting into a 70 m fog slab turns the sky into
+			# sodium soup - the exact failure night_env.gd warns about. Street
+			# lighting only needs to light tarmac; the fog is there for
+			# headlight beams, which stay volumetric.
+			l.light_volumetric_fog_energy = 0.0
 			l.position = tip - Vector3(0, 0.3, 0)
 			l.shadow_enabled = false   # hundreds of shadow-casting lights would melt a CPU raster
 			add_child(l)

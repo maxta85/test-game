@@ -38,7 +38,11 @@ static func noise_tex(size: int, freq: float, octaves: int, seed_v: int,
 ## the aggregate, and a slight sheen so sodium lights smear along it.
 static func wet_asphalt(uv_scale: float = 0.06) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(0.030, 0.032, 0.038)
+	# Wet asphalt is a near-mirror, so almost all the light it returns is
+	# specular reflection of the sky - and this sky is nearly black. Physically
+	# honest is also unreadable here, so the diffuse albedo is lifted well past
+	# real tarmac. It is the only thing keeping the road visible under a lamp.
+	m.albedo_color = Color(0.105, 0.108, 0.122)
 	# Wet tarmac is a mirror with a rough patch here and there. Roughness is
 	# driven by a noise texture so the reflection breaks up instead of reading
 	# as a uniform sheet of plastic.
@@ -48,7 +52,16 @@ static func wet_asphalt(uv_scale: float = 0.06) -> StandardMaterial3D:
 	m.metallic_specular = 1.0
 	m.uv1_scale = Vector3(uv_scale, uv_scale, uv_scale)
 	m.uv1_triplanar = true
+	# The aggregate noise *modulates* the albedo, it does not replace it. Fed
+	# raw, FastNoiseLite averages ~0.5 and silently halves every value written
+	# above, which is how the road stayed invisible no matter how bright the
+	# lamps got. A ramp of 0.72-1.0 keeps the speckle and loses ~14%.
 	m.albedo_texture = noise_tex(256, 0.9, 4, 11)
+	var albedo_ramp := Gradient.new()
+	albedo_ramp.set_color(0, Color(0.72, 0.72, 0.72))
+	albedo_ramp.set_color(1, Color(1.0, 1.0, 1.0))
+	var albedo_tex := m.albedo_texture as NoiseTexture2D
+	albedo_tex.color_ramp = albedo_ramp
 	m.normal_enabled = true
 	m.normal_texture = noise_tex(256, 1.6, 5, 23, true)
 	m.normal_scale = 0.28
