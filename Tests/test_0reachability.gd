@@ -1,0 +1,240 @@
+extends RefCounted
+## The reachability invariant: the game boots, and it boots the merged code.
+##
+## The test runner and the game are different roots. `run_tests.gd` discovers any
+## `res://Tests/test_*.gd` and calls `run()` on it, so a suite passes happily
+## against a class the game never instantiates. That is how eleven merges landed
+## green and dead: 5037 lines of artkit, 2090 of menus, 1498 of OSM buildings,
+## 1122 of garage and 1054 of water, all with passing suites and no call site
+## anywhere between `project.godot` and the frame.
+##
+## So this suite closes the gap from the other end. It reads the scene
+## `project.godot` actually launches, instantiates it for real, and interrogates
+## the live tree. Nothing here is satisfied by a `class_name` sitting in
+## `.godot/global_script_class_cache.cfg` - every merged subsystem has one and
+## not one of them runs, which is exactly the trap that hid the UI problem.
+## A subsystem counts as shipped only when a node carrying its script is really
+## in the tree, having really had `_ready` run.
+##
+## NOT_SHIPPED is a to-do list, not an amnesty. Each entry prints a named
+## decision, and if the subsystem ever does get wired the entry fails until
+## somebody deletes it - a list that cannot be emptied is a list that rots into
+## a lie, and a lie here is the whole bug this file exists to prevent.
+##
+## The leading `0` in the filename is load-bearing, not decoration.
+## `run_tests.gd` sorts suites by filename, and this one has to go first: it is
+## the only suite that builds the game's real world, and Godot 4.3 segfaults
+## (signal 11) inside `main.gd`'s `_spawn_player()` if the shared physics and
+## render state has already been churned by the suites ahead of it. Verified
+## both ways - seventh in the order it crashed, first in the order it passes.
+## The digit sorts ahead of every letter and `./test.sh reachability` still
+## finds it, so the name carries the constraint without costing ergonomics.
+
+## Subsystems the game ships. Every one is wired in `Game/main.gd`; delete the
+## line that constructs it and this suite goes red while that subsystem's own
+## unit tests carry on passing, because those tests build their own copies.
+## `script` must be attached to a live node in the booted scene.
+const SHIPPED := [
+	{"id": "world builder", "script": "res://World/world_builder.gd"},
+	{"id": "night environment", "script": "res://World/night_env.gd"},
+	{"id": "car body", "script": "res://Systems/vehicle/car_body.gd"},
+	{"id": "car visual", "script": "res://Systems/vehicle/car_visual.gd"},
+	{"id": "chase camera", "script": "res://Systems/camera/chase_camera.gd"},
+	{"id": "player controller", "script": "res://Systems/player/player_controller.gd"},
+	{"id": "ai racer", "script": "res://AI/ai_racer.gd"},
+	{"id": "race hud", "script": "res://UI/race_hud.gd"},
+]
+
+## Merged, tested, and deliberately not reachable from the entry point.
+##
+## `module` is the file that has to still exist - it catches an entry left
+## behind by a deletion. `scripts` are the scripts that would appear on a live
+## node once wired. `nodes` are node names, for the subsystems whose entry point
+## is a static function that returns geometry rather than a node of its own:
+## `OSMBuildings.build()` parents named meshes into WorldBuilder and never
+## instantiates itself, so the emitted node names are the only honest witness.
+const NOT_SHIPPED := [
+	{
+		"id": "ui menu flow",
+		"module": "res://UI/menu_flow.gd",
+		"scripts": ["res://UI/menu_flow.gd"],
+		"why": "9aa3a59 merged 9 files; Game/main.gd boots straight into _start_first_race() with no menu gate",
+	},
+	{
+		"id": "osm buildings",
+		"module": "res://World/osm_buildings.gd",
+		"nodes": ["WindowWarm", "WindowCool"],
+		"why": "95e3fa2 extracted 2198 real footprints; WorldBuilder._buildings() still invents its own boxes",
+	},
+	{
+		"id": "osm water",
+		"module": "res://World/osm_water.gd",
+		"scripts": ["res://Systems/water/water_surface.gd"],
+		"why": "fc491b2 water is not one of WorldBuilder.build()'s 14 steps; OSMWater.surface() returns a WaterSurface",
+	},
+	{
+		"id": "garage",
+		"module": "res://Systems/garage/garage.gd",
+		"scripts": ["res://Systems/garage/garage_screen.gd"],
+		"why": "749255e Garage is RefCounted state behind GarageScreen, whose only entry point is MenuFlow's garage_requested",
+	},
+	{
+		"id": "audio",
+		"module": "res://Audio/audio_director.gd",
+		"scripts": ["res://Audio/audio_director.gd", "res://Audio/audio_bridge.gd"],
+		"why": "AudioDirector is a Node but no autoload and no main.gd line constructs one",
+	},
+	{
+		"id": "traffic",
+		"module": "res://AI/traffic/traffic_manager.gd",
+		"scripts": ["res://Systems/traffic/pedestrians.gd"],
+		"why": "TrafficManager is RefCounted; Pedestrians is the only Node and WorldBuilder never spawns one",
+	},
+	{
+		"id": "gevp vehicle dynamics",
+		"module": "res://addons/gevp/scripts/vehicle.gd",
+		"scripts": ["res://addons/gevp/scripts/vehicle.gd", "res://addons/gevp/scripts/wheel.gd"],
+		"why": "addons/gevp has no [editor_plugins] block in project.godot, so the addon is not enabled",
+	},
+]
+
+## The scene the project really launches, taken from the engine's own parsed
+## settings rather than a guess. A hardcoded path would keep passing after
+## someone repoints run/main_scene, which is the failure this guards against.
+const ENTRY_SCRIPT := "res://Game/main.gd"
+
+## `Cfg`'s mutable profile. Booting the real game is not a free action: the entry
+## point enters a race at `main.gd:99`, and `RaceDirector.try_enter` debits the
+## entry fee off the autoload at `race_director.gd:71`. One shared Cfg serves
+## every suite in the run, so without this the reachability suite would quietly
+## spend the player's money and shift the figures `test_race` and `test_garage`
+## go on to assert against.
+const WALLET_FIELDS := ["money", "active_car", "heat_record"]
+const WALLET_CONTAINERS := ["owned_cars", "races_completed", "upgrades", "cosmetics"]
+
+var _live: Dictionary = {}
+var _live_nodes: Dictionary = {}
+
+
+func run(t: TestHarness) -> void:
+	# The bare `Cfg` identifier is not bound in a --script context, which is the
+	# same trap Systems/garage/garage.gd:58 documents, so it comes off the tree.
+	var loop := Engine.get_main_loop()
+	var wallet: Object = loop.root.get_node_or_null("Cfg") if loop is SceneTree else null
+	var saved := _snapshot(wallet)
+
+	var entry := await _boot_entry_point(t)
+	if entry != null:
+		_interrogate(entry, t)
+		await t.drop(entry)
+
+	_restore(wallet, saved)
+
+
+func _snapshot(wallet: Object) -> Dictionary:
+	var out := {}
+	if wallet == null:
+		return out
+	for f in WALLET_FIELDS:
+		out[f] = wallet.get(f)
+	for f in WALLET_CONTAINERS:
+		out[f] = (wallet.get(f) as Variant).duplicate(true)
+	return out
+
+
+func _restore(wallet: Object, saved: Dictionary) -> void:
+	if wallet == null:
+		return
+	for f in WALLET_FIELDS:
+		wallet.set(f, saved[f])
+	for f in WALLET_CONTAINERS:
+		wallet.set(f, saved[f])
+
+
+## Loads and instantiates the configured entry point into the live tree.
+## Returns null once anything is missing, so a broken boot reports its own
+## failure instead of cascading into a tree full of absent subsystems.
+func _boot_entry_point(t: TestHarness) -> Node:
+	var path := String(ProjectSettings.get_setting("application/run/main_scene", ""))
+	if not t.ok(path != "", "project.godot declares application/run/main_scene"):
+		return null
+	t.ok(path.begins_with("res://"), "entry scene is a project resource (%s)" % path)
+
+	var packed: Resource = load(path)
+	if not t.ok(packed is PackedScene, "%s loads as a PackedScene" % path):
+		return null
+	if not t.ok((packed as PackedScene).can_instantiate(), "%s can be instantiated" % path):
+		return null
+
+	var scene: Node = (packed as PackedScene).instantiate()
+	if not t.ok(scene != null, "%s instantiates to a node" % path):
+		return null
+
+	t.ok(_script_of(scene) == ENTRY_SCRIPT,
+		"the launched scene runs the real game script (%s)" % ENTRY_SCRIPT)
+
+	# The real _ready builds the whole block, so let it finish before looking.
+	t.tree.root.add_child(scene)
+	for i in 4:
+		await t.tree.process_frame
+	_collect(scene)
+	return scene
+
+
+## Walks the booted tree once and records every script and node name in it.
+func _collect(n: Node) -> void:
+	var s: Script = n.get_script()
+	if s != null and s.resource_path != "":
+		_live[s.resource_path] = true
+	_live_nodes[n.name] = true
+	for c in n.get_children():
+		_collect(c)
+
+
+func _script_of(n: Node) -> String:
+	var s: Script = n.get_script()
+	return "" if s == null else s.resource_path
+
+
+func _interrogate(entry: Node, t: TestHarness) -> void:
+	# The scene loading is not the same as the game booting. `is_node_ready` is
+	# the only claim here that main.gd's whole _ready completed rather than
+	# throwing three lines in - without it a half-built tree would still answer
+	# every question below, just with the answer "absent".
+	t.ok(entry.is_node_ready(), "the entry scene entered the tree and _ready ran to completion")
+
+	for s in SHIPPED:
+		t.ok(_live.has(s["script"]),
+			"shipped: %s is instantiated by the entry point (%s)" % [s["id"], s["script"]])
+
+	for n in NOT_SHIPPED:
+		_assert_not_shipped(n, t)
+
+
+func _assert_not_shipped(entry: Dictionary, t: TestHarness) -> void:
+	var id: String = entry["id"]
+	t.ok(ResourceLoader.exists(entry["module"]),
+		"not-shipped module still on disk: %s (%s)" % [id, entry["module"]])
+
+	var present := _witnesses_present(entry)
+	if present.is_empty():
+		t.ok(true, "NOT SHIPPED (recorded): %s - %s" % [id, entry["why"]])
+	else:
+		# ok(false) rather than fails(true): fails() prefixes "NOT ", and this
+		# sentence is already the negative case. A list that outlives the bug it
+		# recorded is the exact rot this file is here to prevent.
+		t.ok(false,
+			"%s is now reachable via %s but is still listed as NOT SHIPPED - delete its entry"
+			% [id, ", ".join(present)])
+
+
+## Which witnesses of a subsystem are live, if any. Empty means not shipped.
+func _witnesses_present(entry: Dictionary) -> Array:
+	var hits: Array = []
+	for p in entry.get("scripts", []):
+		if _live.has(p):
+			hits.append(p)
+	for nm in entry.get("nodes", []):
+		if _live_nodes.has(nm):
+			hits.append("node '%s'" % nm)
+	return hits
