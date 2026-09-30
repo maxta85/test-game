@@ -145,11 +145,31 @@ func _flush_batches() -> void:
 
 
 # --------------------------------------------------------------------- terrain
+## Half-extent the terrain has to cover, with margin.
+##
+## This cannot be a constant. It was 800, which was right for the old authored
+## block and wrong the moment the roads became real OpenStreetMap data: those
+## span -1192..1394 in X and -1501..1301 in Z, so roughly 700 m of real street
+## had no floor under it at all. A car that drifted out there fell through the
+## world with nothing to catch it. Derived from the graph so the next map change
+## cannot reopen the hole.
+func _terrain_extent() -> float:
+	var reach := 0.0
+	for e in graph.edges:
+		for nid in [int(e["a"]), int(e["b"])]:
+			var p := graph.node_pos(nid)
+			reach = maxf(reach, maxf(absf(p.x), absf(p.y)))
+	return maxf(800.0, reach + 120.0)
+
+
 func _terrain() -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var s := 800.0
-	var step := 16.0
+	var s := _terrain_extent()
+	# The cell count is held roughly constant as the extent grows, so covering
+	# four times the area does not quietly quadruple the triangle count and the
+	# collision mesh with it.
+	var step: float = maxf(16.0, s / 55.0)
 	for gz in range(-int(s / step), int(s / step)):
 		for gx in range(-int(s / step), int(s / step)):
 			var x0 := float(gx) * step
