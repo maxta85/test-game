@@ -9,7 +9,8 @@ source tree.
 1. Download **`CairnsAfterDark-Installer-0.1.0.zip`** (8 KB) from
    <https://github.com/maxta85/test-game/releases/tag/v0.1.0>.
 2. Extract it anywhere, e.g. `C:\Games\CairnsAfterDark`.
-3. Double-click **`CairnsAfterDark.bat`**.
+3. Double-click **`CairnsAfterDark-GUI.bat`** for the window, or
+   **`CairnsAfterDark.bat`** for the console. Both do exactly the same work.
 
 That is the whole install. The launcher then:
 
@@ -38,6 +39,7 @@ Actions:
 | `CairnsAfterDark.bat Install` | install / repair only |
 | `CairnsAfterDark.bat Update` | offer a newer release |
 | `CairnsAfterDark.bat Uninstall` | remove game + shortcuts, **keep saves** |
+| `CairnsAfterDark-GUI.bat` | the same four actions in a window, with a progress bar |
 
 `CairnsAfterDark.exe` can also just be run directly — it is a single
 self-contained file with the game data embedded (no sidecar `.pck`).
@@ -57,13 +59,58 @@ ships on every supported Windows and does all of it natively with no runtime
 dependency. An Electron shell would add ~180 MB and a Node runtime to do the
 same job with a larger supply chain. A `.bat` alone cannot show progress, ask
 a yes/no question, or hash a file without shelling out to `certutil`, so the
-`.bat` is a three-line shim that runs `install.ps1`.
+`.bat` is a three-line shim that runs `install.ps1`. The same argument settles
+the GUI: WinForms is a few hundred KB of a runtime that is already there.
+
+## The GUI
+
+`launcher-gui.ps1` is a **window**, not a launcher. It contains no install, no
+hash, no download, no shortcut and no delete of its own. Every button runs
+`install.ps1 -Action <name>` in a child process, so the code that does the work
+is the same code the console runs, and there is one implementation of the
+destructive paths rather than two.
+
+It adds the three things a console genuinely cannot do:
+
+- **a real progress bar** for the 181 MB download, and the install log
+  streaming into a window instead of a scrollback buffer,
+- **state at a glance** — installed or not, which build is pinned, the first
+  16 hex of the pinned digest, where the saves are — read from
+  `manifest.json` and from `install.ps1`'s own `Get-Manifest`,
+  `Test-ManifestMatchesFile` and `Get-RemoteManifest`,
+- **a Saves Folder button**, because `%APPDATA%` is deliberately outside the
+  install folder and a player will never find it otherwise.
+
+Two design points worth knowing, because they look odd:
+
+- **The download progress is the size of the file `install.ps1` is writing.**
+  `install.ps1` streams the payload to `%TEMP%\cad-*.part` and only moves it
+  into place once the digest matches, so the GUI polls that file's length. It
+  is a measurement, not a second downloader. BITS can buffer before flushing,
+  so the bar may sit at 0% and then jump.
+- **The child process, not a dot-source.** `install.ps1` downloads with a
+  blocking call and a WinForms window only repaints while its message loop
+  runs, so calling it in-process would freeze the window solid for the whole
+  fetch. Out of process the window stays live. The read-only helpers are still
+  loaded in-process, because the status pane needs the pinned digest and the
+  same hash comparison the installer uses.
+
+`CAD_GUI_HEADLESS=1` runs the launcher's wiring and exits without opening a
+window. That is what `Tools/verify_launcher.py` runs, and it is the only way
+the GUI half has been executed at all:
+
+```bash
+CAD_GUI_HEADLESS=1 APPDATA=/tmp/fake USERPROFILE=/tmp/fake \
+  pwsh -NoProfile -File windows/launcher-gui.ps1
+```
 
 ## Files here
 
 | File | Role |
 |---|---|
-| `CairnsAfterDark.bat` | entry point; shim to `install.ps1` |
+| `CairnsAfterDark.bat` | console entry point; shim to `install.ps1` |
+| `CairnsAfterDark-GUI.bat` | graphical entry point; shim to `launcher-gui.ps1` |
+| `launcher-gui.ps1` | the window: buttons, state, progress, log. Calls `install.ps1`, replaces none of it |
 | `install.ps1` | install / play / update / uninstall |
 | `manifest.json` | **pinned** version + SHA-256; generated, not hand-edited |
 | `package-windows.sh` | builds, checksums, bundles and publishes a release |
@@ -193,6 +240,17 @@ silent pass, when PowerShell or the network is absent.
   single flipped byte, a truncated payload and a missing file are all rejected,
   and `Invoke-Update -Quiet` stays silent instead of throwing when the remote
   is unreachable.
+- `launcher-gui.ps1` **parses with zero syntax errors** (2633 tokens,
+  PowerShell 7.6.6), and its launcher wiring **runs for real** under
+  `CAD_GUI_HEADLESS=1` on Linux: it loads `install.ps1` from beside itself,
+  reads `manifest.json`, resolves the same digest, and reaches the real
+  `Invoke-Install` under `-WhatIf` — which printed the installer's own plan and
+  stopped before the download.
+- The GUI's actions were checked to be exactly `install.ps1`'s `-Action` values,
+  each of which dispatches to exactly one function in that file. The
+  verifier also fails if the GUI ever gains a downloader, a hash, a shortcut, a
+  recursive delete or its own copy of the "does this look like a game install
+  folder" guard.
 - Godot 4.3 is the version everything is pinned to, end to end:
   `project.godot` declares the `4.3` feature set, the local editor is
   `4.3.stable.official.77dcf97d8`, and the `4.3.stable` Windows export
@@ -222,9 +280,13 @@ apply, and `Tools/verify_launcher.py` fails if that guard is ever removed.
 **Not verified — cannot be, on Linux:**
 
 - That the `.exe` runs at all on Windows. Never executed, on any machine.
+- That the GUI opens a window at all. `launcher-gui.ps1` has been parsed and
+  its wiring run, and nothing about the window — controls, layout, the
+  progress bar, the button handlers, the message boxes — has ever executed.
 - Shortcut creation (COM `WScript.Shell`), Start-menu and desktop paths.
 - BITS download and `WebClient` behaviour behind a real proxy, and whether
-  `Start-BitsTransfer` is present on the player's SKU.
+  `Start-BitsTransfer` is present on the player's SKU. This includes whether
+  the GUI's progress bar moves smoothly, which depends on how BITS flushes.
 - The uninstaller's actual recursive delete and shortcut removal.
 - The download path end-to-end on Windows: the URL pattern, the 302 to
   `release-assets.githubusercontent.com` and TLS 1.2 negotiation are reasoned
@@ -276,6 +338,69 @@ on a machine with no graphics driver at all.
    will, because the remote manifest does not resolve on `main` yet — see gap
    5 below).
 9. **Only then** look at SmartScreen, the missing icon, and crash triage.
+
+## Runbook: the GUI
+
+`launcher-gui.ps1` and `CairnsAfterDark-GUI.bat` **have never been executed on
+Windows**, and neither has `install.ps1` — see the section above. What *has*
+run is the file's launcher wiring, under `CAD_GUI_HEADLESS=1`, on Linux with
+PowerShell 7.6.6: it loads `install.ps1`, finds `manifest.json`, and reaches
+the real `Invoke-Install` under `-WhatIf`. No window has ever been created, no
+button has ever been pressed, and the console `.bat` is unchanged and remains
+the tested path.
+
+Do these in order. Steps 1–2 are cheap and catch most of what can be wrong;
+3–8 are the ones that can lose data or a player's evening.
+
+1. **The window opens at all.** Extract the bundle to e.g.
+   `C:\Games\CairnsAfterDarkGUI` (a *different* folder from step 1 of the
+   console runbook — two installs in one folder hides ordering bugs) and
+   double-click `CairnsAfterDark-GUI.bat`. Expect: a window titled *Cairns
+   After Dark*, a minimised console behind it, four lines of state, five
+   buttons, and `Ready.` or an update note. *A window that never appears is
+   the `-STA` apartment, a missing `launcher-gui.ps1`, or the pwsh-vs-Windows
+   PowerShell split; check the minimised console for the error.*
+2. **The state panel is right before you install anything.** It must read
+   *Not installed yet*, `Pinned : 0.1.0 (v0.1.0)`, `Digest : 636ebd59fac58bf2…`
+   (the first 16 hex of `manifest.json`, not a guess) and the `%APPDATA%` saves
+   path. If it says *Installed* on a fresh folder, stop and find out why.
+3. **Install, and watch the progress bar.** Press **Install / Repair**. The bar
+   must advance and the log must fill with `install.ps1`'s own lines
+   (`==> install: downloading…`, `==> verifying SHA-256`, `sha256 ok
+   (636ebd59fac58bf2…)`). Then *Done.*, and the state panel flips to
+   *Installed … (sha256 verified)*. *This is the step the GUI exists for: if
+   the bar sits at 0% and jumps at the end, that is the known BITS buffering
+   behaviour, not a failure.*
+4. **The console path still works after the GUI touched the folder.** Run
+   `CairnsAfterDark.bat` and confirm it prints *already installed and verified*
+   and skips the download. The two entry points must be interchangeable.
+5. **Repair.** Append a byte to `CairnsAfterDark.exe`
+   (`echo x >> CairnsAfterDark.exe`) and press **Install / Repair** again: the
+   state panel must change to *Installed, but NOT the pinned build*, and
+   pressing the button must re-download rather than trust the file. This is
+   `Test-ManifestMatchesFile` doing its job, read from the GUI.
+6. **Play.** Press **Play**. The game must start, and the window must come back
+   to the front with *Done.* Buttons must be re-enabled afterwards; if they
+   stay greyed, the engine's exit was never noticed.
+7. **Uninstall, with the confirmation.** Press **Uninstall**, then *No* at the
+   prompt — nothing may happen. Press it again and confirm *Yes*. The game and
+   the shortcuts must go and `%APPDATA%\CairnsAfterDark` must still be there.
+   *Then repeat the whole of console-runbook step 7 from this folder and from
+   a git checkout: the "does this look like a game install folder" guard lives
+   in `install.ps1` and the GUI must not be able to talk it out of firing.*
+8. **Check for Updates.** Press it. With the network up it will report *You
+   are up to date* (the remote manifest 404s — see gap 5 — so this is the
+   expected result, not a bug). Then make the remote differ (point
+   `manifest.json` at a newer tag on a branch) and press it again: the GUI must
+   ask first, and *Yes* must open a second console window that asks again and
+   is the one that downloads. *That double confirmation is deliberate: the
+   GUI's box is consent, `install.ps1`'s `Read-Host` is the engine's, and a
+   window-less child would hang forever waiting for an answer nobody can give.*
+9. **Saves Folder** opens `%APPDATA%\CairnsAfterDark` in Explorer, and creates
+   it if it is not there. **Close the window mid-download** (start a repair and
+   hit the X): it must refuse to close.
+10. **Only then** the polish: resize/DPI on a 4K screen, the minimised console
+    still being there afterwards, and whether the two windows fight for focus.
 
 ## Known gaps before this is genuinely shippable
 

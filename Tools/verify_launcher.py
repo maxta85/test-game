@@ -35,6 +35,8 @@ WIN = ROOT / "windows"
 INSTALL_PS1 = WIN / "install.ps1"
 MANIFEST = WIN / "manifest.json"
 BAT = WIN / "CairnsAfterDark.bat"
+GUI_PS1 = WIN / "launcher-gui.ps1"
+GUI_BAT = WIN / "CairnsAfterDark-GUI.bat"
 README = WIN / "README.md"
 PRESETS = ROOT / "export_presets.cfg"
 PROJECT = ROOT / "project.godot"
@@ -120,7 +122,8 @@ def git_ls_files():
 
 def check_files():
     head("files")
-    for p in (INSTALL_PS1, MANIFEST, BAT, README, PRESETS, PROJECT, WIN / "package-windows.sh"):
+    for p in (INSTALL_PS1, MANIFEST, BAT, GUI_PS1, GUI_BAT, README, PRESETS, PROJECT,
+              WIN / "package-windows.sh"):
         check("%s exists" % p.relative_to(ROOT), p.is_file())
 
     tracked = git_ls_files()
@@ -160,7 +163,7 @@ def referenced_paths():
         r"(?<![\w./-])((?:windows|build|Tools|Tests|World|Game|UI|AI|Audio|Systems|artkit|Vehicles|assets"
         r"|export_presets\.cfg|project\.godot)[/\w.-]*)")
     seen = []
-    for src in (README, INSTALL_PS1, BAT, WIN / "package-windows.sh"):
+    for src in (README, INSTALL_PS1, BAT, GUI_PS1, GUI_BAT, WIN / "package-windows.sh"):
         if not src.is_file():
             continue
         for line in read(src).splitlines():
@@ -376,6 +379,22 @@ def check_bat_argv_with_pwsh(pwsh):
 # ---------------------------------------------------------------------------
 
 
+def ps_syntax(pwsh, path):
+    """(ok, detail) - PowerShell's own parser on a file, if there is one to run."""
+    r = subprocess.run(
+        [pwsh, "-NoProfile", "-Command",
+         '$e=$null;$t=$null;'
+         '[void][System.Management.Automation.Language.Parser]::ParseFile('
+         '"%s",[ref]$t,[ref]$e);'
+         'if($e.Count){$e|%%{"line $($_.Extent.StartLineNumber): $($_.Message)"}}'
+         'else{"OK $($t.Count) tokens"}' % str(path).replace("'", "''")],
+        capture_output=True, text=True, timeout=180,
+    )
+    out = (r.stdout or "").strip()
+    ok = r.returncode == 0 and out.startswith("OK")
+    return ok, (out.replace("\n", " | ")[:300] if r.returncode == 0 or out else "rc=%d" % r.returncode)
+
+
 def check_ps_parse(pwsh):
     head("install.ps1 parses")
     if not pwsh:
@@ -383,23 +402,283 @@ def check_ps_parse(pwsh):
              "no PowerShell on this machine - get one from "
              "https://github.com/PowerShell/PowerShell/releases and set PWSH=")
         return
-    r = subprocess.run(
-        [pwsh, "-NoProfile", "-Command",
-         '$e=$null;$t=$null;'
-         '[void][System.Management.Automation.Language.Parser]::ParseFile('
-         '"%s",[ref]$t,[ref]$e);'
-         'if($e.Count){$e|%%{"line $($_.Extent.StartLineNumber): $($_.Message)"}}'
-         'else{"OK $($t.Count) tokens"}' % str(INSTALL_PS1).replace("'", "''")],
-        capture_output=True, text=True, timeout=180,
-    )
-    out = (r.stdout or "").strip()
-    check("install.ps1 has no syntax errors (%s)" % Path(pwsh).name,
-          r.returncode == 0 and out.startswith("OK"),
-          out.replace("\n", " | ")[:300] if r.returncode == 0 or out else "rc=%d" % r.returncode)
+    ok, detail = ps_syntax(pwsh, INSTALL_PS1)
+    check("install.ps1 has no syntax errors (%s)" % Path(pwsh).name, ok, detail)
 
 
 # ---------------------------------------------------------------------------
-# 7. export_presets.cfg: the preset the release is actually built from
+# 7. The GUI: a window over install.ps1, not a second launcher
+# ---------------------------------------------------------------------------
+
+# Operations that belong to install.ps1 and only to install.ps1. The GUI must
+# not contain any of them: a second downloader, hash, shortcut or recursive
+# delete is exactly what this file is not allowed to be, and the uninstaller is
+# the least-exercised code in the launcher - it has never run on Windows.
+ENGINE_ONLY = (
+    "Start-BitsTransfer", "DownloadFile", "WebClient", "Get-FileHash",
+    "Invoke-WebRequest", "releases/download", "WScript.Shell",
+    "Move-Item", "Remove-Item", "New-Shortcut", "isCheckout",
+    "does not look like a game install folder",
+)
+
+# Reading state is not the same as doing the job. These are the only engine
+# functions the GUI may call in-process, and only because they have no side
+# effects; every action goes through the child process instead.
+GUI_MAY_CALL = ("Get-Manifest", "Get-ManifestRepo", "Test-ManifestMatchesFile",
+                "Get-RemoteManifest")
+
+
+def strip_ps_comments(src):
+    """Drop the leading <# #> block and whole-line # comments.
+
+    Not a parser: trailing `# ...` comments are left in place. That is enough
+    here because it only has to stop prose from satisfying - or failing - the
+    checks below, and it fails safe (a missed match, which the checks report)
+    rather than inventing one.
+    """
+    out = src
+    if out.lstrip().startswith("<#"):
+        end = out.find("#>")
+        if end != -1:
+            out = out[end + 2:]
+    return "\n".join(l for l in out.splitlines() if not l.lstrip().startswith("#"))
+
+
+def install_action_surface():
+    """install.ps1's action names, and the function each one runs.
+
+    Read out of the file rather than kept as a hand-written list, so adding an
+    action to install.ps1 without giving the GUI a button - or the GUI a button
+    for an action that does not exist - is a failure below.
+    """
+    src = read(INSTALL_PS1)
+    vm = re.search(r"\[ValidateSet\(([^)]*)\)\]", src)
+    actions = re.findall(r"'([A-Za-z]+)'", vm.group(1)) if vm else []
+    sw = src.find("switch ($Action)")
+    block = src[sw:] if sw != -1 else ""
+    arms = {}
+    for name in actions:
+        m = re.search(r"'%s'\s*\{" % name, block)
+        if not m:
+            arms[name] = []
+            continue
+        end = len(block)
+        for other in actions:
+            if other == name:
+                continue
+            o = re.search(r"'%s'\s*\{" % other, block[m.end():])
+            if o:
+                end = min(end, m.end() + o.start())
+        arms[name] = re.findall(r"\bInvoke-[A-Za-z]+\b", block[m.end():end])
+    return actions, arms
+
+
+def check_gui(m):
+    head("launcher-gui.ps1")
+    if not (GUI_PS1.is_file() and GUI_BAT.is_file()):
+        check("the GUI exists", False, "windows/launcher-gui.ps1 or its .bat is missing")
+        return
+    raw = GUI_PS1.read_text(encoding="utf-8", errors="replace")
+    code = strip_ps_comments(raw)
+    engine = read(INSTALL_PS1)
+
+    check("Set-StrictMode is on", "Set-StrictMode" in code)
+    check("Stop on error", "$ErrorActionPreference = 'Stop'" in code)
+    check("loads install.ps1 from beside itself",
+          "Join-Path $PSScriptRoot 'install.ps1'" in code)
+
+    # --- the 1:1 contract: every action has a button, no button without one ---
+    actions, arms = install_action_surface()
+    launched = re.findall(r"Start-Engine\s+'([A-Za-z]+)'", code)
+    check("every install.ps1 action has a GUI button, and vice versa",
+          sorted(set(launched)) == sorted(set(actions)) and len(launched) == len(set(launched)),
+          "GUI: %s / install.ps1: %s" % (sorted(set(launched)), sorted(set(actions))))
+    for name in sorted(set(actions) & set(launched)):
+        fns = arms.get(name) or []
+        check("GUI action %r runs exactly one engine function" % name, len(fns) == 1,
+              "%s -> %s" % (name, fns or "NOT FOUND in install.ps1's switch"))
+
+    # --- it must not do the engine's job ---
+    found = [t for t in ENGINE_ONLY if t in code]
+    check("the GUI re-implements no engine operation", not found,
+          "found: %s" % ", ".join(found) if found else
+          "download, hash, move, delete, shortcut and the safety guard all stay in install.ps1")
+
+    # A GUI-side function with an engine name is the same bug wearing a hat.
+    engine_fns = set(re.findall(r"^function\s+([A-Za-z0-9-]+)", engine, re.M))
+    shadows = [f for f in re.findall(r"^function\s+([A-Za-z0-9-]+)", code, re.M)
+               if f in engine_fns]
+    check("the GUI defines no function that install.ps1 already defines", not shadows,
+          "shadowing: %s" % ", ".join(shadows) if shadows else
+          "install.ps1's %d functions are never redefined" % len(engine_fns))
+
+    called = {f for f in engine_fns if re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(f), code)}
+    extra = sorted(called - set(GUI_MAY_CALL) - {"Invoke-Install"})
+    check("the only engine functions the GUI calls in-process are the read-only ones",
+          not extra, "unexpected: %s" % ", ".join(extra) if extra
+          else "reads state with %s" % ", ".join(sorted(called & set(GUI_MAY_CALL))))
+
+    # Invoke-Install is allowed in exactly one place: the headless self-check,
+    # where $WhatIfOnly stops it before it downloads, writes or deletes. No
+    # other action function may be called in-process at all - if the GUI can
+    # reach one directly, the child process is no longer the only path to it.
+    action_fns = sorted({f for fns in arms.values() for f in fns})
+    self_at = code.find("CAD_GUI_HEADLESS")
+    self_end = code.find("exit 0", self_at)
+    selfcheck = code[self_at:self_end] if 0 <= self_at < self_end else ""
+    stray = sorted({f for f in action_fns
+                    for mm in re.finditer(r"(?<![\w-])%s(?![\w-])" % re.escape(f), code)
+                    if not (self_at <= mm.start() < self_end)})
+    check("no engine action is called in-process outside the -WhatIf self-check",
+          bool(action_fns) and not stray and bool(selfcheck) and
+          selfcheck.find("$WhatIfOnly = $true") != -1 and
+          selfcheck.find("$WhatIfOnly = $true") < selfcheck.find("Invoke-Install"),
+          "in-process, outside the self-check: %s" % ", ".join(stray) if stray else
+          "%s reach the child process; Invoke-Install runs under -WhatIf only"
+          % ", ".join(action_fns))
+
+    # --- the progress bar reads the engine's own partial file ---
+    check("progress is driven by the file install.ps1 downloads to",
+          "cad-*.part" in code and "'cad-'" in engine and "'.part'" in engine,
+          "cad-*.part in both - the GUI measures bytes, it does not fetch them")
+
+    # --- no stale constants: everything comes from the manifest ---
+    stale = []
+    if re.search(r"\b[0-9a-f]{64}\b", code):
+        stale.append("a pinned digest")
+    if re.search(r"\bv\d+\.\d+", code):
+        stale.append("a version literal")
+    if re.search(r"CairnsAfterDark\.exe", code):
+        stale.append("the asset name")
+    if re.search(r"github\.com", code):
+        stale.append("a release URL")
+    check("no version, digest, asset or URL is hard-coded in the GUI", not stale,
+          "hard-coded: %s" % ", ".join(stale) if stale else "reads manifest.json at run time")
+    check("the digest on screen comes from the manifest",
+          "$Manifest.sha256" in code and "[int64]$Manifest.size" in code)
+
+    # --- the destructive action is confirmed, and cannot hang the window ---
+    check("uninstall asks first",
+          code.find("MessageBoxButtons]::YesNo") != -1 and
+          code.find("MessageBoxButtons]::YesNo") < code.find("Start-Engine 'Uninstall'"),
+          "the yes/no box is the GUI's; the delete and its guard are install.ps1's")
+    check("the GUI never blocks on install.ps1's Read-Host prompt",
+          "Read-Host" not in code and "Start-Engine 'Update' -Visible" in code,
+          "update gets its own console window, because Read-Host needs one")
+
+    check_gui_bat()
+    check_gui_bundling()
+    check_gui_readme()
+
+
+def check_gui_bat():
+    head("CairnsAfterDark-GUI.bat")
+    raw = GUI_BAT.read_bytes()
+    src = raw.decode("utf-8", errors="replace")
+    # rem comments, dropped for the same reason PowerShell's are: prose must not
+    # be able to satisfy - or fail - a check about what the file executes.
+    code = "\n".join(l for l in src.splitlines()
+                     if not re.match(r"\s*rem(\s|$)", l, re.I))
+
+    check("is a .bat", src.startswith("@echo off"))
+    check("uses CRLF line endings", b"\r\n" in raw and raw.count(b"\n") == raw.count(b"\r\n"),
+          "cmd.exe is not required to cope with LF")
+    check("finds launcher-gui.ps1 next to itself",
+          'set "GUI=%~dp0launcher-gui.ps1"' in src)
+    check("finds launcher-gui.ps1 in the bundle's launcher/ folder",
+          "launcher\\launcher-gui.ps1" in src)
+    # pwsh defaults to MTA; WinForms needs STA or the window can never appear.
+    check("starts PowerShell with -STA", "-STA" in src,
+          "PowerShell 7 defaults to MTA, where WinForms can fail outright")
+    check("pauses when the GUI file is missing",
+          "pause" in src and "exit /b 1" in src)
+    check("falls back to pwsh when powershell.exe is absent", "where powershell" in src)
+
+    # The same bug this launcher shipped once: an unbound argument. The GUI has
+    # no -Action at all, so this only guards against one being introduced.
+    check("the GUI .bat passes no -Action",
+          "-Action" not in code, "install.ps1's own switch is reached through the GUI script")
+    check("the GUI .bat is not the console entry point",
+          '-File "%GUI%"' in code and "%~dp0install.ps1" not in code)
+
+
+def check_gui_bundling():
+    """A GUI that does not ship is a GUI that only works on the dev's machine."""
+    head("the bundle ships the GUI")
+    pack = read(WIN / "package-windows.sh")
+    for src, dest in (("windows/launcher-gui.ps1", "$STAGE/launcher/"),
+                      ("windows/CairnsAfterDark-GUI.bat", "$STAGE/")):
+        pat = re.escape(src) + r"\s+\"\$STAGE(/launcher)?/\""
+        check("package-windows.sh copies %s" % src,
+              re.search(pat, pack) is not None,
+              dest)
+    check("the installer README.txt mentions the GUI",
+          "CairnsAfterDark-GUI.bat" in pack,
+          "and says the console path is the tested one")
+
+
+def check_gui_readme():
+    head("README: the GUI runbook")
+    text = read(README)
+    check("has a GUI runbook section",
+          "## Runbook: the GUI" in text)
+    runbook = text[text.find("## Runbook: the GUI"):]
+    check("the GUI runbook is numbered",
+          re.search(r"## Runbook: the GUI[\s\S]*?\n1\. \*\*", text) is not None)
+    for key in ("CairnsAfterDark-GUI.bat", "progress", "Uninstall"):
+        check("the GUI runbook covers %r" % key, key in runbook)
+    # [\s\S] rather than [^\n] because the sentence wraps across a newline.
+    check("says the GUI has never been run on Windows",
+          re.search(r"never been (?:run|executed)[\s\S]{0,20}Windows", runbook) is not None,
+          "the runbook opens by saying so")
+    check("points at the headless self-check",
+          "CAD_GUI_HEADLESS" in runbook)
+
+
+def check_gui_parse(pwsh):
+    head("launcher-gui.ps1 parses")
+    if not pwsh:
+        skip("launcher-gui.ps1 has no syntax errors",
+             "no PowerShell on this machine - see the SKIP above")
+        return
+    ok, detail = ps_syntax(pwsh, GUI_PS1)
+    check("launcher-gui.ps1 has no syntax errors (%s)" % Path(pwsh).name, ok, detail)
+
+
+def check_gui_headless(pwsh, m):
+    """Run the GUI's own launcher wiring, with no window and no Windows.
+
+    CAD_GUI_HEADLESS=1 stops launcher-gui.ps1 after it has loaded install.ps1
+    and proved Invoke-Install is reachable, which is the part that can be
+    settled anywhere. It is not a claim that the window works.
+    """
+    head("launcher-gui.ps1 launcher wiring (headless)")
+    if not pwsh:
+        skip("launcher-gui.ps1 loads install.ps1 and reaches Invoke-Install",
+             "no PowerShell on this machine - see the SKIP above")
+        return
+    env = dict(os.environ, CAD_GUI_HEADLESS="1")
+    with tempfile.TemporaryDirectory() as td:
+        # install.ps1 builds %APPDATA% paths at load time and Join-Path refuses
+        # an empty one, so point them at scratch space.
+        env["APPDATA"] = os.path.join(td, "appdata")
+        env["USERPROFILE"] = os.path.join(td, "home")
+        r = subprocess.run([pwsh, "-NoProfile", "-File", str(GUI_PS1)],
+                           capture_output=True, text=True, timeout=180, env=env)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("the GUI loads install.ps1 and stops at the self-check (%s)" % Path(pwsh).name,
+          r.returncode == 0 and "SELFCHECK ok" in out,
+          out.strip().splitlines()[-1][:200] if out.strip() else "rc=%d, no output" % r.returncode)
+    if m:
+        check("the GUI reads the digest the manifest pins", str(m.get("sha256")) in out,
+              "the status pane cannot be showing a hard-coded digest")
+    check("the self-check reached the real Invoke-Install, under -WhatIf",
+          "Cairns After Dark - install" in out and "WhatIf: download skipped" in out,
+          "printed by install.ps1 itself, so the GUI is wired to it")
+
+
+# ---------------------------------------------------------------------------
+# 8. export_presets.cfg: the preset the release is actually built from
 # ---------------------------------------------------------------------------
 
 
@@ -478,7 +757,7 @@ def check_readme():
 
 
 # ---------------------------------------------------------------------------
-# 8. The Godot version the release is built with
+# 9. The Godot version the release is built with
 # ---------------------------------------------------------------------------
 
 
@@ -516,7 +795,7 @@ def check_godot_pin():
 
 
 # ---------------------------------------------------------------------------
-# 9. The published release is fetchable and is what the manifest pins
+# 10. The published release is fetchable and is what the manifest pins
 # ---------------------------------------------------------------------------
 
 
@@ -586,6 +865,15 @@ def main():
     check_bat()
     pwsh = find_pwsh()
     check_ps_parse(pwsh)
+    check_gui(m)
+    if pwsh:
+        check_gui_parse(pwsh)
+        check_gui_headless(pwsh, m)
+    else:
+        skip("launcher-gui.ps1 has no syntax errors",
+             "no PowerShell on this machine - see the SKIP above")
+        skip("launcher-gui.ps1 loads install.ps1 and reaches Invoke-Install",
+             "no PowerShell on this machine - see the SKIP above")
     if pwsh:
         check_bat_argv_with_pwsh(pwsh)
     else:
