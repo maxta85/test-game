@@ -55,12 +55,6 @@ const SHIPPED := [
 ## instantiates itself, so the emitted node names are the only honest witness.
 const NOT_SHIPPED := [
 	{
-		"id": "ui menu flow",
-		"module": "res://UI/menu_flow.gd",
-		"scripts": ["res://UI/menu_flow.gd"],
-		"why": "9aa3a59 merged 9 files; Game/main.gd boots straight into _start_first_race() with no menu gate",
-	},
-	{
 		"id": "osm buildings",
 		"module": "res://World/osm_buildings.gd",
 		"nodes": ["WindowWarm", "WindowCool"],
