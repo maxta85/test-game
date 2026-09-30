@@ -70,6 +70,7 @@ func run(t: TestHarness) -> void:
 	await _acceleration(t)
 	await _braking(t)
 	await _steering(t)
+	await _steering_response(t)
 	await _steering_direction(t)
 	await _player_input_steers_the_right_way(t)
 	await _drivetrain_differences(t)
@@ -281,9 +282,124 @@ func _steering(t: TestHarness) -> void:
 	t.gt(absf(car.global_position.x - x0), 5.0, "car moves laterally when steered")
 	t.gt(absf(car.get_wheel("FL")["steer_angle"]), 0.1, "front wheel is actually steered")
 	t.near(car.get_wheel("RL")["steer_angle"], 0.0, 0.001, "rear wheel is not steered")
-	# Turning left, so FL is the inside wheel and must turn further than FR.
-	t.gt(absf(car.get_wheel("FL")["steer_angle"]), absf(car.get_wheel("FR")["steer_angle"]),
-		"Ackermann turns the inside wheel further than the outside")
+	# Facing -Z with the +X axis to the right, so steer -1.0 is a RIGHT turn and
+	# FR is the inside wheel. (This assertion used to check FL > FR on a right
+	# turn, which pinned the Ackermann sign inside the steering model upside
+	# down: the outside front got 38 deg of lock and the inside 17.)
+	t.gt(absf(car.get_wheel("FR")["steer_angle"]), absf(car.get_wheel("FL")["steer_angle"]),
+		"Ackermann turns the inside (right, on a right turn) further than the outside")
+	await t.drop(world)
+
+
+## Puts the car back at a fixed road speed on a known heading, settled, so each
+## measurement starts from the same state instead of inheriting the last one's
+## transient.
+static func _place_at_speed(car: CarBody, kph: float) -> void:
+	car.throttle = 0.0
+	car.brake = 0.0
+	car.steer = 0.0
+	car.handbrake = 0.0
+	car.global_position = Vector3(0, car.spec.tyre_radius + 0.04, 0)
+	car.global_transform.basis = Basis.IDENTITY
+	car.linear_velocity = Vector3(0, 0, -kph / 3.6)
+	car.angular_velocity = Vector3.ZERO
+	car.sleeping = false
+
+
+## Lateral acceleration in g, as a magnitude, from the change in the car's own
+## velocity over `secs` seconds measured on a freshly derived right axis.
+## Differencing on a stale axis folds the chassis' own rotation into the answer
+## and smears the steady-state value; differencing over one tick is all
+## quantisation.
+static func _lat_g(car: CarBody, v0: Vector3, secs: float) -> float:
+	var right: Vector3 = car.global_transform.basis.x.normalized()
+	return absf((car.linear_velocity - v0).dot(right)) / (secs * 9.80665)
+
+
+## The reported symptom was "no steering feel, and no drift tuning". Both are
+## downstream of one quantity: whether the tyre slip velocities include the
+## chassis' own rotation, `v + w x r`. They used to read plain `linear_velocity`,
+## which is only the centre-of-mass velocity, so a yawing car built no lateral
+## force in the rear tyres and nothing resisted its yaw.
+##
+## Each assertion below is a measured number that collapses if that term is
+## removed again, so the regression is a red test rather than a drive-feel
+## opinion. Reference figures from kairo_s13, which is the car that plays the
+## arcade drift character, at 90 km/h:
+##
+##                        without the yaw term   with it
+##   rear slip vs body       0.00 deg             0.33-4.63 deg
+##   yaw rate at steer .30  0.195 rad/s          0.344 rad/s
+##   peak lateral g         0.880 g              0.988 g
+##   impulse peak slip      47.8 deg             4.4 deg
+##   impulse settle         1.88 s               0.48 s
+func _steering_response(t: TestHarness) -> void:
+	var world := make_world(t)
+	var car := spawn(world, "kairo_s13")
+	await t.ticks(6)
+	var mu: float = car.spec.tyre_peak_mu
+
+	var yaw_at_low := 0.0
+	var yaw_at_high := 0.0
+	var best_g := 0.0
+	var slip_gap := 0.0
+	for steer_value in [0.10, 0.30]:
+		_place_at_speed(car, 90.0)
+		await t.ticks(60)  # let the springs and dampers settle at speed
+		car.throttle = 0.30
+		car.steer = steer_value
+		# Sample the back 0.5 s, by which point the transient is long gone.
+		for i in 150:
+			await t.ticks(1)
+			if i < 120:
+				continue
+			var v0: Vector3 = car.linear_velocity
+			await t.ticks(3)
+			best_g = maxf(best_g, _lat_g(car, v0, 3.0 / 60.0))
+			if steer_value < 0.15:
+				yaw_at_low = absf(car.angular_velocity.y)
+			else:
+				yaw_at_high = absf(car.angular_velocity.y)
+		if steer_value > 0.15:
+			# The rear axle has to disagree with the body, or the slip angles
+			# carry no yaw feedback at all. Measured against the body slip, not
+			# against zero, because it is the disagreement that makes a car turn.
+			var rear: float = absf(car.get_wheel("RL")["slip_angle"])
+			slip_gap = absf(rad_to_deg(rear) - absf(rad_to_deg(car.slip_angle_body)))
+
+	t.gt(yaw_at_high, yaw_at_low * 1.2,
+		"more lock yaws harder (0.10 -> %.3f, 0.30 -> %.3f rad/s)" % [yaw_at_low, yaw_at_high])
+	t.between(best_g / mu, 0.75, 1.15,
+		"a hard corner uses most of the tyre (%.3f g of mu %.2f)" % [best_g, mu])
+	t.gt(slip_gap, 0.3,
+		"rear slip angle departs from body slip, so the tyres see the yaw (%.2f deg apart)" % slip_gap)
+
+	# A disturbance the driver did not ask for has to die. Without yaw in the
+	# slip velocity this rang for nearly two seconds and swung 48 deg of body
+	# slip; it now settles in about half a second without exceeding 4.4 deg.
+	_place_at_speed(car, 79.0)
+	await t.ticks(60)
+	car.throttle = 0.30
+	car.steer = 0.0
+	await t.ticks(30)
+	car.angular_velocity = Vector3(0.0, 1.2, 0.0)
+	var peak_slip := 0.0
+	var settled_at := -1.0
+	var calm := 0.0
+	for i in 150:
+		await t.ticks(1)
+		var slip: float = absf(rad_to_deg(car.slip_angle_body))
+		peak_slip = maxf(peak_slip, slip)
+		if slip < 1.5:
+			calm += 1
+			if calm == 30 and settled_at < 0.0:
+				settled_at = (i - 29) / 60.0
+		else:
+			calm = 0
+	t.ok(peak_slip < 12.0,
+		"a yaw disturbance does not become a spin (peak %.1f deg)" % peak_slip)
+	t.ok(settled_at > 0.0 and settled_at < 0.9,
+		"yaw disturbance settles in under 0.9 s (%.2f s)" % settled_at)
 	await t.drop(world)
 
 
