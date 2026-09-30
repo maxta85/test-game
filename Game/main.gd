@@ -6,6 +6,11 @@ signal world_ready(graph: RoadGraph)
 
 const SHOT_MODE := "--shot"
 
+## How far below the world counts as "fell out of the map". Generous, because
+## kerbs, dips and the odd jump legitimately put the body below zero, and a
+## recovery that fires while the car is still on the road is worse than none.
+const RECOVER_BELOW_Y := -8.0
+
 var graph: RoadGraph
 var world: WorldBuilder
 var night: NightEnv
@@ -22,11 +27,11 @@ var _stuck_time := 0.0
 func _ready() -> void:
 	var shot_path := _shot_request()
 
-	print("[Boot] building Manunda...")
+	print("[Boot] building Cairns (OSM)...")
 	var t0 := Time.get_ticks_msec()
 
 	graph = RoadGraph.new()
-	graph.build(ManundaLayout.corridors())
+	graph.build(OSMLayout.corridors())
 	var stats: Dictionary = graph.stats()
 	print("[Boot] road graph: %d junctions, %d edges, %.0f m" % [
 		stats["nodes"], stats["edges"], stats["length_m"]])
@@ -121,7 +126,7 @@ func _process(delta: float) -> void:
 
 func _spawn_player() -> void:
 	var spec := Cfg.active_spec()
-	spec.start_position = ManundaLayout.start_grid_position(0)
+	spec.start_position = OSMLayout.start_grid_position(0)
 	spec.start_rotation = Vector3(0, -PI * 0.5, 0)
 
 	player_car = CarBody.new()
@@ -144,7 +149,7 @@ func _spawn_player() -> void:
 
 	# A rival already on the grid, so there is something to race against.
 	var rival_spec := CarDB.get_spec("shinobi_rs")
-	rival_spec.start_position = ManundaLayout.start_grid_position(1)
+	rival_spec.start_position = OSMLayout.start_grid_position(1)
 	rival_spec.start_rotation = Vector3(0, -PI * 0.5, 0)
 	var rival := CarBody.new()
 	rival.name = "RivalCar"
@@ -169,14 +174,31 @@ func _shot_preset() -> String:
 	return ""
 
 
-## Nudges a car that has been pinned against scenery back onto the road. A
-## prototype needs this because a car wedged in a wall ends the player's night.
+## Nudges a car that has been pinned against scenery back onto the road, and
+## catches one that has dropped out of the world. A prototype needs both: a car
+## wedged in a wall ends the player's night, and so does one in the void.
 func _recover_from_stuck(delta: float) -> void:
 	if player_car == null or race == null:
 		return
 	if race.state != RaceDirector.State.RACING:
 		_stuck_time = 0.0
 		return
+
+	# Below the world is its own case, and it must not wait on the stuck timer.
+	# The stuck test asks for speed_kph < 4, and a car falling off the map is
+	# moving fast the whole way down, so it never qualified - which is how a
+	# fall became permanent. Checking depth is also instantaneous and always
+	# right, rather than being a guess about how long is too long.
+	if player_car.global_position.y < RECOVER_BELOW_Y:
+		if _stuck_time <= 0.0:
+			hud.flash("RECOVERED")
+		_stuck_time += delta
+		if _stuck_time > 1.0:
+			_stuck_time = 0.0
+			if player_controller:
+				player_controller.reset_to_road()
+		return
+
 	var wedged: bool = player_car.wheels_on_ground < 2 and player_car.speed_kph < 4.0
 	_stuck_time = (_stuck_time + delta) if wedged else 0.0
 	if _stuck_time > 3.0:

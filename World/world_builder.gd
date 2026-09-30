@@ -162,12 +162,46 @@ func _terrain() -> void:
 			var h11 := _terrain_height(x1, z1)
 			_quad(st, Vector3(x0, h00, z0), Vector3(x1, h10, z0), Vector3(x1, h11, z1), Vector3(x0, h01, z1))
 			_quad(st, Vector3(x0, h00, z0), Vector3(x1, h11, z1), Vector3(x1, h10, z0), Vector3(x0, h01, z0))
+	var mesh: ArrayMesh = st.commit()
 	var mi := MeshInstance3D.new()
 	mi.name = "Terrain"
-	mi.mesh = st.commit()
+	mi.mesh = mesh
 	mi.material_override = _mat("ground")
 	mi.position.y = -0.06
 	add_child(mi)
+
+	# The terrain needs collision. Without it the only thing the car can stand on
+	# is the road trimesh, so driving off the kerb drops you into a void with no
+	# surface to catch you - which is exactly what it did. Reusing the committed
+	# mesh means the collision surface is the visible one, not an approximation
+	# of it, and it costs one more StaticBody rather than a second piece of
+	# geometry.
+	var body := StaticBody3D.new()
+	body.name = "TerrainCollision"
+	body.collision_layer = 1
+	body.collision_mask = 0
+	var cs := CollisionShape3D.new()
+	cs.shape = _trimesh(mesh)
+	cs.shape.backface_collision = true
+	body.add_child(cs)
+	add_child(body)
+
+	# The terrain only covers +/-800 m. The road network does not, so the far
+	# field is still a hole at the map edge. This floor is well below the lowest
+	# terrain height, which means it is only ever reached by driving off the
+	# world rather than by driving across it.
+	var skirt := StaticBody3D.new()
+	skirt.name = "OuterFloor"
+	skirt.collision_layer = 1
+	skirt.collision_mask = 0
+	var scs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(6000.0, 40.0, 6000.0)
+	scs.shape = box
+	scs.position = Vector3(0.0, -22.0, 0.0)
+	skirt.add_child(scs)
+	add_child(skirt)
+	print("[World] terrain collision: %d triangles" % int(cs.shape.get_faces().size() / 3))
 
 
 ## Flat flood-prone plain with a shallow dish, a creek line to the west, and a
@@ -900,7 +934,7 @@ func _car_meet() -> void:
 	## floodlights and a crowd - the place the whole game loops back to.
 	car_meet = Node3D.new()
 	car_meet.name = "CarMeet"
-	car_meet.position = ManundaLayout.car_meet_position()
+	car_meet.position = OSMLayout.car_meet_position()
 	add_child(car_meet)
 
 	var m := OmniLight3D.new()

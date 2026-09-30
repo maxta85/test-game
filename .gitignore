@@ -8,6 +8,13 @@ shots/
 build/
 *.tmp
 
+# Textures Godot unpacks out of the imported car glb files. The glb already
+# contains them, so these are import output rather than source - they are
+# regenerated on first import and only bloat the repository if committed.
+assets/cars/*.png
+assets/cars/*.jpg
+assets/cars/*.jpeg
+
 # Python
 __pycache__/
 *.pyc

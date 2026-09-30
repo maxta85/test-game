@@ -11,14 +11,70 @@ func run(t: TestHarness) -> void:
 	t.gt(float(s["length_m"]), 6000.0, "network has real length (%.0f m)" % s["length_m"])
 	t.gt(int(s["streets"]), 15, "the layout names a real set of streets (%d)" % s["streets"])
 
+	await _ground_is_solid(t, g)
 	_connectivity(t, g)
 	_geometry(t, g)
 	_queries(t, g)
 	_loops(t, g)
 
 
+## A car must not fall out of the world when it leaves the road.
+##
+## This is here because it shipped broken and no test caught it. The road
+## trimesh was the only collision in the scene - the terrain was drawn but had
+## no collider - so driving off the kerb dropped the car into a void with
+## nothing to catch it. The integration suite missed it because it builds its
+## own flat ground instead of using WorldBuilder, so it never tested the world
+## the player actually drives in.
+func _ground_is_solid(t: TestHarness, g: RoadGraph) -> void:
+	var world := t.new_root("WorldGroundTest")
+	var b := WorldBuilder.new()
+	world.add_child(b)
+	b.build(g)
+	await t.ticks(2)
+
+	var terrain := world.find_child("TerrainCollision", true, false) as StaticBody3D
+	t.ok(terrain != null, "terrain has a collision body")
+	t.ok(world.find_child("RoadCollision", true, false) != null, "road has a collision body")
+
+	# A point that is genuinely off-road. (0,0) is no good: it sits on a road, so
+	# the car lands on the road trimesh and the test passes even with the terrain
+	# collider deleted - which is exactly what it did the first time.
+	#
+	# Take a mid-block point on an edge and step well clear of it. 60 m is far
+	# outside any carriageway width in the layout, so the only thing that can
+	# catch the car here is the terrain.
+	var e: Dictionary = g.edges[0]
+	var ea: Vector2 = g.node_pos(int(e["a"]))
+	var eb: Vector2 = g.node_pos(int(e["b"]))
+	var mid: Vector2 = (ea + eb) * 0.5
+	var away: Vector2 = mid + Vector2(-(eb - ea).y, (eb - ea).x).normalized() * 60.0
+	var off: Dictionary = g.nearest_road(Vector3(away.x, 0.0, away.y))
+	t.gt(float(off["lateral"]), 25.0,
+		"the drop point really is off the road (%.1f m clear)" % float(off["lateral"]))
+
+	var spec := CarDB.get_spec("kairo_s13")
+	var car := CarBody.new()
+	car.spec = spec
+	world.add_child(car)
+	car.reset_to(Vector3(away.x, 5.0, away.y), Vector3.ZERO)
+	await t.ticks(300)
+
+	# y > -1 rather than y > -20 on purpose: the outer safety floor has its top
+	# at y = -2, so a loose bound would let a car sitting on that skirt pass while
+	# the terrain trimesh did nothing at all. The terrain around the origin is
+	# near zero, so landing on it is unambiguous.
+	t.gt(car.global_position.y, -1.0,
+		"a car dropped off the road lands on the terrain, not the fallback floor (y=%.2f)" % car.global_position.y)
+	t.gt(int(car.wheels_on_ground), 2,
+		"and it lands on its wheels (%d in contact)" % int(car.wheels_on_ground))
+	t.between(absf(car.linear_velocity.y), 0.0, 1.0,
+		"and it comes to rest rather than still falling (vy=%.2f)" % car.linear_velocity.y)
+
+	await t.drop(world)
+
+
 func _connectivity(t: TestHarness, g: RoadGraph) -> void:
-	# A road network that is not connected is not a city, it is several cities.
 	# Flood fill from node 0 and check we reach everything.
 	var seen := {0: true}
 	var stack: Array = [0]
