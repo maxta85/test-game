@@ -28,6 +28,9 @@ var _car: CarBody
 var _look_ahead := Vector3.ZERO
 var _shake := 0.0
 var _fov := 66.0
+## How far back the camera currently sits along its ray, after occlusion. Kept
+## between frames so it can snap in and ease out.
+var _clear_dist := 0.0
 
 
 func _ready() -> void:
@@ -44,10 +47,55 @@ func set_car(car: CarBody) -> void:
 	_car = car
 
 
+## The car being followed, or null. Screenshot tooling needs it to frame a shot
+## relative to the car rather than to an absolute point in the world.
+func car() -> CarBody:
+	return _car
+
+
 func cycle_mode() -> void:
 	mode = (int(mode) + 1) % Mode.size()
 	if _car:
 		_snap()
+
+
+## Pulls the camera in when something is between it and the car.
+##
+## A chase camera at a fixed offset spends most of its life in a palm trunk, a
+## power pole or the side of a house, and the player loses the entire frame. The
+## fix is a ray from just above the car to the wanted position: on a hit, sit in
+## front of whatever it found. In is instant (a wall between you and the camera
+## has to be gone *now*), out is slow (easing back out reads as the camera
+## finding its footing rather than as a jump cut).
+func _clear_of_obstacles(want: Vector3, up: Vector3, delta: float, snap: bool) -> Vector3:
+	if not is_inside_tree() or get_world_3d() == null:
+		return want
+	var pivot: Vector3 = _car.global_position + up * 1.05
+	var to_cam: Vector3 = want - pivot
+	var dist: float = to_cam.length()
+	if dist < 0.01:
+		return want
+	var dir: Vector3 = to_cam / dist
+
+	var q := PhysicsRayQueryParameters3D.create(pivot, want)
+	q.collision_mask = OCCLUDER_MASK
+	q.exclude = [_car.get_rid()]
+	var clear: float = dist
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if not hit.is_empty():
+		clear = maxf((hit["position"] as Vector3).distance_to(pivot) - 0.30, 0.9)
+
+	# Snap in, ease out.
+	if clear < _clear_dist or snap:
+		_clear_dist = clear
+	else:
+		_clear_dist = minf(clear, _clear_dist + maxf(dist - _clear_dist, 0.0) * clampf(delta * 2.2, 0.0, 1.0) + delta * 0.8)
+	return pivot + dir * _clear_dist
+
+
+## World geometry, cars and traffic. Anything that can be between the camera and
+## the car counts, because a pole and a parked car are equally ruinous on screen.
+const OCCLUDER_MASK := 1 | 2 | 4
 
 
 ## Called by the car on impact so the camera can be knocked about.
@@ -79,6 +127,7 @@ func _update(delta: float, snap: bool) -> void:
 
 	# Never let the camera go through the road.
 	want.y = maxf(want.y, 0.75)
+	want = _clear_of_obstacles(want, up, delta, snap)
 
 	if snap or delta <= 0.0:
 		global_position = want

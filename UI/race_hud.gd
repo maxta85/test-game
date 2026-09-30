@@ -17,8 +17,10 @@ var _lights: Label
 var _message: Label
 var _cash: Label
 var _wrong: Label
+var _message_time := 0.0
 
 const REV_W := 320.0
+const PAD := 22.0
 
 
 func _ready() -> void:
@@ -29,52 +31,100 @@ func _ready() -> void:
 	add_child(root)
 
 	# --- bottom right: speed, gear, rev bar ---
-	var speedbox := _panel(root, Vector2(0.70, 0.72), Vector2(0.30, 0.28))
+	var speedbox := _box(root, Control.PRESET_BOTTOM_RIGHT, Vector2(PAD, PAD), Vector2(REV_W, 104.0))
+	_revfill = _rev_bar(speedbox)
 	_speed = _label(speedbox, "0", 62, Color(0.95, 0.95, 0.92))
+	_speed.position = Vector2(0, 0)
+	_speed.size = Vector2(REV_W - 62.0, 74.0)
 	_speed.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_gear = _label(speedbox, "1", 34, Color(1.0, 0.68, 0.25))
+	_gear.position = Vector2(0, 14)
+	_gear.size = Vector2(REV_W - 150.0, 44.0)
 	_gear.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	var unit := _label(speedbox, "KM/H", 13, Color(0.6, 0.6, 0.6))
+	unit.position = Vector2(0, 72)
+	unit.size = Vector2(REV_W, 18)
 	unit.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 
-	var revbg := ColorRect.new()
-	revbg.color = Color(0.10, 0.10, 0.12, 0.8)
-	revbg.position = Vector2(0, -6)
-	revbg.size = Vector2(REV_W, 9)
-	speedbox.add_child(revbg)
-	_revfill = ColorRect.new()
-	_revfill.color = Color(1.0, 0.55, 0.15)
-	_revfill.position = Vector2(1, -5)
-	_revfill.size = Vector2(0, 7)
-	revbg.add_child(_revfill)
-
 	# --- top left: race state ---
-	var infobox := _panel(root, Vector2(0.0, 0.0), Vector2(0.26, 0.30))
+	var infobox := _box(root, Control.PRESET_TOP_LEFT, Vector2(PAD, PAD), Vector2(230.0, 116.0))
 	_lap = _label(infobox, "LAP 1/3", 20, Color(0.85, 0.85, 0.82))
+	_lap.position = Vector2(0, 0)
 	_time = _label(infobox, "0:00.00", 24, Color(1.0, 0.85, 0.45))
+	_time.position = Vector2(0, 24)
 	_pos = _label(infobox, "POS 1/2", 18, Color(0.7, 0.85, 1.0))
+	_pos.position = Vector2(0, 54)
 	_cash = _label(infobox, "$0", 16, Color(0.55, 0.9, 0.55))
+	_cash.position = Vector2(0, 80)
+
+	# --- top right: money ---
+	var cashbox := _box(root, Control.PRESET_TOP_RIGHT, Vector2(PAD, PAD), Vector2(150.0, 28.0))
+	_cash = _label(cashbox, "$0", 18, Color(0.55, 0.9, 0.55))
+	_cash.size = cashbox.size
+	_cash.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 
 	# --- centre: countdown and event messages ---
-	_lights = _label(root, "", 110, Color(1.0, 0.25, 0.2))
-	_lights.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_lights.position = Vector2(-60, 40)
-	_message = _label(root, "", 26, Color(1.0, 0.9, 0.5))
-	_message.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_message.position = Vector2(-260, 150)
-
-	_wrong = _label(root, "WRONG WAY", 30, Color(1.0, 0.3, 0.2))
-	_wrong.set_anchors_preset(Control.PRESET_CENTER)
-	_wrong.position = Vector2(-110, 60)
+	_lights = _box_label(root, Control.PRESET_CENTER_TOP, Vector2(0, 40.0), 110, Color(1.0, 0.25, 0.2))
+	_message = _box_label(root, Control.PRESET_CENTER_TOP, Vector2(0, 150.0), 26, Color(1.0, 0.9, 0.5))
+	_wrong = _box_label(root, Control.PRESET_CENTER, Vector2(0, -20.0), 30, Color(1.0, 0.3, 0.2))
 
 
-func _panel(parent: Control, at: Vector2, size: Vector2) -> Control:
+## A fixed-size box pinned to a viewport corner by anchors and offsets.
+##
+## Positions were the bug: every panel was placed from `parent.size`, which is
+## still zero while `_ready` runs, so the whole HUD piled up in the top left and
+## the "wrong way" text hung off the edge of the screen. Anchors resolve against
+## the real viewport whatever size it turns out to be.
+func _box(parent: Control, preset: int, margin: Vector2, size: Vector2) -> Control:
 	var c := Control.new()
-	c.position = Vector2(parent.size.x * at.x + 18, parent.size.y * at.y + 18)
-	c.size = size
+	c.set_anchors_preset(preset)
 	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var right: bool = preset == Control.PRESET_TOP_RIGHT or preset == Control.PRESET_BOTTOM_RIGHT
+	var bottom: bool = preset == Control.PRESET_BOTTOM_LEFT or preset == Control.PRESET_BOTTOM_RIGHT
+	var centre: bool = preset == Control.PRESET_CENTER or preset == Control.PRESET_CENTER_TOP
+	if centre:
+		c.offset_left = -size.x * 0.5
+		c.offset_right = size.x * 0.5
+	elif right:
+		c.offset_left = -size.x - margin.x
+		c.offset_right = -margin.x
+	else:
+		c.offset_left = margin.x
+		c.offset_right = margin.x + size.x
+	if preset == Control.PRESET_BOTTOM_LEFT or preset == Control.PRESET_BOTTOM_RIGHT or preset == Control.PRESET_CENTER_BOTTOM:
+		c.offset_top = -size.y - margin.y
+		c.offset_bottom = -margin.y
+	else:
+		c.offset_top = margin.y
+		c.offset_bottom = margin.y + size.y
 	parent.add_child(c)
 	return c
+
+
+## A single centred label pinned to a corner, for the things that own the middle
+## of the screen: the countdown, the event message, wrong way.
+func _box_label(parent: Control, preset: int, at: Vector2, size_px: int, colour: Color) -> Label:
+	var box := _box(parent, preset, at, Vector2(520, float(size_px) * 1.5))
+	var l := _label(box, "", size_px, colour)
+	l.position = Vector2.ZERO
+	l.size = box.size
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	return l
+
+
+func _rev_bar(parent: Control) -> ColorRect:
+	var revbg := ColorRect.new()
+	revbg.color = Color(0.10, 0.10, 0.12, 0.8)
+	revbg.position = Vector2(0, 94)
+	revbg.size = Vector2(REV_W, 9)
+	parent.add_child(revbg)
+	var fill := ColorRect.new()
+	fill.color = Color(1.0, 0.55, 0.15)
+	fill.position = Vector2(1, 95)
+	fill.size = Vector2(0, 7)
+	revbg.add_child(fill)
+	return fill
 
 
 func _label(parent: Control, text: String, size_px: int, colour: Color) -> Label:
@@ -94,9 +144,14 @@ func _label(parent: Control, text: String, size_px: int, colour: Color) -> Label
 ## `msg` sticks on screen for a couple of seconds, then clears itself.
 func flash(msg: String) -> void:
 	_message.text = msg
+	_message_time = 2.5
 
 
 func update(car: CarBody, race: RaceDirector, delta: float) -> void:
+	if _message_time > 0.0:
+		_message_time -= delta
+		if _message_time <= 0.0:
+			_message.text = ""
 	if car != null:
 		_speed.text = str(int(round(car.speed_kph)))
 		_gear.text = str(car.current_gear if car.current_gear > 0 else "R")

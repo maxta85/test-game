@@ -6,14 +6,6 @@ extends SceneTree
 ##
 ## Uses `_initialize` rather than `_init`: the SceneTree is not registered as the
 ## main loop until then, so `Engine.get_main_loop()` is null inside `_init`.
-
-## Headless test entry point. Run via ./test.sh
-##
-## Usage:  ./test.sh            all suites
-##         ./test.sh vehicle    only suites whose name contains "vehicle"
-##
-## Uses `_initialize` rather than `_init`: the SceneTree is not registered as the
-## main loop until then, so `Engine.get_main_loop()` is null inside `_init`.
 ##
 ## Suites are DISCOVERED, not registered. Several agents work in this repo
 ## concurrently on disjoint files, and a hardcoded list would mean every one of
@@ -53,11 +45,26 @@ func _initialize() -> void:
 		var suite: Object = script.new()
 		t.suite(name)
 		await suite.call("run", t)
+		await _clear_world()
 		ran += 1
 
 	if ran == 0:
 		print("no suites matched filter")
 	quit(t.summary())
+
+
+## Empties the tree between suites.
+##
+## A suite that throws part-way through `run` has its coroutine torn down with
+## its world still standing - CarBodies, StaticBody3D colliders and all. The
+## next suite then spawns its car into a world that already has one in it, and
+## fails on physics it never caused. Clearing between suites costs two frames
+## and makes a suite's failures its own.
+func _clear_world() -> void:
+	for child in root.get_children():
+		child.queue_free()
+	await physics_frame
+	await process_frame
 
 
 ## Every `res://Tests/test_*.gd`, sorted so runs are deterministic.
