@@ -31,6 +31,22 @@ var _fov := 66.0
 ## How far back the camera currently sits along its ray, after occlusion. Kept
 ## between frames so it can snap in and ease out.
 var _clear_dist := 0.0
+## Smoothed, speed-gated drift lean, -1 (sliding one way) .. +1 (the other).
+var _lean := 0.0
+## Phase of the shake oscillator, in cycles.
+var _shake_phase := 0.0
+
+## Knock envelope: per second, and per second of the oscillator.
+const SHAKE_DECAY := 3.2
+const SHAKE_HZ := 11.0
+const SHAKE_POS := 0.045    ## metres of camera offset per unit of shake
+const SHAKE_ROLL := 0.10    ## radians of roll per unit of shake
+## Full lean happens at this much body slip angle, in radians (~6 degrees).
+const DRIFT_LEAN := 0.11
+## Radians of roll at full lean. Small on purpose: the car's own body roll
+## already arrives through `up`, and a chase camera is a rigid mount, not a
+## person leaning out of the window.
+const DRIFT_ROLL := 0.012
 
 
 func _ready() -> void:
@@ -153,10 +169,32 @@ func _update(delta: float, snap: bool) -> void:
 	_fov = lerpf(_fov, want_fov, clampf(delta * 3.0, 0.0, 1.0))
 	_camera.fov = _fov
 
-	# Drift shake: a little roll and judder when the car is sideways.
-	_shake = maxf(_shake - delta * 3.2, 0.0)
-	var slip: float = clampf(absf(_car.slip_angle_body) * 0.55, 0.0, 0.06)
-	_shake = maxf(_shake, slip)
-	var jitter := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * _shake * 0.05
-	_camera.position = Vector3(0, 0, 0) + jitter
-	_camera.rotate_object_local(Vector3.UP, _shake * 0.12)
+	# ---------------------------------------------------------------- shake
+	# Two separate things, kept separate on purpose.
+	#
+	# `_shake` is an EVENT: only impulse() adds to it, and it bleeds off at
+	# SHAKE_DECAY per second, so a knock is over in about a third of a second
+	# and the camera is dead still the rest of the time. The old code floored it
+	# at the car's slip angle, which meant the camera never stopped shaking
+	# while the car was at all sideways - the shake was a state, not an event.
+	#
+	# `_lean` is drift: a low-passed roll into the corner. The raw slip angle at
+	# 60 Hz is not a camera move; filtering it is the whole difference between
+	# leaning and twitching. It is gated on speed, because a car shuffling about
+	# in a car park has plenty of slip and should not set the horizon rocking.
+	_shake = maxf(_shake - delta * SHAKE_DECAY, 0.0)
+	# fposmod, not raw +=: a single-precision phase runs into 7 significant
+	# digits after an hour of racing and the knock turns into a step function.
+	_shake_phase = fposmod(_shake_phase + delta * SHAKE_HZ, 1.0)
+	_lean = lerpf(_lean, clampf(_car.slip_angle_body / DRIFT_LEAN, -1.0, 1.0), 1.0 - exp(-9.0 * delta))
+	var speed_gate: float = clampf(_car.speed_mps / 10.0, 0.0, 1.0)
+
+	# Band-limited noise: three incommensurate sines. A knock has its energy at
+	# a few Hz; randf_range() every frame has energy right up at the frame rate,
+	# and the eye reads that as a vibration motor rather than as an impact.
+	var th := _shake_phase * TAU
+	var knock := Vector3(sin(th), sin(th * 1.41 + 1.1), sin(th * 0.79 + 2.3))
+	_camera.position = knock * (_shake * SHAKE_POS)
+	# Roll: lean into the corner, plus a little of whatever is being knocked
+	# about. The car's own body roll already reaches the camera through `up`.
+	_camera.rotate_object_local(Vector3.UP, _lean * speed_gate * DRIFT_ROLL + _shake * SHAKE_ROLL)

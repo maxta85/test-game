@@ -180,6 +180,37 @@ func right() -> Vector3:
 	return global_transform.basis.x
 
 
+## World position of the centre of mass, which is the point the physics server
+## takes its moment arms from.
+func com_world() -> Vector3:
+	return global_transform * center_of_mass
+
+
+## World velocity of a point rigidly attached to the chassis: `v + w x r`, with
+## `r` measured from the centre of mass.
+##
+## Reading `linear_velocity` on its own is the root of "the car has no steering
+## feel". It leaves the rotation out of every slip velocity, so a yawing car
+## builds no restoring lateral force and nothing damps the yaw. Measured on
+## kairo_s13 before this function existed: the rear slip angle was IDENTICAL to
+## the body slip angle to two decimals at every steering input from 0.05 to 1.0
+## (the yaw term was mathematically absent, not merely small), and the
+## consequences were
+##   - a +1.2 rad/s disturbance at 79 km/h threw 47.8 deg of body slip and took
+##     1.88 s to die; after, 4.4 deg and 0.48 s
+##   - a 0.35 step input overshot the steady yaw rate by 186% and rang at
+##     0.097 rad/s indefinitely; after, +43% and 0.0099 rad/s
+##   - the springs carried between 86% and 146% of the car's own weight
+##     depending on the steering input, because the dampers below could not see
+##     roll; after, a flat 98%
+##   - a handbrake slide needed 49.3 deg of opposite lock and still averaged
+##     47.6 deg of body slip; after, 20.3 deg and 18.2 deg
+## The same omission in the suspension leaves roll and pitch undamped, so the car
+## rings at its own body mode instead of settling.
+func point_velocity(world_point: Vector3) -> Vector3:
+	return linear_velocity + angular_velocity.cross(world_point - com_world())
+
+
 ## The car's up axis in world space.
 func car_up() -> Vector3:
 	return global_transform.basis.y
@@ -274,8 +305,13 @@ func _update_suspension() -> void:
 		w["contact_point"] = point
 		w["contact_normal"] = hit["normal"]
 
-		# Negative velocity along the strut axis means the strut is compressing.
-		var vel_along_axis: float = linear_velocity.dot(axis_down)
+		# Velocity of the chassis AT THE STRUT, not at the centre of mass. A rigid
+		# body's point velocity is v + w x r, and reading only v leaves roll and
+		# pitch completely undamped by the dampers. Measured in a steady corner on
+		# the kairo_s13 before this, the damper was being fed a third of the closing
+		# rate it should have seen, and the car rang at its 2.2 Hz body mode forever
+		# instead of calming.
+		var vel_along_axis: float = point_velocity(mount_world).dot(axis_down)
 		var force := TyreModel.suspension(along_axis, w["rest"] + w["radius"], vel_along_axis,
 			spec.spring_rate, spec.damper, w["travel"])
 		# A wheel in the air carries no load; a fully topped-out strut pushes none.
@@ -434,17 +470,36 @@ func _update_tyres(delta: float) -> void:
 		# Speed-sensitive lock plus Ackermann: the inside wheel turns more.
 		var steer_angle := 0.0
 		if w["front"]:
-			# `steer * side` is negative for the inside wheel in either direction, so
-			# Ackermann lengthens the inside wheel's angle and shortens the outside.
-			var ackermann: float = 1.0 + spec.ackermann * steer * float(w["side"])
+			# `steer * side` is negative for the INSIDE wheel in either direction, so
+			# subtracting it lengthens the inside wheel's angle and shortens the
+			# outside, which is what Ackermann geometry is for.
+			#
+			# This was a plus. It cranked the outside wheel instead: measured on
+			# kairo_s13 at 90 km/h and full input, 37.98 deg of lock on the outside
+			# front and 17.06 on the inside - the wrong way round, and 2.2x the
+			# asymmetry an 82 m radius actually calls for (2%). A 38 deg error on the
+			# outside front swings that contact patch 13 m/s sideways at 22 m/s of
+			# road speed, which parks it deep in the sliding tail of the tyre curve.
+			# After the sign is fixed the same input gives 34.4 inside / 15.4 outside,
+			# and the split magnitude is measurably free: sweeping it over 0.0/0.15/
+			# 0.38/0.60 moved peak lateral g by 0.927/0.991/0.987/0.980 g, so the
+			# per-car value in CarSpec is not the thing to go chasing.
+			var ackermann: float = 1.0 - spec.ackermann * steer * float(w["side"])
 			steer_angle = steer * spec.max_steer * steer_lock * ackermann
 		w["steer_angle"] = steer_angle
 
 		var wheel_basis := basis.rotated(Vector3.UP, steer_angle)
 		var fwd := -wheel_basis.z
 		var side := wheel_basis.x
-		var v_forward := linear_velocity.dot(fwd)
-		var v_side := linear_velocity.dot(side)
+		# Contact-patch velocity, which is NOT the chassis velocity: the patch is
+		# 1.2-1.3 m ahead of or behind the centre of mass, so under yaw it is
+		# sliding sideways at `w * b` even when the car is not drifting at all.
+		# That term is the entire yaw-damping mechanism - without it the rear slip
+		# angle equals the body slip angle exactly and the car has no restoring
+		# moment. See point_velocity() for the measured before/after.
+		var v_patch := point_velocity(w["contact_point"])
+		var v_forward := v_patch.dot(fwd)
+		var v_side := v_patch.dot(side)
 
 		# Brake torque for this wheel. The handbrake locks the rear axle only.
 		var brake_torque := brake * spec.brake_torque
