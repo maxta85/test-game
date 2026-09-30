@@ -97,6 +97,15 @@ var _found_rivals := false
 
 func _ready() -> void:
 	_rng.seed = rng_seed
+	# Run the driver before the car, not after it. Every caller adds the CarBody
+	# first and the driver second (Game/main.gd, Tests/test_ai.gd,
+	# Tests/test_integration.gd), and with both on the default physics priority
+	# Godot processes them in tree order - so the car spends each step building
+	# its tyres from the steering the driver asked for last step. That is a whole
+	# step of lag on the loop whose only job is lateral tracking, and the pure
+	# pursuit gain is aggressive enough that the lag is the whole difference
+	# between holding a straight line and weaving off it.
+	set_physics_process_priority(-1)
 
 
 func _physics_process(delta: float) -> void:
