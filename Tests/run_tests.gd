@@ -60,8 +60,17 @@ func _initialize() -> void:
 ## next suite then spawns its car into a world that already has one in it, and
 ## fails on physics it never caused. Clearing between suites costs two frames
 ## and makes a suite's failures its own.
+##
+## Autoloads hang off root as well and are NOT debris: they are the environment
+## every suite is handed. Freeing one does not clear it, it destroys it - a
+## suite loaded after this still has the freed node behind its global `Cfg`, so
+## `Cfg.money = 500` fails with "previously freed" and any system resolving the
+## autoload by path (`root.get_node_or_null("Cfg")`) silently gets null. So the
+## autoloads stay; only what the suite built goes.
 func _clear_world() -> void:
 	for child in root.get_children():
+		if ProjectSettings.has_setting("autoload/" + String(child.name)):
+			continue
 		child.queue_free()
 	await physics_frame
 	await process_frame
