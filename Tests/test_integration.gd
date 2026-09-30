@@ -100,6 +100,13 @@ func _full_lap_completes(t: TestHarness) -> void:
 		if d.kind == RaceDef.Kind.CIRCUIT:
 			circuit = d
 			break
+	# A short circuit, built the same way test_ai.gd builds its own. The
+	# catalogue's Manunda Street Circuit is 2283 m and AIRacer needs ~200 s to
+	# lap it at the pace this harness runs at, so a 60 s budget ended the run
+	# mid-lap at checkpoint 13/19 with laps == 0 - the assertion below failing
+	# for reasons unrelated to the seam it exists to test. This is about the
+	# director, not endurance.
+	circuit = RaceDef.circuit(_graph, 0, 400.0, "integration", "Integration Circuit", 1)
 	circuit.laps = 1          # one lap is enough to prove the seam
 	circuit.entry_fee = 0     # and money is tested separately
 
@@ -129,11 +136,25 @@ func _full_lap_completes(t: TestHarness) -> void:
 
 	# Autopilot: aim at a point ahead on the route. Deliberately crude - the point
 	# is to prove the seam, not to drive well.
+	# The real driver, not a local stub. The stub this replaced aimed two route
+	# points ahead and re-projected from scratch every frame; on a closed circuit
+	# that oscillates, and the car orbited a 200 m loop without ever passing
+	# checkpoint 0 (cp stayed 0/10 for all 3600 frames). Re-implementing driving
+	# here was a second, worse copy of AIRacer - the seam under test is the
+	# car/director contract, so drive it with the thing that actually drives.
+	var ai := AIRacer.new()
+	ai.car = car
+	ai.graph = _graph
+	ai.skill = 0.8
+	ai.director = dr
+	world.add_child(ai)
+	# The driver builds its line on the first physics frame.
+	await t.ticks(3)
+
 	var laps_seen := 0
-	var frames := 3600          # 60 s of simulated time
+	var frames := 7200          # 120 s of simulated time
 	for i in frames:
 		dr.tick(1.0 / 60.0)
-		_auto_drive(t, car, dr)
 		await t.ticks(1)
 		e.sync()
 		if dr.laps(0) > laps_seen:
@@ -150,36 +171,6 @@ func _full_lap_completes(t: TestHarness) -> void:
 		t.gt(dr.results[0]["time"], 0.0, "and a finish time")
 
 	await t.drop(world)
-
-
-## Steers toward the next route point. Simple, but enough to keep the car on the
-## road long enough to bank a lap.
-func _auto_drive(t: TestHarness, car: CarBody, dr: RaceDirector) -> void:
-	var pts: Array = dr.route_points() if dr.has_method("route_points") else []
-	if pts.is_empty():
-		car.throttle = 0.5
-		car.steer = 0.0
-		return
-	var idx: int = dr.nearest_route_index(car.global_position) if dr.has_method("nearest_route_index") else 0
-	var target := Vector2.ZERO
-	if idx + 2 < pts.size():
-		target = pts[idx + 2]
-	elif idx + 1 < pts.size():
-		target = pts[idx + 1]
-	else:
-		target = pts[pts.size() - 1]
-	var to := Vector3(target.x, 0, target.y) - car.global_position
-	var local: Vector3 = car.global_transform.basis.inverse() * to
-	car.steer = clampf(-atan2(local.x, -local.z) * 1.8, -1.0, 1.0)
-	var turn := absf(car.steer)
-	var want: float = lerpf(120.0, 40.0, turn)
-	if car.speed_kph > want:
-		car.throttle = 0.0
-		car.brake = 0.4
-	else:
-		car.throttle = 1.0
-		car.brake = 0.0
-	car.auto_shift()
 
 
 func _entering_costs_money(t: TestHarness) -> void:
