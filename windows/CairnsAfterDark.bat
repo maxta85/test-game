@@ -34,7 +34,18 @@ if not exist "%PS1%" (
   exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -Action %*
+rem  -Action must NOT be written unconditionally. With no arguments %* expands
+rem  to nothing, so the command line ends in a bare "-Action" and PowerShell
+rem  fails to bind it ("Missing an argument for parameter 'Action'") before the
+rem  script ever runs - the default double-click installed nothing at all.
+rem  With no action we pass nothing at all and let install.ps1's own default
+rem  (Play) apply.
+if "%~1"=="" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%"
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -Action %*
+)
+
 if errorlevel 1 (
   echo.
   pause

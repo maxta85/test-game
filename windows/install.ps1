@@ -75,6 +75,13 @@ $DesktopDir   = [Environment]::GetFolderPath('Desktop')
 $DefaultRepo  = 'maxta85/test-game'
 $UserAgent    = 'CairnsAfterDark-Launcher'
 
+# Windows PowerShell 5.1 ships powershell.exe; PowerShell 7 renamed it pwsh.exe.
+# Both this file and the .bat that calls it have to work, and a hard-coded
+# 'powershell.exe' resolves to nothing under pwsh - which silently turned both
+# re-launch paths (the update prompt and the background update check) into
+# no-ops on a machine with only PowerShell 7.
+$PowerShellExe = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' })
+
 # --------------------------------------------------------------------------
 # Small helpers
 # --------------------------------------------------------------------------
@@ -106,7 +113,7 @@ function Get-ManifestRepo {
 # launch, so this returns $null on any failure rather than throwing.
 function Get-RemoteManifest {
     param([string]$Repo, [int]$TimeoutMs = 8000)
-    $tmp = $null
+    $body = $null
     try {
         $url = "https://raw.githubusercontent.com/$Repo/main/windows/manifest.json"
         $req = [System.Net.HttpWebRequest]::Create($url)
@@ -339,7 +346,7 @@ function Invoke-Update {
         # The background check found something. Now show it, properly, with a
         # window the player can actually answer.
         Write-Step "Cairns After Dark $($remote.version) is available (you have $($local.version))"
-        Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') `
+        Start-Process -FilePath $PowerShellExe `
             -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass',
                             '-File', (Join-Path $ScriptDir 'install.ps1'), '-Action', 'Update')
         return
@@ -402,7 +409,14 @@ function Invoke-Uninstall {
     $isRoot   = ($null -ne $resolved) -and ($resolved -match '^[A-Za-z]:\\?$')
     $isHome   = ($null -ne $resolved) -and ($null -ne $home) -and ($resolved -eq $home.TrimEnd('\'))
 
-    if ($null -eq $resolved -or $isRoot -or $isHome) {
+    # This same file ships inside the source checkout at windows\install.ps1,
+    # where $Root is the repository root. A developer who double-clicked
+    # windows\CairnsAfterDark.bat Uninstall would otherwise have had the whole
+    # working tree - every agent's uncommitted work included - deleted by
+    # Remove-Item -Recurse. An install folder never has a project.godot in it.
+    $isCheckout = Test-Path -LiteralPath (Join-Path $Root 'project.godot')
+
+    if ($null -eq $resolved -or $isRoot -or $isHome -or $isCheckout) {
         Write-Note "not removing '$Root' - it does not look like a game install folder. Delete it by hand."
     } else {
         Write-Step "removing $resolved"
@@ -426,7 +440,7 @@ try {
             # Detached and hidden so a normal launch never flashes a console.
             # It surfaces a window only if an update genuinely exists.
             if (-not $NoUpdateCheck) {
-                $psExe = Join-Path $PSHOME 'powershell.exe'
+                $psExe = $PowerShellExe
                 if (Test-Path -LiteralPath $psExe) {
                     Start-Process -FilePath $psExe -WindowStyle Hidden -ErrorAction SilentlyContinue `
                         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass',
