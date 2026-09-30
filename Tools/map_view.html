@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cairns After Dark - map import</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html, body, #map { height: 100%; margin: 0; background: #0a0d16; }
+  #panel {
+    position: absolute; z-index: 1000; top: 12px; left: 12px;
+    background: rgba(10,13,22,.92); color: #cfd6e4; font: 12px/1.5 ui-monospace, monospace;
+    padding: 10px 12px; border: 1px solid #2a3348; border-radius: 4px; max-width: 340px;
+  }
+  #panel b { color: #ffa03d; }
+  #panel .err { color: #ff3d5a; }
+  .swatch { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 5px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">loading…</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// The map the game loads, drawn over the real basemap. The point is the overlay
+// against real streets: if the projection were wrong, the lines would not sit on
+// the roads underneath. Pan and zoom to check any corner of it.
+const ARTERIAL = '#ffa03d', STREET = '#5a96eb';
+const panel = document.getElementById('panel');
+const map = L.map('map', { zoomControl: true, attributionControl: true }).setView([-16.9319, 145.7513], 16);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap contributors (ODbL)',
+}).addTo(map);
+
+// Same equirectangular projection Tools/osm_cairns.py used, inverted here.
+const bb = { lat0: 0, lon0: 0, mlon: 1 };
+const M_PER_DEG_LAT = 110574.0;
+function toLatLon(p) {
+  return [bb.lat0 - p[1] / M_PER_DEG_LAT, bb.lon0 + p[0] / bb.mlon];
+}
+
+async function load(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(path + ' -> HTTP ' + r.status);
+  return r.json();
+}
+
+(async () => {
+  let data, place = null;
+  try {
+    data = await load('assets/maps/cairns_map.json');
+    bb.lat0 = (data.bbox.south + data.bbox.north) / 2;
+    bb.lon0 = (data.bbox.west + data.bbox.east) / 2;
+    bb.mlon = 111320.0 * Math.cos(bb.lat0 * Math.PI / 180);
+  } catch (e) {
+    panel.innerHTML = '<span class="err">' + e.message + '</span>';
+    return;
+  }
+  try { place = await load('shots/placements.json'); } catch (e) { /* optional */ }
+
+  const group = { 2: [], 1: [] };
+  for (const c of data.corridors) {
+    if (!group[c.class]) continue;
+    group[c.class].push(c.points.map(toLatLon));
+  }
+  for (const cls of [1, 2]) {
+    L.polyline(group[cls], {
+      color: cls === 2 ? ARTERIAL : STREET,
+      weight: cls === 2 ? 4 : 2,
+      opacity: 0.95,
+    }).addTo(map);
+  }
+
+  let note = '';
+  if (place) {
+    L.polyline(toLatLon(place.start_line), { color: '#ff4646', weight: 5, opacity: 0.9 })
+      .bindTooltip('start line').addTo(map);
+    L.circleMarker(toLatLon(place.grid), { radius: 8, color: '#5aff82', weight: 3, fill: false })
+      .bindTooltip('start grid').addTo(map);
+    L.circleMarker(toLatLon(place.car_meet), { radius: 8, color: '#ffdc5a', weight: 3, fill: false })
+      .bindTooltip('car meet').addTo(map);
+    note = '<br>anchor: <b>' + place.anchor + '</b>';
+  } else {
+    note = '<br><span class="err">no shots/placements.json - run Tools/diag_osm.gd</span>';
+  }
+
+  const pts = data.corridors.flatMap(c => c.points);
+  map.fitBounds(pts.map(toLatLon).concat(
+    pts.map(toLatLon)), { padding: [20, 20] });
+  panel.innerHTML =
+    '<b>Cairns After Dark - imported map</b><br>' +
+    data.corridors.length + ' corridors, ' + data.stats.total_km + ' km, ' +
+    Object.keys(data.stats.extent_m).length + '' + data.stats.extent_m[0] + ' x ' +
+    data.stats.extent_m[1] + ' m' + note + '<br>' +
+    '<span class="swatch" style="background:' + ARTERIAL + '"></span>arterial (96) ' +
+    '<span class="swatch" style="background:' + STREET + '"></span>street' +
+    '<br>overlay is the network the game loads';
+})();
+</script>
+</body>
+</html>

@@ -33,6 +33,8 @@ const CAR_SHOTS := {
 
 
 static func apply(node: Node, preset_name: String) -> bool:
+	if preset_name == "street":
+		return _apply_to_start_line(node)
 	if CAR_SHOTS.has(preset_name):
 		return _apply_to_car(node, CAR_SHOTS[preset_name])
 	if not PRESETS.has(preset_name):
@@ -44,6 +46,27 @@ static func apply(node: Node, preset_name: String) -> bool:
 	cam.global_position = p[0]
 	cam.look_at(Vector3(p[1]), Vector3.UP)
 	cam.fov = float(p[2])
+	return true
+
+
+## The "street" preset follows the map instead of hardcoding Manunda's origin.
+## Every other preset in PRESETS is an absolute point in the world, so they all
+## went stale the moment the layout became real OSM data. This one is derived
+## from the layout, so it keeps framing the start line whatever the map is - and
+## it looks *along* the street, not at a fixed compass bearing, which matters
+## now that the anchor street can run any direction.
+static func _apply_to_start_line(node: Node) -> bool:
+	var cam := _camera_of(node)
+	if cam == null:
+		return false
+	var s: Dictionary = OSMLayout.start_line()
+	var at: Vector3 = s["pos"]
+	var d: Vector2 = s["dir"]
+	var fwd := Vector3(d.x, 0.0, d.y)
+	var side := Vector3(-d.y, 0.0, d.x)
+	cam.global_position = at - fwd * 26.0 + side * 7.0 + Vector3(0.0, 2.6, 0.0)
+	cam.look_at(at + fwd * 30.0, Vector3.UP)
+	cam.fov = 52.0
 	return true
 
 

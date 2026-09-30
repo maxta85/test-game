@@ -117,8 +117,8 @@ static func touge(graph: RoadGraph, start_node: int, target_len: float, p_id: St
 ## One race of every kind, for the garage menu.
 static func catalogue(graph: RoadGraph) -> Array:
 	return [
-		sprint(graph, 0, 900.0, "esplanade_sprint", "Esplanade Sprint"),
-		circuit(graph, 0, 700.0, "manunda_circuit", "Manunda Street Circuit", 3),
+		sprint(graph, 0, 900.0, "gordon_sprint", "Gordon Street Sprint"),
+		circuit(graph, 0, 700.0, "mulgrave_circuit", "Mulgrave Road Circuit", 3),
 		time_attack(graph, 0, 700.0, "nightfall_tt", "Nightfall Time Attack", 3),
 		pursuit(graph, 0, 1100.0, "heat_run", "Heat Run"),
 		touge(graph, 0, 500.0, "ridge_touge", "Ridge Touge"),

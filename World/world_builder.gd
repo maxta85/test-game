@@ -572,7 +572,12 @@ func _blocks() -> Array:
 	## buildings always sit inside a real block.
 	var out: Array = []
 	for n in graph.nodes:
-		if n["edges"].size() != 4:
+		# 3 edges or more, not exactly 4. A block only has to be enclosed by
+		# streets, and a T-junction does that as well as a crossroads. Requiring
+		# exactly 4 was invisible on the authored Manunda lattice, where almost
+		# every junction was a crossroads, and cost almost the entire city on real
+		# OSM data, where most junctions are T-junctions: 359 nodes, 13 buildings.
+		if n["edges"].size() < 3:
 			continue
 		var p: Vector2 = n["pos"]
 		# Sample a ring of points around the junction; if we stay off-road all
