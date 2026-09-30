@@ -15,6 +15,8 @@ extends SceneTree
 
 const TESTS_DIR := "res://Tests/"
 
+var _autoloads: PackedStringArray = PackedStringArray()
+
 
 func _initialize() -> void:
 	var filter := ""
@@ -23,6 +25,7 @@ func _initialize() -> void:
 		filter = String(args[0])
 
 	var suites := _discover()
+	_autoloads = _autoload_names()
 	var t := TestHarness.new()
 	t.tree = self
 	var ran := 0
@@ -62,9 +65,24 @@ func _initialize() -> void:
 ## and makes a suite's failures its own.
 func _clear_world() -> void:
 	for child in root.get_children():
-		child.queue_free()
+		if not child.name in _autoloads:
+			child.queue_free()
 	await physics_frame
 	await process_frame
+
+
+## The autoload singletons are project services, not a suite's world. Freeing one
+## leaves the `Cfg` identifier bound to a freed object, so every later suite that
+## touches money reads through a dangling instance and takes the process down with
+## it - measured: the `ui` suite died on SIGSEGV in `MenuShell.refresh_status`
+## because the `ai` suite, three suites earlier, cleared it.
+func _autoload_names() -> PackedStringArray:
+	var out := PackedStringArray()
+	for p in ProjectSettings.get_property_list():
+		var n := String(p.get("name", ""))
+		if n.begins_with("autoload/"):
+			out.append(n.substr("autoload/".length()))
+	return out
 
 
 ## Every `res://Tests/test_*.gd`, sorted so runs are deterministic.
