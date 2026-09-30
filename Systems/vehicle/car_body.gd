@@ -24,11 +24,20 @@ const G := 9.8
 const SPEC_RELAXATION_LENGTH := 0.45
 
 @export var spec: CarSpec
+## Build the exterior. Physics-only runs (and a couple of headless benches) can
+## turn this off; in the game every car is seen.
+@export var build_visual := true
+
+## The exterior this body is wearing, if any. Null when `build_visual` is off.
+var visual: CarVisual = null
 
 # --- driver inputs (set by the player controller or the AI) ---
 var throttle := 0.0
 var brake := 0.0
-var steer := 0.0        ## -1 (full left) .. +1 (full right)
+var steer := 0.0        ## -1 (full right) .. +1 (full left). Positive yaws toward
+                        ## -X from a -Z heading, because the wheel basis is
+                        ## rotated about +Y (see the steering block below).
+                        ## This was documented as the opposite for a while.
 var handbrake := 0.0
 
 # --- drivetrain state ---
@@ -71,6 +80,11 @@ func _ready() -> void:
 	continuous_cd = true
 	_build_collision_shape()
 	_build_wheels()
+	if build_visual:
+		visual = CarVisual.new()
+		visual.name = "Visual"
+		add_child(visual)
+		visual.build(spec)
 	reset_to(spec.start_position, spec.start_rotation)
 
 

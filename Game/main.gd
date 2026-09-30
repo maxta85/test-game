@@ -73,10 +73,6 @@ func _ready() -> void:
 	_start_first_race()
 
 	if shot_path != "":
-		var preset := _shot_preset()
-		if preset != "":
-			await get_tree().process_frame
-			ShotPoser.apply(camera, preset)
 		_capture(shot_path)
 
 
@@ -201,12 +197,38 @@ func _shot_request() -> String:
 	return ""
 
 
-## Frame-grab mode for automated visual checks. Settles the car, lets the world
-## stream in, then writes a PNG and quits.
+## Frame-grab mode for automated visual checks. Lets the world settle, poses the
+## camera, then writes a PNG and quits.
+##
+## The preset is applied *here* rather than at the end of `_ready` because the
+## race director puts the cars on the starting grid a frame or two after the
+## race starts. A preset applied before that frames the street where the car
+## used to be, which is how every shot so far managed to contain no car.
 func _capture(path: String) -> void:
-	await get_tree().process_frame
 	for i in 40:
 		await get_tree().process_frame
+
+	var preset := _shot_preset()
+	if preset != "":
+		# Hand the camera over: without this the chase camera reasserts its own
+		# pose on the very next frame and every preset renders as a chase shot.
+		camera.tracking = false
+		ShotPoser.apply(camera, preset)
+		for i in 4:
+			await get_tree().process_frame
+
+	# Print the pose the shot was actually taken from. Every "the preset does not
+	# work" bug so far has been a camera quietly being driven by something else.
+	var cam3d: Camera3D = null
+	for c in camera.get_children():
+		if c is Camera3D:
+			cam3d = c
+	if cam3d != null:
+		print("[Shot] preset=%s camera=%s fov=%.1f | car=%s | %.2f m apart, tracking=%s" % [
+			preset if preset != "" else "(chase)", str(cam3d.global_position.round()), cam3d.fov,
+			str(player_car.global_position.round()),
+			cam3d.global_position.distance_to(player_car.global_position), camera.tracking])
+
 	await RenderingServer.frame_post_draw
 	var img: Image = get_viewport().get_texture().get_image()
 	img.save_png(path)
