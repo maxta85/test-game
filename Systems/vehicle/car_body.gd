@@ -22,6 +22,12 @@ const AIR_DENSITY := 1.2041
 const G := 9.8
 ## How far a tyre rolls before it develops full force, in metres.
 const SPEC_RELAXATION_LENGTH := 0.45
+## Pedal travel that counts as a request, matching the 0.3 the forward path uses.
+const PEDAL_ENGAGE := 0.3
+## Reverse is brake-then-throttle, so how far the brake pedal has to be down.
+const REVERSE_BRAKE := 0.3
+## Below this road speed the car counts as stopped and may be put in reverse.
+const REVERSE_ENTRY_SPEED := 1.0
 
 @export var spec: CarSpec
 ## Build the exterior. Physics-only runs (and a couple of headless benches) can
@@ -193,7 +199,14 @@ func is_driving_wheel(w: Dictionary) -> bool:
 	return false
 
 
+## Ratio for one gear, signed. `gears` has no reverse entry, so reverse borrows
+## first gear's ratio with the sign flipped - the old `g < 0 -> 0.0` made reverse
+## a gear that made no torque at all, so selecting it moved nothing. Every caller
+## wants a positive magnitude except the drive torque, which is exactly where the
+## sign belongs.
 func gear_ratio(g: int) -> float:
+	if g == -1:
+		return -float(spec.gears[1]) if spec.gears.size() > 1 else 0.0
 	if g < 0 or g >= spec.gears.size():
 		return 0.0
 	return float(spec.gears[g])
@@ -332,7 +345,9 @@ func _update_engine(delta: float) -> void:
 	driven_wheel_omega /= driven
 
 	var ratio := gear_ratio(current_gear) * spec.final_drive
-	var geared_rpm := absf(driven_wheel_omega) * ratio * 60.0 / TAU
+	# absf: reverse's ratio is negative but the tacho reads engine speed, which the
+	# wheels drive either way round.
+	var geared_rpm: float = absf(driven_wheel_omega) * absf(ratio) * 60.0 / TAU
 	var free_rpm: float = spec.idle_rpm + throttle * (spec.redline - spec.idle_rpm) * 0.55
 	var target_rpm: float = maxf(geared_rpm, free_rpm)
 
@@ -373,7 +388,10 @@ func _update_turbo(delta: float) -> void:
 
 
 func shift_up() -> bool:
-	if current_gear < spec.gears.size() - 1 and shift_timer <= 0.0 and current_gear >= 0:
+	# `>= -1` so a manual box can paddle out of reverse. It could not before only
+	# because reverse was unreachable; now that it is selectable, refusing to
+	# leave it would strand the car there.
+	if current_gear < spec.gears.size() - 1 and shift_timer <= 0.0 and current_gear >= -1:
 		current_gear += 1
 		shift_timer = spec.shift_time
 		return true
@@ -390,11 +408,36 @@ func shift_down() -> bool:
 
 ## Picks the gear that suits road speed. Used by the AI and available to the
 ## player; the manual paddles above still work if they want them.
+##
+## Reverse is brake-then-throttle at a standstill - hold the brake at a stop, then
+## press the throttle, which is what the keyboard already means (S then W). Throttle
+## on its own deliberately does NOT select reverse: a car that coasts up to a kerb
+## with the throttle still down would flip into reverse the moment it stopped and
+## drive back into the thing it just parked at. Measured: a stopped car sits at
+## 0.08 m/s and a car braking from 60 kph is under 1.1 m/s within one frame, so the
+## 1.0 m/s entry speed is an order of magnitude clear of the noise floor while
+## still reading as "stopped" to a player.
+##
+## ponytail: reverse is geared like 1st, so it runs to the 1st-gear redline -
+## measured 65 kph backwards, where a real reverse gear is capped nearer 25. No
+## limiter is added here because none of the forward gears have one either and the
+## player can always lift; cap the rev limiter on `current_gear < 0` if reverse
+## ever needs a ceiling of its own.
 func auto_shift() -> void:
 	if shift_timer > 0.0:
 		return
+	# Reverse, from any forward gear. Not inside the `current_gear <= 0` branch
+	# below: the box never sits below 1st on its own, so that branch is never
+	# reached in auto and putting it there is how reverse stayed unreachable.
+	if current_gear >= 0 and brake > REVERSE_BRAKE and throttle > PEDAL_ENGAGE \
+			and speed_mps <= REVERSE_ENTRY_SPEED:
+		current_gear = -1
+		shift_timer = spec.shift_time
+		return
 	if current_gear <= 0:
-		if throttle > 0.3:
+		# `brake <= REVERSE_BRAKE` so that holding both pedals - the request that
+		# selected reverse - cannot also bounce the box straight back to 1st.
+		if throttle > PEDAL_ENGAGE and brake <= REVERSE_BRAKE:
 			current_gear = 1
 			shift_timer = spec.shift_time
 		return
@@ -412,6 +455,15 @@ func auto_shift() -> void:
 func _update_tyres(delta: float) -> void:
 	var basis := global_transform.basis
 	var steer_lock := _steer_lock()
+
+	# While the box is in reverse and the player is asking to reverse, the brake
+	# pedal is the reverse request, not the brake - that is the only way to ask for
+	# reverse in the first place (see auto_shift). Left on, it cancels the reverse
+	# drive torque almost exactly: measured 5663 Nm to the rear axle against 2650 Nm
+	# of brake per wheel left the tyres spinning at 0.12 rad/s and the car creeping
+	# backwards at 0.02 m/s. Off the throttle, S is an ordinary brake again, which
+	# is how a reversing car stops.
+	var pedal_brake := 0.0 if (current_gear < 0 and throttle > PEDAL_ENGAGE) else brake
 
 	# Torque at the crank reaches the wheels through the box and final drive, then
 	# splits across the driven axles by layout. This is the single most important
@@ -447,7 +499,7 @@ func _update_tyres(delta: float) -> void:
 		var v_side := linear_velocity.dot(side)
 
 		# Brake torque for this wheel. The handbrake locks the rear axle only.
-		var brake_torque := brake * spec.brake_torque
+		var brake_torque := pedal_brake * spec.brake_torque
 		if w["front"]:
 			brake_torque *= spec.brake_bias
 		if handbrake > 0.0 and not w["front"]:
