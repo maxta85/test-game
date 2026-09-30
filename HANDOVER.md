@@ -20,6 +20,10 @@ is in flux — check `.agent_mailbox/` and the briefs before assuming any of it.
 
 ## 2. What I committed
 
+> Superseded in part — `main` has moved well past this. See `docs/roadmap.md`
+> for current state and `docs/agents/STATUS.md` for live agent status. This file
+> is the race/AI/audio handover as it stood at handover time.
+
 ```
 f348b29  Race system: director, race definitions and tests
 5cd4a33  Racing AI: racing line, driver, and a real circuit to race on
@@ -36,21 +40,12 @@ the commit body.
 |---|---|---|
 | `./test.sh race` | **99/99 green**, on the OSM map | re-ran after `208d23e` |
 | `Audio/audio_check.gd` | **135/135, exit 0** | needs the import step first |
-| `./test.sh ai` | ⚠️ **NOT CONFIRMED on the OSM map** | see below |
+| `./test.sh ai` | **17 / 17 green, on the OSM map** | confirmed 2026-09-30, exit 0 |
 
-**The AI suite is unverified against the new map.** I started `./test.sh ai`
-after the OSM change (`208d23e feat: the map is real OpenStreetMap streets`) and
-stopped it partway to take this handover. Every assertion it had reached was
-passing — including spin recovery (3.8 s), skill separation (828 m vs 687 m) and
-mistake rates (25 errors at skill 0.3, 0 at skill 0.96) — but **it never printed
-its summary line, so treat it as unknown, not green.** First thing to do:
-
-    ./test.sh ai     # ~5–6 min. Expect it to fail or pass; either way it is the
-                     # first thing that needs re-establishing.
-
-The race suite re-run green on OSM is meaningful evidence that circuit generation
-does not depend on the old authored grid being regular — the new roads are real
-OSM geometry.
+**Update, 2026-09-30: the AI suite is confirmed green on the new map** — 17
+passed, 0 failed, exit 0. The "unverified" warning above has been resolved. It
+takes 5–6 minutes because physics in this harness is real-time bound; that is
+expected, not a hang.
 
 ## 4. Landed but unused: the audio system
 
