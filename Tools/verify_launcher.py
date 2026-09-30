@@ -487,6 +487,17 @@ def check_gui(m):
     check("loads install.ps1 from beside itself",
           "Join-Path $PSScriptRoot 'install.ps1'" in code)
 
+    # Regression guard. WinForms was once loaded *after* the install.ps1 load,
+    # so the handler meant to report a missing install.ps1 could not itself show
+    # a MessageBox, swallowed its own failure and exited with no window and no
+    # message - the launcher just vanished. The assembly load must precede the
+    # first statement that can fail.
+    _add_type = code.find("Add-Type -AssemblyName System.Windows.Forms")
+    _engine_load = code.find("Join-Path $PSScriptRoot 'install.ps1'")
+    check("WinForms loads before anything that can fail, so errors can be shown",
+          -1 < _add_type < _engine_load,
+          "Add-Type at offset %d, install.ps1 load at offset %d" % (_add_type, _engine_load))
+
     # --- the 1:1 contract: every action has a button, no button without one ---
     actions, arms = install_action_surface()
     launched = re.findall(r"Start-Engine\s+'([A-Za-z]+)'", code)

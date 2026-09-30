@@ -35,6 +35,20 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
+# WinForms and Drawing are loaded FIRST, before anything that can fail.
+# Stop-WithMessage below reports through a MessageBox, and a MessageBox needs
+# this type. When the assembly load sat further down this file, every early
+# failure - a missing install.ps1 being the common one - reached an error
+# handler that could not itself report, hit a swallowed exception inside the
+# handler, and exited with no window and no message.
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+} catch {
+    Write-Host ("Cairns After Dark: WinForms is not available: " + $_.Exception.Message) -ForegroundColor Red
+    exit 1
+}
+
 # The engine. Byte for byte the same file the console entry point runs.
 $InstallerPath = Join-Path $PSScriptRoot 'install.ps1'
 
@@ -113,13 +127,10 @@ if ($env:CAD_GUI_HEADLESS -eq '1') {
 # --------------------------------------------------------------------------
 # The window
 # --------------------------------------------------------------------------
-try {
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-    [System.Windows.Forms.Application]::EnableVisualStyles()
-} catch {
-    Stop-WithMessage ("WinForms is not available: " + $_.Exception.Message)
-}
+# WinForms and Drawing were loaded at the top of this file, ahead of the first
+# thing that can fail. Visual styles still have to be switched on here, which
+# is why this line is not simply folded into that load.
+[System.Windows.Forms.Application]::EnableVisualStyles()
 
 # The console is left minimised rather than hidden: the .bat starts this script
 # with `start /min`, so the window a player would otherwise stare at is out of
