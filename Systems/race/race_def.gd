@@ -62,7 +62,7 @@ func payout_for_position(pos: int, entrants: int) -> int:
 
 static func circuit(graph: RoadGraph, start_node: int, target_len: float, p_id: String, p_name: String, p_laps: int) -> RaceDef:
 	var d := _new(Kind.CIRCUIT, p_id, p_name, target_len / maxf(float(p_laps), 1.0))
-	d.path = _straightest_first(graph, graph.find_loop(start_node, target_len))
+	d.path = _straightest_first(graph, _grow_circuit(graph, start_node, target_len, RoadGraph.RoadClass.HIGHWAY, false))
 	d.closed = true
 	d.laps = maxi(p_laps, 1)
 	d.difficulty = 2 + mini(p_laps, 3)
@@ -82,7 +82,7 @@ static func time_attack(graph: RoadGraph, start_node: int, target_len: float, p_
 ## start rather than back where you began.
 static func sprint(graph: RoadGraph, start_node: int, target_len: float, p_id: String, p_name: String) -> RaceDef:
 	var d := _new(Kind.SPRINT, p_id, p_name, target_len)
-	var loop: Array = graph.find_loop(start_node, target_len)
+	var loop: Array = _grow_circuit(graph, start_node, target_len, RoadGraph.RoadClass.HIGHWAY, false)
 	d.path = loop.slice(0, maxi(4, int(float(loop.size()) * 0.6)))
 	d.closed = false
 	d.laps = 1
@@ -92,7 +92,7 @@ static func sprint(graph: RoadGraph, start_node: int, target_len: float, p_id: S
 
 static func pursuit(graph: RoadGraph, start_node: int, target_len: float, p_id: String, p_name: String) -> RaceDef:
 	var d := _new(Kind.PURSUIT, p_id, p_name, target_len)
-	var loop: Array = graph.find_loop(start_node, target_len)
+	var loop: Array = _grow_circuit(graph, start_node, target_len, RoadGraph.RoadClass.HIGHWAY, false)
 	d.path = loop.slice(0, maxi(4, int(float(loop.size()) * 0.75)))
 	d.closed = false
 	d.laps = 1
@@ -138,17 +138,21 @@ static func _new(kind: int, p_id: String, p_name: String, target_len: float) -> 
 
 ## Puts the start/finish line on the straightest junction of a closed route.
 ##
-## find_loop closes the lap wherever its greedy walk happens to land, which here
-## is a hairpin: cars arrive at the line travelling the opposite way to the
-## opening straight, so anything that reads "forwards" off the first edge rejects
-## a perfectly good crossing. Rotating the route is free, and every reader then
-## gets path[0] as a start/finish line a real circuit would use - on the fast
-## straight, not in a corner.
+## A circuit's start line belongs on its fastest straight, not wherever the route
+## builder happened to begin: cars arrive at the line travelling the opposite way
+## to the opening street, so anything that reads "forwards" off the first edge
+## rejects a perfectly good crossing. Rotating the route is free, and every
+## reader then gets path[0] as a start/finish line a real circuit would use.
+##
+## Accepts a route with or without the closing junction repeated, and always
+## returns one with it, which is the convention the rest of the game reads.
 static func _straightest_first(graph: RoadGraph, path: Array) -> Array:
-	if path.size() < 5 or int(path[0]) != int(path[path.size() - 1]):
-		return path
-	var ring := path.slice(0, path.size() - 1)
+	var ring: Array = path.duplicate()
+	if ring.size() > 2 and int(ring[0]) == int(ring[ring.size() - 1]):
+		ring.resize(ring.size() - 1)
 	var count := ring.size()
+	if count < 4:
+		return path
 	var best := 0
 	var best_dot := -2.0
 	for i in count:
@@ -166,79 +170,195 @@ static func _straightest_first(graph: RoadGraph, path: Array) -> Array:
 	return out
 
 
-## The back streets are not evenly walkable - the corner of the map is a handful
-## of lanes with no loop in it - so try a spread of start nodes and keep the
-## longest run that closes.
-static func _touge_route(graph: RoadGraph, start: int, target_len: float) -> Array:
-	var n := graph.nodes.size()
+## A closed loop through the streets that actually goes round something.
+##
+## RoadGraph.find_loop cannot be used for a race route. On this network its
+## greedy walk runs straight to the map edge and then shortest-paths back along
+## the same street, so what it calls a circuit is 2 km of out-and-back with no
+## corners at all: nothing to race on, and nothing for a driver to brake for. It
+## still satisfies "returns a closed loop", which is why it went unnoticed. (The
+## brief for the race system stated the opposite; measured, it is a there-and-
+## back - extent 0 x 1142 m, zero corners.)
+##
+## So the route is built here instead, by growing a cycle rather than by walking
+## one. Find a small loop, then repeatedly replace one of its edges with a detour
+## around the block behind it. Every step is a shortest path that avoids the rest
+## of the circuit, so the result is a simple cycle by construction: it cannot
+## double back on itself, and it cannot come out as a there-and-back.
+static func _grow_circuit(graph: RoadGraph, start: int, target_len: float, max_class: int, technical: bool) -> Array:
 	var best: Array = []
-	var best_len := 0.0
-	for s in [start, n / 4, n / 2, (3 * n) / 4]:
-		var path: Array = _touge_loop(graph, clampi(int(s), 0, n - 1), target_len)
-		var length := 0.0
-		for i in path.size() - 1:
-			length += graph.node_pos(int(path[i])).distance_to(graph.node_pos(int(path[i + 1])))
-		if length > best_len:
-			best = path
-			best_len = length
+	var best_score := -INF
+	# A circuit is worth starting from more than one place: the map is not evenly
+	# walkable, and the corner of it is a handful of lanes with no block in it.
+	var n := graph.nodes.size()
+	for s in [start, n / 6, n / 3, n / 2, (2 * n) / 3, (5 * n) / 6]:
+		var seed: Array = _seed_cycle(graph, clampi(int(s), 0, n - 1), max_class)
+		if seed.size() < 4:
+			continue
+		var grown: Array = _grow_from(graph, seed, max_class, target_len, technical)
+		if not _goes_round_something(graph, grown):
+			continue      # a there-and-back is not a circuit, however long it is
+		var length := _loop_length(graph, grown)
+		# Nearest the length asked for, and long before short.
+		var score: float = -absf(length - target_len) * 0.5 + minf(length, 4000.0) * 0.05
+		if score > best_score:
+			best_score = score
+			best = grown
 	return best
 
 
-## Greedy walk over the narrow end of the network: the sharpest corner available
-## until the route is long enough, then straight home to close the loop. Only
-## ever walks lanes and side streets, and only the last step is allowed back onto
-## the start. Returns [] if it cannot get home, which makes the definition
-## invalid rather than a route that teleports across the map.
-static func _touge_loop(graph: RoadGraph, start: int, target_len: float) -> Array:
-	var home: Vector2 = graph.node_pos(start)
-	var path: Array = [start]
-	var visited := {start: true}
-	var node := start
-	var came_from := -1
-	var prev := Vector2.ZERO
-	var length := 0.0
-	var guard := 0
-	while guard < 800 and length <= target_len * 6.0:
-		guard += 1
-		var heading_home := length >= target_len
-		var best_eid := -1
-		var best_score := -INF
-		for eid in graph.nodes[node]["edges"]:
-			if int(graph.edges[eid]["class"]) > RoadGraph.RoadClass.STREET:
+## The smallest loop through a node: two of its neighbours joined by a path that
+## does not come back through it. On a street grid that is one city block.
+static func _seed_cycle(graph: RoadGraph, start: int, max_class: int) -> Array:
+	var neighbours: Array = []
+	for eid in graph.nodes[start]["edges"]:
+		if int(graph.edges[eid]["class"]) <= max_class:
+			neighbours.append(int(graph.other_node(eid, start)))
+	for i in neighbours.size():
+		for j in range(i + 1, neighbours.size()):
+			var a: int = neighbours[i]
+			var b: int = neighbours[j]
+			var path: Array = _path_avoiding(graph, a, b, {start: true}, max_class, true)
+			if path.size() >= 3:
+				var out: Array = [start]
+				out.append_array(path)
+				return out
+	return []
+
+
+## Grows a cycle by detouring its edges around blocks until it stops growing.
+static func _grow_from(graph: RoadGraph, seed: Array, max_class: int, target_len: float, technical: bool) -> Array:
+	var cyc: Array = seed.duplicate()
+	var in_cyc := {}
+	for n in cyc:
+		in_cyc[int(n)] = true
+	var grown := true
+	var rounds := 0
+	while grown and rounds < 300:
+		grown = false
+		rounds += 1
+		if _loop_length(graph, cyc) >= target_len * 1.8:
+			break
+		for i in cyc.size():
+			var a: int = int(cyc[i])
+			var b: int = int(cyc[(i + 1) % cyc.size()])
+			var detour: Array = _path_avoiding(graph, a, b, in_cyc, max_class, false)
+			if detour.size() < 3:
 				continue
-			var nxt: int = graph.other_node(eid, node)
-			if visited.has(nxt) and nxt != start and not heading_home:
+			if technical and _detour_corners(graph, detour) < 2:
+				continue      # a technical run detours round corners, not round blocks
+			cyc = _splice(cyc, i, detour)
+			in_cyc.clear()
+			for n in cyc:
+				in_cyc[int(n)] = true
+			grown = true
+			break       # re-index from the new cycle before choosing again
+	return cyc
+
+
+## Shortest path from a to b that touches none of `blocked` except b, and does
+## not simply step straight from a to b (which is not a detour).
+static func _path_avoiding(graph: RoadGraph, a: int, b: int, blocked: Dictionary, max_class: int, allow_direct: bool) -> Array:
+	var prev := {a: -1}
+	var queue: Array = [a]
+	var head := 0
+	var found := false
+	while head < queue.size():
+		var n: int = queue[head]
+		head += 1
+		if n == b:
+			found = true
+			break
+		for eid in graph.nodes[n]["edges"]:
+			if int(graph.edges[eid]["class"]) > max_class:
 				continue
-			var d: Vector2 = (graph.node_pos(nxt) - graph.node_pos(node)).normalized()
-			var score := 0.0
-			if heading_home:
-				# Distance home dominates by a mile, so the walk never dithers;
-				# the alignment and the no-backtracking terms only break ties,
-				# which is what stops it pacing up and down one block.
-				score = -graph.node_pos(nxt).distance_to(home) * 10.0 \
-						+ d.dot((home - graph.node_pos(node)).normalized()) \
-						- (1.0 if nxt == came_from else 0.0)
-			else:
-				# A touge corner is a corner: the sharpest turn available wins.
-				score = (1.0 if prev == Vector2.ZERO else -prev.dot(d)) + float(graph.edges[eid]["class"]) * 0.1
-			if score > best_score:
-				best_score = score
-				best_eid = eid
-		if best_eid < 0:
-			# Nowhere narrow left to go: drop the trail and keep exploring.
-			visited.clear()
-			visited[node] = true
+			var nxt: int = int(graph.other_node(eid, n))
+			if prev.has(nxt):
+				continue
+			if n == a and nxt == b and not allow_direct:
+				continue
+			if blocked.has(nxt) and nxt != b:
+				continue
+			prev[nxt] = n
+			queue.append(nxt)
+	if not found:
+		return []
+	var out: Array = []
+	var cur := b
+	while cur != -1:
+		out.push_front(cur)
+		if cur == a:
+			break
+		cur = int(prev[cur])
+	return out
+
+
+## Replaces edge i -> i+1 of the cycle with the detour, which starts at i and
+## ends at i+1.
+static func _splice(cyc: Array, i: int, detour: Array) -> Array:
+	var out: Array = []
+	for k in range(i + 1):
+		out.append(int(cyc[k]))
+	# The detour's first node is cyc[i], already in; its last is cyc[i+1], which
+	# is the node this edge used to end on, so it is kept here and cyc[i+1] is
+	# not repeated.
+	for k in range(1, detour.size()):
+		out.append(int(detour[k]))
+	for k in range(i + 2, cyc.size()):
+		out.append(int(cyc[k]))
+	return out
+
+
+static func _detour_corners(graph: RoadGraph, path: Array) -> int:
+	var corners := 0
+	for i in range(1, path.size() - 1):
+		var a: Vector2 = (graph.node_pos(int(path[i])) - graph.node_pos(int(path[i - 1]))).normalized()
+		var b: Vector2 = (graph.node_pos(int(path[i + 1])) - graph.node_pos(int(path[i]))).normalized()
+		var deg: float = rad_to_deg(a.angle_to(b))
+		if deg > 25.0 and deg < 150.0:
+			corners += 1
+	return corners
+
+
+static func _loop_length(graph: RoadGraph, path: Array) -> float:
+	var total := 0.0
+	for i in path.size() - 1:
+		total += graph.node_pos(int(path[i])).distance_to(graph.node_pos(int(path[i + 1])))
+	return total
+
+
+## A loop only counts as a race route if it turns corners and covers ground in
+## both directions. A there-and-back is closed and long and useless to race on.
+static func _goes_round_something(graph: RoadGraph, path: Array) -> bool:
+	if path.size() < 6:
+		return false
+	var corners := 0
+	var lo := Vector2(INF, INF)
+	var hi := Vector2(-INF, -INF)
+	for i in path.size():
+		var p: Vector2 = graph.node_pos(int(path[i]))
+		lo.x = minf(lo.x, p.x)
+		lo.y = minf(lo.y, p.y)
+		hi.x = maxf(hi.x, p.x)
+		hi.y = maxf(hi.y, p.y)
+		if i == 0 or i == path.size() - 1:
 			continue
-		var step_to: int = graph.other_node(best_eid, node)
-		came_from = node
-		prev = (graph.node_pos(step_to) - graph.node_pos(node)).normalized()
-		length += graph.edge_length(best_eid)
-		visited[step_to] = true
-		path.append(step_to)
-		node = step_to
-		# Only a run worth driving counts. Left ungated, the sharpest-corner
-		# preference turns into the first triangle it finds - 50 m of back
-		# street - whatever length was asked for.
-		if node == start and length >= target_len:
+		var a: Vector2 = (p - graph.node_pos(int(path[i - 1]))).normalized()
+		var b: Vector2 = (graph.node_pos(int(path[i + 1])) - p).normalized()
+		var deg: float = rad_to_deg(a.angle_to(b))
+		if deg > 25.0 and deg < 150.0:
+			corners += 1
+	# Two real corners is a rounded rectangle, which is a perfectly good street
+	# circuit; what it must not be is a shape that never turns.
+	return corners >= 2 and (hi.x - lo.x) > 120.0 and (hi.y - lo.y) > 120.0
+
+
+## A technical run: lanes and side streets only, detoured around corners rather
+## than around the long way round a block.
+static func _touge_route(graph: RoadGraph, start: int, target_len: float) -> Array:
+	var n := graph.nodes.size()
+	for s in [start, n / 4, n / 2, (3 * n) / 4]:
+		var path: Array = _grow_circuit(graph, clampi(int(s), 0, n - 1), target_len, RoadGraph.RoadClass.STREET, true)
+		if _goes_round_something(graph, path):
 			return path
 	return []

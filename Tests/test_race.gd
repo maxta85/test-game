@@ -112,16 +112,26 @@ func _checkpoints_in_order(t: TestHarness) -> void:
 	t.eq(dr.checkpoint_count(), def.path.size() - 2, "the checkpoints are the junctions between start and line")
 	t.eq(dr.next_checkpoint(0), 0, "the race opens on the first checkpoint")
 
-	# Straight past the first two to the third.
-	cars[0].position = wps[3]
+	# Straight to the far side of the lap, past half the circuit's checkpoints.
+	# Half a lap rather than the third junction, because how close the early
+	# junctions are to the start line is a property of the route, not of the rule.
+	cars[0].position = wps[int(wps.size() * 0.5)]
 	dr.tick(0.05)
-	t.eq(dr.next_checkpoint(0), 0, "jumping past checkpoints does not count them")
+	t.eq(dr.next_checkpoint(0), 0, "jumping half a lap ahead does not count the checkpoints passed")
 
-	# And the line cannot be cashed on a short set either.
+	# And the line cannot be cashed on a short set either. Approach the line the
+	# way a car does, from just behind it, so the crossing is a real pass and not
+	# a jump from one side of the map to the other.
+	cars[0].position = _past_line(-6.0)
+	dr.tick(0.05)
 	cars[0].position = _past_line(4.0)
 	dr.tick(0.05)
 	t.eq(dr.laps(0), 0, "crossing the line without every checkpoint does not count a lap")
-	t.eq(dr.next_checkpoint(0), 0, "the crossing restarts the checkpoint set")
+	# Crossing throws the set away, so the car owes the whole circuit again
+	# rather than being part-way round a second time.
+	t.gt(float(dr.checkpoint_count() - dr.next_checkpoint(0)), float(dr.checkpoint_count() - 2),
+		"the crossing reset the checkpoint set (%d of %d still owed)" % [
+			dr.checkpoint_count() - dr.next_checkpoint(0), dr.checkpoint_count()])
 
 	for k in range(1, def.path.size() - 1):
 		cars[0].position = wps[k]
@@ -155,6 +165,9 @@ func _backwards_crossing(t: TestHarness) -> void:
 		dr.tick(0.05)
 	t.eq(dr.next_checkpoint(0), dr.checkpoint_count(), "the full set is taken")
 
+	# Come up to the line from behind and go through it.
+	cars[0].position = _past_line(-6.0)
+	dr.tick(0.05)
 	cars[0].position = _past_line(4.0)
 	dr.tick(0.05)
 	t.eq(dr.laps(0), 1, "the earned crossing counts")

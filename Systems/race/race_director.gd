@@ -282,7 +282,7 @@ func _grid_slot(i: int) -> Vector3:
 ## Nearest point on the route: how far along it (for the line crossing and for
 ## ranking) and which way it runs there (for wrong-way).
 func _project(v: Vector2) -> Dictionary:
-	var best := {"s": 0.0, "dir": _line_d}
+	var best := {"s": 0.0, "dir": _line_d, "i": 0}
 	var best_d := INF
 	for i in _pts.size() - 1:
 		var a: Vector2 = _pts[i]
@@ -294,8 +294,37 @@ func _project(v: Vector2) -> Dictionary:
 		var d: float = a.distance_squared_to(v - ab * t)
 		if d < best_d:
 			best_d = d
-			best = {"s": float(_cum[i]) + t * sqrt(len2), "dir": ab / sqrt(len2)}
+			best = {"s": float(_cum[i]) + t * sqrt(len2), "dir": ab / sqrt(len2), "i": i}
 	return best
+
+
+# ------------------------------------------------------------------- route query
+# The route the race is actually scored on, so the AI can drive the same line.
+# Read-only: nothing here changes race state.
+
+## Array[Vector2] through the junctions, start/finish line first.
+func route_points() -> Array:
+	return _pts.duplicate()
+
+
+func route_length() -> float:
+	return _route_length
+
+
+## Which segment of the route a car is on. Seed an AI's own tracking from this
+## and then walk forward from it, rather than re-searching every frame.
+func nearest_route_index(pos: Vector3) -> int:
+	if _pts.size() < 2:
+		return 0
+	return int(_project(Vector2(pos.x, pos.z))["i"])
+
+
+func line_position() -> Vector3:
+	return Vector3(_line_o.x, 0.0, _line_o.y)
+
+
+func line_direction() -> Vector2:
+	return _line_d
 
 
 # --------------------------------------------------------------------- results
