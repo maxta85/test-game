@@ -861,7 +861,15 @@ func _streetlights() -> void:
 
 			var l := OmniLight3D.new()
 			l.light_color = MatLib.SODIUM
-			l.light_energy = 45.0
+			# 12.0, down from 45.0. Measured on GPU renders (RTX 3060), sweeping
+			# only this line so the attribution is clean:
+			#   street   frame mean 23.42 -> 10.27, clipped 3.48% -> 0.17%,
+			#            orange 1.18% -> 0.05%, road readable 20.40% -> 16.06%
+			#            (11.0 -> 12.09%, 10.0 -> 8.46%: the legibility cliff)
+			#   carfront car crop blown 44.43% -> 25.66%, frame clipped 14.21% -> 4.48%,
+			#            palm trunk saturated 55.91% -> 2.99%, orange 31.20% -> 0.00%
+			# Shopfront (4.5) and shed (3.0) energies held constant throughout.
+			l.light_energy = 12.0
 			l.omni_range = 34.0
 			l.omni_attenuation = 1.25
 			# 1121 lamps all injecting into a 70 m fog slab turns the sky into
