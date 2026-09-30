@@ -26,3 +26,6 @@ __pycache__/
 # Credentials (never commit)
 *.key
 .env
+
+# Godot import sidecars are regenerated on first import, never committed.
+*.import
