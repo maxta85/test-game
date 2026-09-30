@@ -117,3 +117,18 @@ func _loops(t: TestHarness, g: RoadGraph) -> void:
 		for i in loop.size() - 1:
 			length += g.node_pos(int(loop[i])).distance_to(g.node_pos(int(loop[i + 1])))
 		t.gt(length, 400.0, "the circuit is long enough to race (%.0f m)" % length)
+
+		# Node count and total length are NOT enough. find_loop used to return a
+		# 2283 m, 30-junction loop with a 0 x 1142 m bounding box: the walk ran
+		# to the map edge and came straight back down the same street. Both
+		# assertions above passed, and the result was undriveable. A circuit has
+		# to cover ground on both axes.
+		var lo := Vector2(INF, INF)
+		var hi := Vector2(-INF, -INF)
+		for n in loop:
+			var p: Vector2 = g.node_pos(int(n))
+			lo = Vector2(minf(lo.x, p.x), minf(lo.y, p.y))
+			hi = Vector2(maxf(hi.x, p.x), maxf(hi.y, p.y))
+		var extent := hi - lo
+		t.gt(extent.x, 150.0, "the circuit has real width, it is not a there-and-back (%.0f m)" % extent.x)
+		t.gt(extent.y, 150.0, "and real depth (%.0f m)" % extent.y)

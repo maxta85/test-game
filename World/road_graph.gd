@@ -294,12 +294,22 @@ func nearest_road(p: Vector3) -> Dictionary:
 ## and deterministic, where an exhaustive search over a 250-node grid is
 ## exponential and would hang.
 func find_loop(start: int, target_len_m: float) -> Array:
+	# Sample starts across the whole graph, not just a few near `start`. The
+	# greedy walk prefers going straight on, so a candidate only becomes a real
+	# circuit when it happens to begin somewhere with blocks on more than one
+	# side - a handful of nearby starts all make the same spike.
+	var tries: Array = [start]
+	var samples := 24
+	for i in range(1, samples):
+		tries.append(int(round(float(i) * float(nodes.size() - 1) / float(samples - 1))))
+
 	var best: Array = []
 	var best_len := 1e9
-	# Try from a few different starting nodes and pick the one closest to target.
-	for s in [start, 0, g_min(start, g_max(0, start - 40)), g_min(start, g_max(0, start + 40))]:
+	for s in tries:
 		var loop := _greedy_loop(int(s), target_len_m)
 		if loop.size() < 4:
+			continue
+		if not _is_real_circuit(loop, target_len_m * 0.25):
 			continue
 		var l := _path_length(loop)
 		if l < 250.0:
@@ -308,6 +318,29 @@ func find_loop(start: int, target_len_m: float) -> Array:
 			best = loop
 			best_len = l
 	return best
+
+
+## A circuit has to actually go round.
+##
+## `_greedy_loop` prefers straight-on movement, so on a network that ends in
+## cul-de-sacs it runs to the map edge, gets stuck, and closes the loop with the
+## shortest path straight back down the same street. The junction count and the
+## total length both look plausible - it really is a closed walk of the right
+## size - but the result is a there-and-back spike: on this network the 2283 m
+## "circuit" had a 0 x 1142 m bounding box and no corners at all, which no car
+## can drive and no race can be run on.
+##
+## A genuine circuit has extent on both axes. That is the cheap test for it, and
+## it is the one that matters: a loop with no width is not a lap.
+func _is_real_circuit(loop: Array, min_extent: float) -> bool:
+	var lo := Vector2(INF, INF)
+	var hi := Vector2(-INF, -INF)
+	for n in loop:
+		var p := node_pos(int(n))
+		lo = Vector2(minf(lo.x, p.x), minf(lo.y, p.y))
+		hi = Vector2(maxf(hi.x, p.x), maxf(hi.y, p.y))
+	var extent := hi - lo
+	return extent.x >= min_extent and extent.y >= min_extent
 
 
 func g_min(a: int, b: int) -> int:
