@@ -5,10 +5,11 @@ extends Node3D
 ## greenhouse, a roof, wheels that steer and spin off the real suspension data,
 ## and working lights.
 ##
-## Boxes on purpose. There are no downloaded assets in this project, and a
-## stack of well-proportioned boxes with a good paint material reads as a car at
-## night far better than an untextured sphere ever would. Every dimension comes
-## from the spec, so a new car in CarDB looks right without touching this file.
+## Boxes on purpose as the fallback: a stack of well-proportioned boxes with a
+## good paint material reads as a car at night far better than an untextured
+## sphere ever would, and every dimension comes from the spec, so a new car in
+## CarDB looks right without touching this file. Where a scanned model exists
+## it is used instead - see _build_model.
 ##
 ## The wheels are the only part that has to be built, because the physics already
 ## computes the right answer for them: each wheel carries its own `steer_angle`
@@ -27,6 +28,21 @@ const PAINTS := {
 	"racing_green": Color(0.045, 0.19, 0.10),
 	"taxi_yellow": Color(0.72, 0.50, 0.04),
 	"burnt_orange": Color(0.42, 0.13, 0.03),
+}
+
+## Which imported model stands in for which car. The glb files are named after
+## the real car they are and the CarDB ids are not, so this is the one place the
+## two meet - same kind of lookup as PAINTS above.
+##
+## A car with no entry here keeps its procedural body on purpose. kairo_mx90 and
+## kaze_type_r are a Miata and an AE86 Trueno, neither of which is in the
+## downloaded set, and a correctly sized box beats the wrong car.
+const MODELS := {
+	"kairo_s13": "silvia_s13",      ## S13. The player car.
+	"tatsuya_gt": "supra_mk4",      ## A80.
+	"shinobi_rs": "wrx_gc8",        ## GC8 blobeye. The rival.
+	"hayate_turbo": "evo_v",        ## CP9A.
+	"akuma_gt": "silvia_s15",       ## S15.
 }
 
 const TAIL_IDLE := 1.1      ## emission energy with the brakes off
@@ -61,9 +77,61 @@ func build(body_spec: CarSpec) -> void:
 	_lights.name = "CarLights"
 	add_child(_lights)
 
+	# An imported model replaces the shell *and* the wheels. Leaving the
+	# procedural wheels in would double them up, because the scans have their
+	# wheels baked into the same mesh. The cost is that those wheels do not
+	# rotate - see _build_model.
+	if _build_model():
+		_build_lights()
+		return
+
 	_build_shell()
 	_build_wheels()
 	_build_lights()
+
+
+## Instances the imported glTF for this car, if there is a usable one.
+## Returns true when it did, so the caller can skip the procedural build.
+##
+## Nothing here knows about any particular model. Which cars have a model, how
+## big it is and which way up it was exported all live in CarFit, which is
+## generated from the files themselves - see Tools/fit_cars.gd. A car with no
+## entry, or one marked unusable, falls back to the procedural exterior.
+func _build_model() -> bool:
+	if spec == null or not MODELS.has(spec.id):
+		return false
+	var model_id: String = MODELS[spec.id]
+	if not CarFit.ALL.has(model_id):
+		return false
+	var fit: Dictionary = CarFit.ALL[model_id]
+	if not bool(fit.get("usable", false)):
+		return false
+	var path := "res://assets/cars/%s.glb" % model_id
+	if not ResourceLoader.exists(path):
+		return false
+	var packed: PackedScene = load(path)
+	if packed == null:
+		return false
+	var scene := packed.instantiate()
+	if scene == null:
+		return false
+
+	var deg: Vector3 = fit["rot_deg"]
+	var s: float = float(fit["scale"])
+	var basis := Basis.from_euler(Vector3(deg_to_rad(deg.x), deg_to_rad(deg.y), deg_to_rad(deg.z)))
+	basis = basis.scaled(Vector3.ONE * s)
+
+	var holder := Node3D.new()
+	holder.name = "Model"
+	# The car's origin sits at hub height rather than on the ground, so a model
+	# fitted to stand on y=0 has to be lifted by a tyre radius or it sinks.
+	holder.transform = Transform3D(
+		basis,
+		Vector3(fit["offset"]) + Vector3(0.0, spec.tyre_radius, 0.0)
+	)
+	add_child(holder)
+	holder.add_child(scene)
+	return true
 
 
 func _build_shell() -> void:
