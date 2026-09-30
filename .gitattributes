@@ -1,0 +1,4 @@
+# Large car models are glTF binaries in the tens of megabytes. Without LFS they
+# sit in the object store as opaque blobs that every future clone has to
+# download in full, and any edit to one re-stores the whole file.
+*.glb filter=lfs diff=lfs merge=lfs -text
