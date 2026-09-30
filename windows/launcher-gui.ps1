@@ -186,7 +186,7 @@ $script:EngineProc    = $null
 $script:Tails         = @()
 $script:PartFiles     = @()
 $script:Total         = 0
-$script:RemoteNote    = ''
+$script:RemoteNote    = 'Ready.'
 $script:RemoteChecked = $false
 
 function New-LauncherButton {
@@ -298,6 +298,12 @@ function Start-Engine {
         return
     }
 
+    # A Process from Start-Process -PassThru can come back without its handle
+    # cached, and .HasExited then throws instead of answering once the engine is
+    # gone - which would leave this window greyed out forever waiting for a
+    # process it can no longer see. Touch the handle once, here.
+    try { $null = $proc.Handle } catch { }
+
     $script:EngineProc = $proc
     Set-EngineBusy ('install.ps1 -Action ' + $Action + ' ...')
 }
@@ -395,17 +401,23 @@ function Update-State {
 # stand. The decision to *apply* an update is still Invoke-Update's; this only
 # decides what the status line says.
 function Update-RemoteNote {
-    $Manifest = Get-Manifest
-    $lblStatus.Text = 'Checking for updates...'
-    [System.Windows.Forms.Application]::DoEvents()
-    $remote = Get-RemoteManifest -Repo (Get-ManifestRepo $Manifest)
-    if ($null -eq $remote) {
-        $script:RemoteNote = 'Could not reach GitHub - staying on the installed build.'
-    } elseif (([string]$remote.version -eq [string]$Manifest.version) -and
-              ([string]$remote.tag    -eq [string]$Manifest.tag)) {
-        $script:RemoteNote = 'Up to date.'
-    } else {
-        $script:RemoteNote = "Version $($remote.version) is available."
+    try {
+        $Manifest = Get-Manifest
+        $lblStatus.Text = 'Checking for updates...'
+        [System.Windows.Forms.Application]::DoEvents()
+        $remote = Get-RemoteManifest -Repo (Get-ManifestRepo $Manifest)
+        if ($null -eq $remote) {
+            $script:RemoteNote = 'Could not reach GitHub - staying on the installed build.'
+        } elseif (([string]$remote.version -eq [string]$Manifest.version) -and
+                  ([string]$remote.tag    -eq [string]$Manifest.tag)) {
+            $script:RemoteNote = 'Up to date.'
+        } else {
+            $script:RemoteNote = "Version $($remote.version) is available."
+        }
+    } catch {
+        # This runs from a timer tick, where an unhandled error would take the
+        # window down rather than say anything useful.
+        $script:RemoteNote = 'Could not check for updates: ' + $_.Exception.Message
     }
     if ($null -eq $script:EngineProc) { $lblStatus.Text = $script:RemoteNote }
 }
@@ -426,9 +438,20 @@ $timer.Add_Tick({
     }
     if ($null -eq $script:EngineProc) { return }
 
-    Read-EngineOutput
-    Update-Progress
-    if (-not $script:EngineProc.HasExited) { return }
+    try {
+        Read-EngineOutput
+        Update-Progress
+        if (-not $script:EngineProc.HasExited) { return }
+    } catch {
+        # An exception here would leave every button greyed out with no way back
+        # to them, so whatever went wrong gets reported and the window is
+        # released. The engine may still be running; the next click restarts it.
+        $script:EngineProc = $null
+        $script:Tails = @()
+        Set-EngineIdle
+        Show-Note ('Lost track of install.ps1: ' + $_.Exception.Message)
+        return
+    }
 
     $code = $script:EngineProc.ExitCode
     $script:EngineProc = $null
@@ -459,8 +482,13 @@ $btnInstall.Add_Click({ Start-Engine 'Install' })
 
 $btnUpdate.Add_Click({
     if ($null -ne $script:EngineProc) { return }
-    $Manifest = Get-Manifest
-    $remote = Get-RemoteManifest -Repo (Get-ManifestRepo $Manifest)
+    try {
+        $Manifest = Get-Manifest
+        $remote = Get-RemoteManifest -Repo (Get-ManifestRepo $Manifest)
+    } catch {
+        Show-Note ('Could not check for updates: ' + $_.Exception.Message)
+        return
+    }
     if ($null -eq $remote) {
         Show-Note 'Could not reach GitHub, so there is nothing to check. Staying on the installed build.'
     } elseif (([string]$remote.version -eq [string]$Manifest.version) -and
