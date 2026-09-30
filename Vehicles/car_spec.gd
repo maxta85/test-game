@@ -5,6 +5,8 @@ extends Resource
 ##
 ## Masses in kg, distances in metres, torques in Nm, angles in radians.
 
+const AIR_DENSITY := 1.2041
+
 @export var id := "unnamed"
 @export var display_name := "UNNAMED"
 @export var chassis_class := "hatch"     ## hatch / coupe / sedan / wagon / awd
@@ -104,23 +106,46 @@ func peak_torque_nm() -> float:
 ## Theoretical top speed (m/s) from power vs drag, ignoring gearing limits.
 func top_speed_mps() -> float:
 	var peak_w := peak_power_kw() * 1000.0
-	var cda := 0.5 * 1.2041 * drag_area * drag_coefficient
+	var cda := 0.5 * AIR_DENSITY * drag_area * drag_coefficient
 	if cda <= 0.0:
 		return 0.0
 	return pow(peak_w / cda, 1.0 / 3.0)
 
 
-## 0-100 km/h in seconds, from a simple longitudinal integration.
-## Used for the garage stat card; the real measured number comes from the test rig.
+## 0-100 km/h in seconds, traction limited.
+##
+## The naive version - peak torque through the gearing, minus drag - is a lie for
+## anything that is not a traction monster: it reported 2.5 s for a deliberately
+## awful econobox because the number never asked whether the driven tyres could
+## actually take that torque. Without a grip limit the whole roster saturates at
+## the same "acceleration" and the garage bars are decoration.
+##
+## Integrated gear by gear from a standstill, the way the car actually does it,
+## with the driven axle on a friction circle: whatever the engine asks for, the
+## tyres can only deliver `mu * driven weight` of it.
 func zero_to_hundred() -> float:
-	var drive_force := peak_torque_nm() * final_drive * float(gears[1]) * 0.85 / tyre_radius
-	var v := 0.5
-	var t := 0.0
-	var target := 100.0 / 3.6
+	var weight: float = mass * 9.8
+	var axle_share: float = 0.45 if drive == "rwd" else (0.60 if drive == "fwd" else 0.5)
+	# The most torque the driven tyres can put down, in Nm at the wheel.
+	var traction: float = tyre_peak_mu * weight * axle_share * tyre_radius
+	var target: float = 100.0 / 3.6
+	var v: float = 0.5
+	var t: float = 0.0
+	var gear: int = 1
 	while v < target and t < 30.0:
-		var drag := 0.5 * 1.2041 * drag_area * drag_coefficient * v * v
-		var rr := 0.014 * mass * 9.8
-		var a := (drive_force - drag - rr) / mass
+		var ratio: float = float(gears[gear]) * final_drive
+		# Below idle the engine is still turning over, not making less torque.
+		var rpm: float = maxf(v / maxf(tyre_radius, 0.05) * ratio * 60.0 / TAU, idle_rpm)
+		if gear < gears.size() - 1 and rpm > shift_up_rpm:
+			gear += 1
+			continue
+		var demand: float = TyreModel.torque_from_curve(torque_curve, rpm) * ratio
+		# A turbo makes its boost over the first part of the pull, not instantly.
+		if has_turbo:
+			demand *= 1.0 + turbo_boost_multiplier * clampf(t / maxf(turbo_spool_time * 3.0, 0.1), 0.0, 1.0)
+		var force: float = minf(demand, traction) / maxf(tyre_radius, 0.05)
+		var drag: float = 0.5 * AIR_DENSITY * drag_area * drag_coefficient * v * v
+		var a: float = maxf((force - drag - 0.014 * weight) / mass, 0.0)
 		if a <= 0.0:
 			break
 		v += a * 0.01
@@ -128,9 +153,11 @@ func zero_to_hundred() -> float:
 	return t
 
 
-## 0-100 kph for the given tyre compound, given a grip multiplier (1.0 = dry).
+## 0-100 kph on a surface with `mu` instead of this car's tyres. Approximate -
+## the real number comes from the test rig - but it has to move in the right
+## direction or the garage is lying about what rain does.
 func zero_to_hundred_scaled(mu: float) -> float:
-	return zero_to_hundred() / maxf(mu, 0.25)
+	return zero_to_hundred() * clampf(tyre_peak_mu / maxf(mu, 0.25), 0.6, 2.2)
 
 
 func handling_rating() -> float:

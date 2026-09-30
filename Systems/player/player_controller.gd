@@ -38,7 +38,12 @@ func _physics_process(_delta: float) -> void:
 
 	car.throttle = Input.get_action_strength("throttle")
 	car.brake = Input.get_action_strength("brake")
-	car.steer = Input.get_action_strength("steer_right") - Input.get_action_strength("steer_left")
+	# Positive steer turns LEFT on CarBody, not right. This was reversed, so
+	# holding right sent the car left - the player could not drive. Measured,
+	# not assumed: steer = +0.5 for 2 s yaws ~1.5 rad toward -X from a -Z
+	# heading, and right is +X. The physics convention is kept as-is because
+	# AIRacer is written against it; only this mapping was wrong.
+	car.steer = Input.get_action_strength("steer_left") - Input.get_action_strength("steer_right")
 	car.handbrake = Input.get_action_strength("handbrake")
 
 	if auto_gearbox:

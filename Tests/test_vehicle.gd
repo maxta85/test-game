@@ -70,10 +70,109 @@ func run(t: TestHarness) -> void:
 	await _acceleration(t)
 	await _braking(t)
 	await _steering(t)
+	await _steering_direction(t)
+	await _player_input_steers_the_right_way(t)
 	await _drivetrain_differences(t)
 	await _handbrake_drift(t)
 	await _traction_limits(t)
 	await _stability(t)
+	await _spec_numbers(t)
+	await _exterior(t)
+
+
+## The garage stat card is only as honest as `zero_to_hundred()`. It used to be an
+## untraction-limited integration that reported 2.5 s for the econobox, so every
+## car in the roster came out with the same acceleration bar and the traffic
+## agent's civilian roster saturated identically. Order and bounds are the two
+## properties anything downstream actually relies on.
+func _spec_numbers(t: TestHarness) -> void:
+	var times := {}
+	for spec in CarDB.all():
+		var z: float = spec.zero_to_hundred()
+		times[spec.id] = z
+		t.between(z, 3.0, 20.0, "%s 0-100 is plausible (%.2f s)" % [spec.id, z])
+		t.gt(spec.top_speed_mps(), 30.0, "%s has a real top speed" % spec.id)
+		t.gt(spec.peak_power_kw(), 20.0, "%s has a real power figure" % spec.id)
+	t.gt(times["kairo_mx90"], times["kairo_s13"],
+		"the econobox is slower to 100 than the turbo coupe (%.2f vs %.2f s)" % [
+			times["kairo_mx90"], times["kairo_s13"]])
+	t.gt(times["kairo_s13"], times["tatsuya_gt"],
+		"the AWD turbo out-accelerates the RWD coupe (%.2f vs %.2f s)" % [
+			times["kairo_s13"], times["tatsuya_gt"]])
+	# Rain has to make the same car slower, or the weather is decoration.
+	var dry := CarDB.get_spec("kairo_s13")
+	t.gt(dry.zero_to_hundred_scaled(0.6), dry.zero_to_hundred(),
+		"the same car is slower to 100 on a wet road")
+
+
+## The car you look at for the whole game. If the exterior silently stops
+## following the physics - wheels that do not steer, brake lights that do not
+## light - it is a black box in the middle of the frame and nothing else will
+## tell you.
+func _exterior(t: TestHarness) -> void:
+	var world := make_world(t)
+	var car := spawn(world, "kairo_s13")
+	await t.ticks(6)
+	var vis := car.get_node_or_null("Visual") as CarVisual
+	t.ok(vis != null, "a car has an exterior")
+	if vis == null:
+		await t.drop(world)
+		return
+
+	t.eq(vis.wheel_nodes().size(), 4, "four wheels on the exterior")
+	for w in vis.wheel_nodes():
+		t.near((w["steer"] as Node3D).position.y, 0.0, 0.001,
+			"%s wheel sits at hub height" % w["name"])
+
+	# Wheels follow the tyres the physics actually computed, not their own idea.
+	car.steer = 1.0
+	car.throttle = 0.0
+	await t.ticks(4)
+	vis.sync(car)
+	var fl: float = (vis.wheel_nodes()[0]["steer"] as Node3D).rotation.y
+	var rl: float = (vis.wheel_nodes()[2]["steer"] as Node3D).rotation.y
+	t.near(fl, car.get_wheel("FL")["steer_angle"], 0.001, "front wheel visual matches the tyre model")
+	t.near(rl, 0.0, 0.001, "rear wheel visual is not steered")
+
+	await _run_flat_out(t, car, 1.5)
+	vis.sync(car)
+	t.gt(absf((vis.wheel_nodes()[2]["spin"] as Node3D).rotation.x), 0.05,
+		"rear wheel is rolling")
+
+	# Brake lights. Read the material, not the pixels - it is the same value the
+	# renderer uses, and it does not need a GPU to check.
+	var tail: StandardMaterial3D = null
+	var found := 0
+	for w in _walk(vis):
+		if w is MeshInstance3D and String(w.name).begins_with("Tail"):
+			found += 1
+			tail = (w as MeshInstance3D).material_override as StandardMaterial3D
+	t.eq(found, 2, "two tail lights")
+	if tail != null:
+		var off: float = tail.emission_energy_multiplier
+		car.brake = 1.0
+		vis.sync(car)
+		t.gt(tail.emission_energy_multiplier, off * 2.0, "brake lights come up under braking")
+		car.brake = 0.0
+		vis.sync(car)
+		t.near(tail.emission_energy_multiplier, off, 0.001, "and go back down when the pedal does")
+
+	# Headlights exist and point the way the car points.
+	var beams := 0
+	for w in _walk(vis):
+		if w is SpotLight3D:
+			beams += 1
+			t.ok((w as SpotLight3D).global_transform.basis.z.dot(-car.forward()) > 0.9,
+				"headlight beam points where the car is pointing")
+	t.eq(beams, 1, "one headlight beam per car")
+	await t.drop(world)
+
+
+static func _walk(node: Node) -> Array:
+	var out: Array = [node]
+	for c in node.get_children():
+		out.append_array(_walk(c))
+	return out
 
 
 func _acceleration(t: TestHarness) -> void:
@@ -144,6 +243,66 @@ func _steering(t: TestHarness) -> void:
 	t.gt(absf(car.get_wheel("FL")["steer_angle"]), absf(car.get_wheel("FR")["steer_angle"]),
 		"Ackermann turns the inside wheel further than the outside")
 	await t.drop(world)
+
+
+func _steering_direction(t: TestHarness) -> void:
+	# The sign of steering, which _steering above never checked: it asserts
+	# absf(lateral movement), so an inverted steering mapping passes it happily.
+	# That is how a build where holding "steer right" turned the car left got
+	# through - the player literally could not drive.
+	for pair in [[1.0, "positive"], [-1.0, "negative"]]:
+		var steer_value: float = pair[0]
+		var label: String = pair[1]
+		var world := make_world(t)
+		var car := spawn(world, "kairo_s13")
+		await t.ticks(6)
+		await _run_flat_out(t, car, 2.5)
+
+		car.throttle = 0.35
+		car.steer = steer_value
+		var x0: float = car.global_position.x
+		for i in 150:
+			await t.ticks(1)
+		# Facing -Z, right is +X. Positive steer yaws toward -X.
+		var expected: float = -signf(steer_value)
+		var actual: float = signf(car.global_position.x - x0)
+		t.near(actual, expected, 0.5,
+			"%s steer sends the car %s (x moved %.1f m)" % [
+				label, "left (-X)" if expected < 0.0 else "right (+X)",
+				car.global_position.x - x0])
+		await t.drop(world)
+
+
+func _player_input_steers_the_right_way(t: TestHarness) -> void:
+	# The test that would actually have caught the inverted steering. The one
+	# above sets `car.steer` by hand, so it only ever proved the CarBody physics
+	# - the bug was in PlayerController's action -> axis mapping, which that test
+	# cannot see. This drives the real input path: install the same action map
+	# the game installs, press the action, and watch which way the car goes.
+	InputSetup.install()
+	for pair in [["steer_right", 1.0], ["steer_left", -1.0]]:
+		var action: String = pair[0]
+		var expected: float = pair[1]     # +1 == right == +X
+		var world := make_world(t)
+		var car := spawn(world, "kairo_s13")
+		var pc := PlayerController.new()
+		pc.car = car
+		world.add_child(pc)
+		await t.ticks(6)
+
+		Input.action_press("throttle")
+		for i in 90:
+			await t.ticks(1)
+		Input.action_press(action)
+		var x0: float = car.global_position.x
+		for i in 150:
+			await t.ticks(1)
+		Input.action_release(action)
+		Input.action_release("throttle")
+		var moved: float = car.global_position.x - x0
+		t.near(signf(moved), expected, 0.5,
+			"pressing %s drives the car %s" % [action, "right (+X)" if expected > 0.0 else "left (-X)"])
+		await t.drop(world)
 
 
 func _drivetrain_differences(t: TestHarness) -> void:
