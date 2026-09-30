@@ -421,19 +421,24 @@ function Update-RemoteNote {
         [System.Windows.Forms.Application]::DoEvents()
         $remote = Get-RemoteManifest -Repo (Get-ManifestRepo $Manifest)
         if ($null -eq $remote) {
-            # Wording depends on whether there is anything installed to stay on.
-            # The unconditional version told a first-run player it was keeping
-            # their installed build when no build existed yet.
-            if (Test-ManifestMatchesFile -Manifest $Manifest -Path $GameExe) {
-                $script:RemoteNote = 'Could not reach GitHub - staying on the installed build.'
-            } else {
-                $script:RemoteNote = 'Could not reach GitHub - cannot check for updates.'
+            # install.ps1's own words for what went wrong. "Could not reach
+            # GitHub" is what a private repo looks like, and a player reading
+            # that has no way to tell the two apart. The fallback is for the one
+            # case that reaches no catch block at all.
+            $script:RemoteNote = $script:RemoteFail
+            if (-not $script:RemoteNote) {
+                if (Test-ManifestMatchesFile -Manifest $Manifest -Path $GameExe) {
+                    $script:RemoteNote = 'Could not reach GitHub - staying on the installed build.'
+                } else {
+                    $script:RemoteNote = 'Could not reach GitHub - cannot check for updates.'
+                }
             }
-        } elseif (([string]$remote.version -eq [string]$Manifest.version) -and
-                  ([string]$remote.tag    -eq [string]$Manifest.tag)) {
-            $script:RemoteNote = 'Up to date.'
         } else {
-            $script:RemoteNote = "Version $($remote.version) is available."
+            switch (Get-UpdateVerdict -Local $Manifest -Remote $remote) {
+                'current' { $script:RemoteNote = 'Up to date.' }
+                'ahead'   { $script:RemoteNote = "Installed $($Manifest.version) is newer than main ($($remote.version))." }
+                default   { $script:RemoteNote = "Version $($remote.version) is available." }
+            }
         }
     } catch {
         # This runs from a timer tick, where an unhandled error would take the
@@ -511,19 +516,22 @@ $btnUpdate.Add_Click({
         return
     }
     if ($null -eq $remote) {
-        if (Test-ManifestMatchesFile -Manifest $Manifest -Path $GameExe) {
-            Show-Note 'Could not reach GitHub, so there is nothing to check. Staying on the installed build.'
-        } else {
-            Show-Note 'Could not reach GitHub, so there is nothing to check. Nothing is installed yet - press Install / Repair.'
-        }
-    } elseif (([string]$remote.version -eq [string]$Manifest.version) -and
-              ([string]$remote.tag    -eq [string]$Manifest.tag)) {
-        Show-Note "You are up to date ($($Manifest.version))."
+        $why = $script:RemoteFail
+        if (-not $why) { $why = 'GitHub did not return a manifest.' }
+        Show-Note ($why + "`r`n`r`n" +
+                   'A 404 from GitHub usually means the release repo is private. A public release' +
+                   "`r`n" + 'needs no sign-in; a private one needs GITHUB_TOKEN set for this launcher.')
     } else {
-        $ans = Ask-Yes ("Cairns After Dark $($remote.version) is available.`r`n`r`n" +
-                        "install.ps1 will open a window of its own to download and verify it,`r`n" +
-                        "and will ask you to confirm before it changes anything. Continue?")
-        if ($ans) { Start-Engine 'Update' -Visible }
+        switch (Get-UpdateVerdict -Local $Manifest -Remote $remote) {
+            'current' { Show-Note "You are up to date ($($Manifest.version))." }
+            'ahead'   { Show-Note "Your build ($($Manifest.version)) is newer than main ($($remote.version)). Nothing to do." }
+            default {
+                $ans = Ask-Yes ("Cairns After Dark $($remote.version) is available.`r`n`r`n" +
+                                "install.ps1 will open a window of its own to download and verify it,`r`n" +
+                                "and will ask you to confirm before it changes anything. Continue?")
+                if ($ans) { Start-Engine 'Update' -Visible }
+            }
+        }
     }
 })
 
