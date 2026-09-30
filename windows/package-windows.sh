@@ -145,9 +145,9 @@ You do NOT need Godot, Git, Python or any developer tools. The first run
 needs internet access; after that the game runs offline.
 
 The GUI is a window over the same install.ps1, with a progress bar for the
-download. It has never been run on Windows - see the runbook in
-windows/README.md before trusting it. CairnsAfterDark.bat is the tested
-path and is unchanged.
+download. Its window has been opened and checked on Windows; the install
+it drives has not completed a full run yet, so if something looks wrong,
+fall back to CairnsAfterDark.bat, which is the older, simpler path.
 
 SAVES
   %APPDATA%\\CairnsAfterDark

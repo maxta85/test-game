@@ -44,10 +44,27 @@ set "PSEXE=powershell"
 where powershell >nul 2>&1
 if errorlevel 1 set "PSEXE=pwsh"
 
+rem Run SYNCHRONOUSLY. This used to be `start "" /min "%PSEXE%" ...`, which
+rem detaches: stderr and stdout go to a minimised console that nobody sees and
+rem that closes when the .bat exits. A launcher that crashed on launch
+rem therefore looked identical to one that had never started - which is
+rem exactly what happened, three times, while launcher-gui.ps1 was never
+rem parsed by any Windows host. install.ps1 and the GUI both report through a
+rem message box now; this console is the last line of defence behind that, so
+rem it stays on screen and pauses on a non-zero exit, the same thing
+rem CairnsAfterDark.bat already does. The cost is a console behind the window.
+rem That is a fair price for a launcher that can say why it failed.
+
 rem -STA is not optional. WinForms needs a single-threaded apartment and
 rem PowerShell 7 defaults to MTA, where the window can fail to appear at all.
-rem /min starts the console minimised: the form is its own window and comes
-rem up normally, and the console stays one click away if anything is wrong.
-start "" /min "%PSEXE%" -NoProfile -STA -ExecutionPolicy Bypass -File "%GUI%"
+"%PSEXE%" -NoProfile -STA -ExecutionPolicy Bypass -File "%GUI%"
+
+if errorlevel 1 (
+  echo.
+  echo The launcher exited with an error ^(code %errorlevel%^).
+  echo Any message box above has the reason; otherwise re-run from a visible
+  echo PowerShell window:  powershell -NoProfile -STA -File launcher-gui.ps1
+  pause
+)
 
 endlocal

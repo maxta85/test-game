@@ -1,6 +1,12 @@
 extends Node3D
-## Boots the game: builds the Manunda block, puts the player in a car, and hands
+## Boots the game: builds the Cairns block, puts the player in a car, and hands
 ## control over. Everything heavy happens once, here.
+##
+## Also the host for the front of house. `UI/menu_flow.gd` owns the four menu
+## screens and routes between them, but it cannot start a race, open the garage
+## or stop the world, so those come back out of it as signals and are answered
+## here. That is also why this file, and not the UI, is where the game opens on
+## the main menu instead of dropping the player straight into a race.
 
 signal world_ready(graph: RoadGraph)
 
@@ -18,10 +24,16 @@ var camera: ChaseCamera
 var player_car: CarBody
 var race: RaceDirector
 var hud: RaceHUD
+var menus: MenuFlow
+var garage: Garage
+var garage_screen: GarageScreen
 var _rivals: Array = []
 var player_controller: PlayerController
 var _sun: DirectionalLight3D
 var _stuck_time := 0.0
+## The results board stays up until the player leaves it, so the race finishing is
+## a thing that happens once.
+var _results_shown := false
 
 
 func _ready() -> void:
@@ -75,42 +87,184 @@ func _ready() -> void:
 
 	print("[Boot] world built in %.1f s" % ((Time.get_ticks_msec() - t0) / 1000.0))
 
-	_start_first_race()
+	_open_menus()
 
 	if shot_path != "":
+		# A frame grab has nobody at the keyboard to walk the menus, and the
+		# presets frame the grid, so a shot needs a race already under way.
+		_auto_start_race()
 		_capture(shot_path)
 
 
-## Builds the first race from the road graph and drops both cars on the grid.
-## The route is generated from the streets themselves, not authored, so it is
-## always consistent with the map the player is actually driving on.
-func _start_first_race() -> void:
-	var catalogue: Array = RaceDef.catalogue(graph)
-	if catalogue.is_empty():
-		push_warning("no races could be built from the road graph")
-		return
-	var race_def: RaceDef = catalogue[1] if catalogue.size() > 1 else catalogue[0]
-	print("[Race] %s: %s, %d laps, %.0f m of street" % [
-		race_def.display_name, race_def.kind_name(), race_def.laps,
-		race_def.length_m(graph)])
-
+## The front page. Built last, once there is a world behind it to look at.
+##
+## The director and the HUD are made here rather than per race: the HUD is a
+## handful of labels, and the director holds the wallet the garage and the results
+## board read, so one of each for the whole session is what they were written for.
+func _open_menus() -> void:
 	race = RaceDirector.new()
-	race.def = race_def
-	if not race.try_enter(race_def):
-		print("[Race] could not enter (entry fee %d, have %d) - running as a free race" % [
-			race_def.entry_fee, Cfg.money])
-		race_def.entry_fee = 0
+	garage = Garage.new()
+
+	menus = MenuFlow.create(graph)
+	add_child(menus)
+	menus.race_start_requested.connect(_on_race_start_requested)
+	menus.garage_requested.connect(_on_garage_requested)
+	menus.quit_requested.connect(_on_quit_requested)
 
 	hud = RaceHUD.new()
 	hud.name = "RaceHUD"
 	add_child(hud)
+	hud.visible = false
 
-	# The player is entrant 0, which is what the director treats as "the race
-	# ends when they cross the line".
-	var entrants: Array = [RaceEntrant.new(player_car)]
-	entrants.append(RaceEntrant.new(_rivals[0]) if _rivals.size() > 0 else null)
-	entrants = entrants.filter(func(e): return e != null)
-	race.start(race_def, graph, entrants)
+
+## The route the board is holding under `race_id`, as the definition the director
+## will run. The board built these off the same graph, so this is a lookup and not
+## a second catalogue.
+func _race_def(race_id: String) -> RaceDef:
+	for d in menus.races():
+		if String(d.id) == race_id:
+			return d
+	return null
+
+
+## The board committed to a race. Pay the entry, put the car the player left the
+## garage in on the grid, and hand the world over to the director.
+func _on_race_start_requested(race_id: String) -> void:
+	var d := _race_def(race_id)
+	if d == null:
+		push_warning("no race on the board called %s" % race_id)
+		menus.show_race_select()
+		return
+	# `try_enter` only takes an entry from an idle director, so a second race has to
+	# clear the first. `reset` keeps the entry, so the fee below is the only charge.
+	race.reset()
+	if not race.try_enter(d):
+		# The board is built from the map, not from the wallet, so a fee can be
+		# refused here. Back to the board rather than into a race nobody entered.
+		menus.show_race_select()
+		return
+
+	_drive(garage.race_spec())
+	_results_shown = false
+	if not race.start(d, graph, _entrants()):
+		push_warning("could not put the cars on the grid for %s" % d.display_name)
+		hud.visible = false
+		menus.show_race_select()
+		return
+	# The flow closes its own screens before it emits, but a race owning the screen
+	# is the host's claim to make: left up, the menus also eat ESC, because that is
+	# what a visible menu board does with it.
+	menus.close()
+	hud.visible = true
+	print("[Race] %s: %s, %d laps, %.0f m of street" % [
+		d.display_name, d.kind_name(), d.laps, d.length_m(graph)])
+
+
+## The player is entrant 0, which is what the director treats as "the race is
+## over when they cross the line".
+func _entrants() -> Array:
+	var out: Array = [RaceEntrant.new(player_car)]
+	for r in _rivals:
+		out.append(RaceEntrant.new(r))
+	return out
+
+
+## ESC mid-race. In the menus it is the screens' own business, and once the tree
+## is paused this node stops hearing input at all - the pause board unpauses.
+func _unhandled_input(event: InputEvent) -> void:
+	if not event.is_action_pressed("ui_cancel"):
+		return
+	if race != null and (race.state == RaceDirector.State.COUNTDOWN
+			or race.state == RaceDirector.State.RACING):
+		menus.set_paused(true)
+
+
+## The race is over. The director has banked the payout; it has not written it to
+## disk, and it cannot know the session is ending rather than the next race
+## starting, so saving is the host's call.
+func _conclude_if_over() -> void:
+	if _results_shown or race.state != RaceDirector.State.FINISHED:
+		return
+	_results_shown = true
+	hud.visible = false
+	Cfg.save_game()
+	menus.show_results(race)
+
+
+## The garage. It is a host screen: the flow routes the four menu screens and
+## reports that the player asked for this one, but nothing in `UI/` builds it.
+func _on_garage_requested() -> void:
+	if garage_screen == null:
+		garage_screen = GarageScreen.new(garage)
+		garage_screen.name = "GarageScreen"
+		add_child(garage_screen)
+		garage_screen.car_selected.connect(_on_garage_car_selected)
+		garage_screen.start_race.connect(_on_garage_start)
+		garage_screen.closed.connect(_on_garage_closed)
+	menus.close()
+	hud.visible = false
+	garage_screen.visible = true
+
+
+## Browsing a car in the garage is not choosing one. The screen draws whatever it
+## is handed and then reads the profile back through `garage.selected()`, so with
+## nothing committing the choice the browse cursor cannot move at all: every press
+## steps off the car that is already selected. This is the seam `car_selected` is
+## for. It also refuses for a car the player does not own, which is the answer
+## they want until they buy it - `buy` takes it out.
+func _on_garage_car_selected(car_id: String) -> void:
+	garage.select(car_id)
+
+
+## The garage's START commits the car, it does not pick a route - the signal
+## carries a car, not a race - so it lands on the board. Everything bought or
+## fitted is written to the save first, on the way past.
+func _on_garage_start(_car_id: String, spec: CarSpec) -> void:
+	garage.save()
+	_drive(spec)
+	_close_garage()
+	menus.show_race_select()
+
+
+func _on_garage_closed() -> void:
+	_close_garage()
+	menus.show_main_menu()
+
+
+func _close_garage() -> void:
+	if garage_screen != null:
+		garage_screen.visible = false
+
+
+func _on_quit_requested() -> void:
+	Cfg.save_game()
+	get_tree().quit()
+
+
+## Frame-grab mode: no player is at the keyboard to walk the menus, and every
+## preset frames the grid, so a shot starts the first route on the board.
+func _auto_start_race() -> void:
+	var board: Array = menus.races()
+	if board.is_empty():
+		push_warning("no races could be built from the road graph")
+		return
+	_on_race_start_requested(String(board[0].id))
+
+
+## Puts the car the player left the garage in behind the wheel. A new body rather
+## than a new spec on the old one, because the mass, the collider and the
+## bodywork are all sized off the spec when the car is built and never re-read it.
+func _drive(spec: CarSpec) -> void:
+	if spec == null or (player_car != null and spec.id == player_car.spec.id):
+		return
+	# Drop the director's hold on the car being replaced first: an entrant holds
+	# the body it was built around, and that reference outlives a freed object.
+	# Freed outright rather than deferred - a `queue_free` would still have the old
+	# "PlayerCar" in the tree when the new one is added, and the new body would be
+	# the one silently renamed out from under everything that looks it up by name.
+	race.reset()
+	player_car.free()
+	_spawn_player_car(spec)
 
 
 func _process(delta: float) -> void:
@@ -120,24 +274,19 @@ func _process(delta: float) -> void:
 				(e as RaceEntrant).sync()
 		race.tick(delta)
 		_recover_from_stuck(delta)
-	if hud != null:
+		_conclude_if_over()
+	# The HUD reads the director's entrants by index, so it is not fed a director
+	# that has never been started.
+	if hud != null and race.entrants.size() > 0:
 		hud.update(player_car, race, delta)
 
 
 func _spawn_player() -> void:
-	var spec := Cfg.active_spec()
-	spec.start_position = OSMLayout.start_grid_position(0)
-	spec.start_rotation = Vector3(0, -PI * 0.5, 0)
-
-	player_car = CarBody.new()
-	player_car.name = "PlayerCar"
-	player_car.spec = spec
-	add_child(player_car)
-	player_car.reset_to(spec.start_position, spec.start_rotation)
+	_spawn_player_car(Cfg.active_spec())
 
 	camera = ChaseCamera.new()
 	camera.name = "Camera"
-	camera.position = spec.start_position
+	camera.position = player_car.position
 	add_child(camera)
 	camera.set_car(player_car)
 
@@ -163,6 +312,25 @@ func _spawn_player() -> void:
 	ai.graph = graph
 	ai.skill = 0.72
 	add_child(ai)
+
+
+## Builds the player's body for `spec`. Split out of `_spawn_player` because the
+## garage swaps the car mid-session and the camera and the controller both hold a
+## reference to the body that has to follow it.
+func _spawn_player_car(spec: CarSpec) -> void:
+	spec.start_position = OSMLayout.start_grid_position(0)
+	spec.start_rotation = Vector3(0, -PI * 0.5, 0)
+
+	player_car = CarBody.new()
+	player_car.name = "PlayerCar"
+	player_car.spec = spec
+	add_child(player_car)
+	player_car.reset_to(spec.start_position, spec.start_rotation)
+
+	if camera != null:
+		camera.set_car(player_car)
+	if player_controller != null:
+		player_controller.car = player_car
 
 
 ## The camera preset name, given as the second value after --shot.
