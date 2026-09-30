@@ -158,7 +158,10 @@ $lblState = New-Object System.Windows.Forms.Label
 $lblState.Location = New-Object System.Drawing.Point(12, 40)
 $lblState.Size     = New-Object System.Drawing.Size(456, 88)
 $lblState.Font     = New-Object System.Drawing.Font('Segoe UI', 9)
-$lblState.Lines    = @('Reading manifest...')
+# A WinForms Label has no Lines property - that is VB6/ASP.NET. Multi-line text
+# goes in Text, joined with newlines. Set-StrictMode turns the wrong one into a
+# hard stop, which is how a never-executed script dies on its first line.
+$lblState.Text     = 'Reading manifest...'
 
 $bar = New-Object System.Windows.Forms.ProgressBar
 $bar.Minimum  = 0
@@ -383,7 +386,7 @@ function Update-State {
     try {
         $Manifest = Get-Manifest
     } catch {
-        $lblState.Lines = @('manifest.json could not be read:', $_.Exception.Message)
+        $lblState.Text = @('manifest.json could not be read:', $_.Exception.Message) -join [System.Environment]::NewLine
         return
     }
     $script:Total = [int64]$Manifest.size
@@ -399,12 +402,12 @@ function Update-State {
     } else {
         $line = 'Not installed yet. Press Play or Install / Repair.'
     }
-    $lblState.Lines = @(
+    $lblState.Text = @(
         $line,
         ('Pinned : {0} ({1})' -f $Manifest.version, $Manifest.tag),
         ('Digest : {0}...' -f ([string]$Manifest.sha256).Substring(0, 16)),
         ('Saves  : {0}' -f $SaveDir)
-    )
+    ) -join [System.Environment]::NewLine
     if ($null -eq $script:EngineProc) { $lblStatus.Text = $script:RemoteNote }
 }
 

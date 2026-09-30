@@ -498,6 +498,13 @@ def check_gui(m):
           -1 < _add_type < _engine_load,
           "Add-Type at offset %d, install.ps1 load at offset %d" % (_add_type, _engine_load))
 
+    # A WinForms Label has no Lines property - that is VB6/ASP.NET. Assigning one
+    # is a hard stop under Set-StrictMode, and it killed the GUI on its first
+    # statement. Multi-line control text goes in Text, joined with newlines.
+    check("no VB6-style .Lines assignment on a control",
+          not re.search(r"\$lbl\w*\.Lines\b", code),
+          "WinForms controls have no Lines property")
+
     # --- the 1:1 contract: every action has a button, no button without one ---
     actions, arms = install_action_surface()
     launched = re.findall(r"Start-Engine\s+'([A-Za-z]+)'", code)
