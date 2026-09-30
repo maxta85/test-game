@@ -78,6 +78,7 @@ func run(t: TestHarness) -> void:
 	await _stability(t)
 	await _spec_numbers(t)
 	await _exterior(t)
+	await _car_models(t)
 
 
 ## The garage stat card is only as honest as `zero_to_hundred()`. It used to be an
@@ -105,13 +106,16 @@ func _spec_numbers(t: TestHarness) -> void:
 		"the same car is slower to 100 on a wet road")
 
 
-## The car you look at for the whole game. If the exterior silently stops
-## following the physics - wheels that do not steer, brake lights that do not
-## light - it is a black box in the middle of the frame and nothing else will
-## tell you.
+## The exterior that has to follow the physics - wheels that steer, brake
+## lights that light. If that silently stops, it is a black box in the middle of
+## the frame and nothing else will tell you.
+##
+## Uses kairo_mx90 deliberately. It is one of the two cars with no imported
+## model, so it still gets the procedural exterior; the modelled path is
+## covered by _car_models.
 func _exterior(t: TestHarness) -> void:
 	var world := make_world(t)
-	var car := spawn(world, "kairo_s13")
+	var car := spawn(world, "kairo_mx90")
 	await t.ticks(6)
 	var vis := car.get_node_or_null("Visual") as CarVisual
 	t.ok(vis != null, "a car has an exterior")
@@ -120,6 +124,7 @@ func _exterior(t: TestHarness) -> void:
 		return
 
 	t.eq(vis.wheel_nodes().size(), 4, "four wheels on the exterior")
+	t.eq(vis.get_node_or_null("Model"), null, "a car with no imported model keeps its boxes")
 	for w in vis.wheel_nodes():
 		t.near((w["steer"] as Node3D).position.y, 0.0, 0.001,
 			"%s wheel sits at hub height" % w["name"])
@@ -165,6 +170,43 @@ func _exterior(t: TestHarness) -> void:
 			t.ok((w as SpotLight3D).global_transform.basis.z.dot(-car.forward()) > 0.9,
 				"headlight beam points where the car is pointing")
 	t.eq(beams, 1, "one headlight beam per car")
+	await t.drop(world)
+
+
+## A car with an imported model builds that model instead of a box exterior.
+##
+## This test exists because the fallback is invisible. When the CarDB-to-glb
+## mapping went stale the first time, every car quietly reverted to boxes and
+## the whole suite still passed - a box car is correct behaviour, so nothing
+## else could fail. Assert the model is actually there or the mapping rots
+## unnoticed.
+func _car_models(t: TestHarness) -> void:
+	var world := make_world(t)
+	var car := spawn(world, "kairo_s13")
+	await t.ticks(6)
+	var vis := car.get_node_or_null("Visual") as CarVisual
+	t.ok(vis != null, "the player car has an exterior")
+	if vis == null:
+		await t.drop(world)
+		return
+
+	var model := vis.get_node_or_null("Model") as Node3D
+	t.ok(model != null, "the player car uses its imported model, not a box")
+	if model == null:
+		await t.drop(world)
+		return
+	t.ok(model.get_child_count() > 0, "the model is instanced, not an empty node")
+
+	# The scans have their wheels baked in. Leaving the procedural wheels on as
+	# well would draw two sets, one inside the other.
+	t.eq(vis.wheel_nodes().size(), 0,
+		"a modelled car drops its procedural wheels rather than doubling them up")
+
+	# The car's origin sits at hub height, so a model fitted to stand on y=0 has
+	# to be lifted by a tyre radius or it sinks into the road.
+	var fit: Dictionary = CarFit.ALL[CarVisual.MODELS["kairo_s13"]]
+	t.near(model.position.y, float(fit["offset"].y) + vis.spec.tyre_radius, 0.001,
+		"the model is lifted by a tyre radius so it stands on the ground")
 	await t.drop(world)
 
 
