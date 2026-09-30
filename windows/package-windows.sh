@@ -120,6 +120,12 @@ STAGE="build/bundle-$VERSION"
 rm -rf "$STAGE"; mkdir -p "$STAGE/launcher"
 cp windows/CairnsAfterDark.bat "$STAGE/"
 cp windows/install.ps1        "$STAGE/launcher/"
+# The GUI is a window over install.ps1, not a second launcher: it is only
+# meaningful next to the install.ps1 it calls, so the two have to land in the
+# same folder. Leaving either out would make the other's "not found" message
+# fire on every player's machine, so both are copied here.
+cp windows/launcher-gui.ps1       "$STAGE/launcher/"
+cp windows/CairnsAfterDark-GUI.bat "$STAGE/"
 [ -f windows/manifest.json ] || die "run with --tag=v$VERSION so windows/manifest.json exists"
 cp windows/manifest.json      "$STAGE/launcher/"
 cp build/SHA256SUMS           "$STAGE/"
@@ -130,12 +136,18 @@ Cairns After Dark - $VERSION
 
 INSTALL
   1. Extract this zip anywhere you like, e.g. C:\\Games\\CairnsAfterDark
-  2. Double-click CairnsAfterDark.bat
+  2. Double-click CairnsAfterDark-GUI.bat for the window, or
+     CairnsAfterDark.bat for the console. Both do the same thing.
   3. It downloads the game, checks its SHA-256, and puts Start-menu and
      desktop shortcuts in place.
 
 You do NOT need Godot, Git, Python or any developer tools. The first run
 needs internet access; after that the game runs offline.
+
+The GUI is a window over the same install.ps1, with a progress bar for the
+download. It has never been run on Windows - see the runbook in
+windows/README.md before trusting it. CairnsAfterDark.bat is the tested
+path and is unchanged.
 
 SAVES
   %APPDATA%\\CairnsAfterDark
