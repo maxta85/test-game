@@ -42,6 +42,9 @@ func _ready() -> void:
 	for i in VOICE_POOL:
 		var p := AudioStreamPlayer.new()
 		p.name = "Cue%d" % i
+		# On the SFX bus, which is the only reason the bus exists: a mixer that
+		# can duck the effects cannot duck cues that went to Master.
+		p.bus = AudioBuses.SFX
 		add_child(p)
 		_pool.append(p)
 
@@ -53,7 +56,13 @@ func _exit_tree() -> void:
 
 ## Plays a synthesised cue by name. False for a name that is not in the bank,
 ## so a typo is visible to the caller instead of being silently nothing.
-func play_cue(name: String) -> bool:
+##
+## `gain_db` is for the cues that are not the same size as each other - an
+## impact's loudness is the speed the car arrived at, and a thud at 20 kph heard
+## at the same level as one at 90 is a lie about the crash. It is written on
+## every play because the pool is reused: a level left on a recycled player
+## would come back with the next cue.
+func play_cue(name: String, gain_db: float = 0.0) -> bool:
 	var s := AudioCues.stream(name)
 	if s == null:
 		return false
@@ -61,6 +70,8 @@ func play_cue(name: String) -> bool:
 	if p == null:
 		return false
 	p.stream = s
+	if is_finite(gain_db):
+		p.volume_db = clampf(gain_db, AudioBuses.SILENCE_DB, 6.0)
 	p.play()
 	last_cue = name
 	cues_played += 1

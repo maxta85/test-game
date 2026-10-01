@@ -13,10 +13,12 @@ const MASTER := "Master"
 const MUSIC := "Music"
 const SFX := "SFX"
 const ENGINE := "Engine"
+const AMBIENCE := "Ambience"
 
 ## Bus name -> the bus it sends into, in creation order.
 const LAYOUT := {
 	MUSIC: MASTER,
+	AMBIENCE: MASTER,
 	SFX: MASTER,
 	ENGINE: MASTER,
 }

@@ -89,12 +89,6 @@ const NOT_SHIPPED := [
 		"why": "749255e Garage is RefCounted state behind GarageScreen, whose only entry point is MenuFlow's garage_requested",
 	},
 	{
-		"id": "audio",
-		"module": "res://Audio/audio_director.gd",
-		"scripts": ["res://Audio/audio_director.gd", "res://Audio/audio_bridge.gd"],
-		"why": "AudioDirector is a Node but no autoload and no main.gd line constructs one",
-	},
-	{
 		"id": "traffic",
 		"module": "res://AI/traffic/traffic_manager.gd",
 		"scripts": ["res://Systems/traffic/pedestrians.gd"],
