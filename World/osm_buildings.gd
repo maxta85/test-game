@@ -48,6 +48,26 @@ const EAVES := 0.6
 const PARAPET := 0.45
 ## A footprint this size or bigger is a shop, a shed or a warehouse, not a house.
 const FLAT_AREA := 400.0
+
+## How far off the carriageway a wall can be and still be treated as frontage.
+## Past this it is a backland wall: another building is between it and the road,
+## and glazing it would be glazing a wall nobody sees.
+const FRONTAGE_M := 6.0
+
+## Facade geometry, in metres. A window is a size, not a fraction of the wall: the
+## whole point of a grid is that every pane on the street is the same pane, which
+## is what makes a building look built rather than textured.
+const STOREY := 2.6
+const SILL := 1.0
+const PANE_W := 1.15
+const PANE_H := 1.3
+const CORNER_MARGIN := 0.85
+## Shopfront: glazed to here, sign fascia above it.
+const SHOP_TOP := 3.2
+const SHOP_SILL := 0.45
+const SIGN_H := 0.7
+## How far the glass stands off the wall, so it does not z-fight the render band.
+const GLASS_OUT := 0.05
 ## Only 5 of the 2198 rings carry `building:levels` and 2159 are tagged plain
 ## `building=yes`, so kind and area are what actually decide the height.
 const FLAT_KINDS := ["stadium", "retail", "commercial", "industrial", "warehouse", "church"]
@@ -139,7 +159,7 @@ static func plan(graph: RoadGraph) -> Dictionary:
 			# That mix is the point, and a wall with no lit window is a hole.
 			"warm": rng.randf() < 0.72,
 		}
-		entry["front"] = _front_edge(ring, cand, roads)
+		entry["faces"] = _street_faces(ring, cand, roads)
 		kept.append(entry)
 
 	return {
@@ -160,6 +180,7 @@ static func build(parent: Node3D, graph: RoadGraph) -> Dictionary:
 	var walls: Array[SurfaceTool] = []
 	var roofs: Array[SurfaceTool] = []
 	var windows: Array[SurfaceTool] = [_batch(), _batch()]
+	var signs: Array[SurfaceTool] = [_batch()]
 	for tint in WALL_TINTS.size():
 		walls.append(_batch())
 	for tint in ROOF_TINTS.size():
@@ -175,7 +196,7 @@ static func build(parent: Node3D, graph: RoadGraph) -> Dictionary:
 		var tint: int = e["tint"]
 		var roof: int = e["roof"]
 		_band(walls[tint], ring, lift, lift + wall)
-		_windows(windows, ring, e)
+		_facade(windows, signs, ring, e)
 		for q in ring:
 			lo = Vector2(minf(lo.x, q.x), minf(lo.y, q.y))
 			hi = Vector2(maxf(hi.x, q.x), maxf(hi.y, q.y))
@@ -200,8 +221,13 @@ static func build(parent: Node3D, graph: RoadGraph) -> Dictionary:
 		var mat := MatLib.corrugated(ROOF_TINTS[tint])
 		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 		nodes += _emit(parent, "Roof%d" % tint, roofs[tint], mat)
-	nodes += _emit(parent, "WindowWarm", windows[0], MatLib.emissive(Color(1.0, 0.74, 0.44), 1.1))
-	nodes += _emit(parent, "WindowCool", windows[1], MatLib.emissive(Color(0.62, 0.76, 0.95), 0.9))
+	# Energy is the whole game on a facade. At 1.1 a lit pane sat under a sodium
+	# lamp and lost to the wall the lamp was lighting - the glass was there and
+	# the street still read as blank render. A lit window at night is brighter
+	# than the wall around it; that is the whole reason a facade reads at all.
+	nodes += _emit(parent, "SignFascia", signs[0], MatLib.emissive(Color(1.0, 0.78, 0.45), 3.4))
+	nodes += _emit(parent, "WindowWarm", windows[0], MatLib.emissive(Color(1.0, 0.74, 0.44), 2.4))
+	nodes += _emit(parent, "WindowCool", windows[1], MatLib.emissive(Color(0.62, 0.76, 0.95), 2.0))
 	if not posts.is_empty():
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -250,18 +276,37 @@ static func _wall_height(b: Dictionary, flat: bool, rng: RandomNumberGenerator) 
 	return rng.randf_range(2.7, 3.2)
 
 
-## The edge a building presents to the street: the one whose middle is nearest a
-## road centreline, so the lit window lands on the face people drive past.
-static func _front_edge(ring: PackedVector2Array, cand: Array, roads: Dictionary) -> int:
-	var best := 0
-	var best_d := INF
+## Every ring edge that presents a face to a street, nearest road first.
+##
+## This used to be `_front_edge`: one edge per building, the one whose middle was
+## nearest a centreline, and a 2x2 grid of panes on it. That left a corner
+## building - the one you drive past twice - glazed on one side and blank on the
+## other, and put the same four panes on a 6 m shopfront and a 40 m one. The
+## road class comes along with the face because a main road frontage is what
+## earns a sign.
+static func _street_faces(ring: PackedVector2Array, cand: Array, roads: Dictionary) -> Array:
+	var out: Array = []
+	var nearest := {"i": 0, "gap": INF}
 	for i in ring.size():
 		var mid := (ring[i] + ring[(i + 1) % ring.size()]) * 0.5
-		var d: float = float(_nearest(mid, cand, roads)["d"]) if not cand.is_empty() else 0.0
-		if d < best_d:
-			best_d = d
-			best = i
-	return best
+		var gap := INF
+		var cls := RoadGraph.RoadClass.LANE
+		if not cand.is_empty():
+			var nr := _nearest(mid, cand, roads)
+			gap = float(nr["d"]) - float(nr["hw"])
+			cls = int(roads["segs"][int(nr["seg"])]["cls"])
+		if gap < float(nearest["gap"]):
+			nearest = {"i": i, "gap": gap}
+		if gap > FRONTAGE_M:
+			continue
+		out.append({"i": i, "cls": cls, "gap": gap})
+	# A building with no road in front of it still gets one glazed face, or the
+	# far side of the map goes dark. Same fallback the old single-edge search was.
+	if out.is_empty() and not cand.is_empty():
+		out.append({"i": int(nearest["i"]), "cls": RoadGraph.RoadClass.LANE,
+				"gap": float(nearest["gap"])})
+	out.sort_custom(func(x, y): return float(x["gap"]) < float(y["gap"]))
+	return out
 
 
 # --------------------------------------------------------- carriageway test
@@ -284,7 +329,8 @@ static func _road_index(graph: RoadGraph) -> Dictionary:
 		if a.distance_squared_to(b) < 0.01:
 			continue
 		var id := segs.size()
-		segs.append({"a": a, "b": b, "hw": graph.width_for(int(e["class"])) * 0.5})
+		segs.append({"a": a, "b": b, "hw": graph.width_for(int(e["class"])) * 0.5,
+				"cls": int(e["class"])})
 		var lo := Vector2i(floori(minf(a.x, b.x) / CELL), floori(minf(a.y, b.y) / CELL))
 		var hi := Vector2i(floori(maxf(a.x, b.x) / CELL), floori(maxf(a.y, b.y) / CELL))
 		for cx in range(lo.x, hi.x + 1):
@@ -567,26 +613,95 @@ static func _cap(st: SurfaceTool, ring: PackedVector2Array, y: float, up: bool) 
 		_tri(st, _v(ring[tris[i]], y), _v(ring[tris[i + 1]], y), _v(ring[tris[i + 2]], y), up)
 
 
-## Lit windows on the street face, on the edge `_front_edge` picked.
-static func _windows(into: Array, ring: PackedVector2Array, e: Dictionary) -> void:
-	var i: int = e["front"]
+## The facade treatment: on every street-facing edge, a grid of windows scaled to
+## the wall, a glazed shopfront where the building is a shop, and a sign fascia
+## over a main road frontage.
+##
+## Everything lit goes into `windows` (two emissive batches) or `signs` (one), so
+## the whole facade pass costs a single extra draw call for the city of 2198 -
+## which matters, because Tests/test_osm_buildings.gd caps this at a dozen and the
+## cap is the reason a facade can be worth drawing at all.
+static func _facade(windows: Array, signs: Array, ring: PackedVector2Array, e: Dictionary) -> void:
+	for f in e["faces"]:
+		_face(windows, signs, ring, e, f)
+
+
+static func _face(windows: Array, signs: Array, ring: PackedVector2Array, e: Dictionary,
+		f: Dictionary) -> void:
+	var i := int(f["i"])
 	var a := ring[i]
 	var b := ring[(i + 1) % ring.size()]
-	var span: float = a.distance_to(b)
-	if span < 1.6:
+	var span := a.distance_to(b)
+	var inner := span - CORNER_MARGIN * 2.0
+	if span < 2.4 or inner < 1.0:
 		return
 	var dir := (b - a) / span
-	var out := Vector2(dir.y, -dir.x)
-	var nrm := Vector3(out.x, 0.0, out.y)
-	var half := Vector3(dir.x, 0.0, dir.y) * minf(0.55, span * 0.22)
-	var up := Vector3(0.0, 1.1, 0.0)
-	var st: SurfaceTool = into[0 if bool(e["warm"]) else 1]
-	var storeys := 1 + int(float(e["wall"]) > 5.0)
-	for row in storeys:
-		for k in storeys:
-			var c := a.lerp(b, (float(k) + 0.5) / float(storeys))
-			var base := Vector3(c.x, float(e["lift"]) + 1.35 + float(row) * 2.6, c.y) + nrm * 0.06
-			_quad(st, base - half, base + half, base + half + up, base - half + up, nrm)
+	# Same outward normal as `_band`: rings are wound so the outward normal of
+	# a -> b is (dy, -dx).
+	var nrm := Vector3(dir.y, 0.0, -dir.x)
+	var along := Vector3(dir.x, 0.0, dir.y)
+	var up := Vector3(0.0, 1.0, 0.0)
+	var ground: float = e["lift"]
+	var wall: float = e["wall"]
+	var flat := bool(e["flat"])
+	var shop := flat and wall > SHOP_TOP + 1.2
+
+	# A lit panel on the wall, `t` metres along the edge from a.
+	var panel := func(st: SurfaceTool, t: float, y0: float, half_w: float, h: float) -> void:
+		var c := a + dir * t
+		var p := Vector3(c.x, ground + y0, c.y) + nrm * GLASS_OUT
+		_quad(st, p - along * half_w, p + along * half_w,
+				p + along * half_w + up * h, p - along * half_w + up * h, nrm)
+
+	if shop:
+		# Shopfront: a run of bays, mullions left as the gaps between them.
+		var bays := clampi(int(inner / 2.6), 1, 6)
+		var bpitch := inner / float(bays)
+		var glass: SurfaceTool = windows[0 if bool(e["warm"]) else 1]
+		for k in bays:
+			panel.call(glass, CORNER_MARGIN + (float(k) + 0.5) * bpitch, SHOP_SILL,
+					minf(1.15, bpitch * 0.4), SHOP_TOP - SHOP_SILL)
+
+	# Signage. A shop signs its own frontage; anything on an arterial or a
+	# highway is a main road frontage and gets one whether or not it is a shop,
+	# because that is the stretch where a sign is what you read at 60 km/h.
+	var sign_y: float = ground + (SHOP_TOP + 0.3 if shop else 3.4)
+	if sign_y + SIGN_H < ground + wall and (shop or int(f["cls"]) >= RoadGraph.RoadClass.ARTERIAL):
+		# A sign is a sign, not a length of wall: 40 m of fascia across a
+		# warehouse frontage reads as a stripe, so the band is capped at a
+		# believable width and centred on the face.
+		var sign_w := minf(inner * 0.5 - 0.3, 3.5)
+		if sign_w > 0.3:
+			# One fascia in four goes to the cool batch, so a street of amber
+			# signs has the odd cold one in it.
+			var neon := int(e["id"]) % 4 == 0
+			panel.call(signs[0] if not neon else windows[1], span * 0.5, sign_y - ground,
+					sign_w, SIGN_H)
+
+	# Windows: a grid, not a scatter. Columns come from the width of the frontage
+	# and rows from the height of the wall, so a wide two-storey shopfront gets a
+	# row of panes and the townhouse beside it gets two. The column count is
+	# capped by the pitch rather than by a flat number: eight windows spread over
+	# 40 m of frontage is one every five metres, which is not a grid.
+	var first := SHOP_TOP + 0.6 if shop else 0.0
+	var rows := clampi(int((wall - first - SILL - PANE_H) / STOREY) + 1, 0, 4)
+	var cols := clampi(int(inner / 2.3), 1, maxi(1, int(inner / 1.6)))
+	if rows < 1 or cols < 1:
+		return
+	var pitch := inner / float(cols)
+	var half_w := minf(PANE_W * 0.5, pitch * 0.32)
+	for row in rows:
+		var y := first + SILL + float(row) * STOREY
+		if y + PANE_H > wall - 0.35:
+			break
+		for col in cols:
+			# A few dark panes among the lit ones: "most of a suburban street at
+			# night is dark and a few rooms are warm" is a claim about rooms, and a
+			# facade where every pane is lit is an office block.
+			var warm: bool = bool(e["warm"]) if (int(e["id"]) + row * 7 + col * 13) % 5 > 0 \
+					else not bool(e["warm"])
+			panel.call(windows[0 if warm else 1], CORNER_MARGIN + (float(col) + 0.5) * pitch,
+					y, half_w, PANE_H)
 
 
 ## Stumps under a raised house, one per corner of the ring and thinned out, so a
@@ -640,16 +755,34 @@ static func _v(p: Vector2, y: float) -> Vector3:
 	return Vector3(p.x, y, p.y)
 
 
-## Two triangles, wound to face `facing`. Everything is generated this way rather
+## Two triangles wound to face `facing`. Everything is generated this way rather
 ## than with a fixed order because a roof pitch flips the winding halfway round a
 ## concave ring, and 199 of the 2198 footprints arrive clockwise.
 static func _quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, facing: Vector3) -> void:
 	if (b - a).cross(c - a).dot(facing) < 0.0:
-		_tri(st, a, d, c)
-		_tri(st, a, c, b)
+		_wind(st, a, d, c, facing)
+		_wind(st, a, c, b, facing)
 		return
-	_tri(st, a, b, c)
-	_tri(st, a, c, d)
+	_wind(st, a, b, c, facing)
+	_wind(st, a, c, d, facing)
+
+
+## One triangle of a `_quad`: the stored normal goes out along `facing` and the
+## winding points back into the surface.
+##
+## Those are opposite directions and have to be. Godot draws a face only when its
+## right-hand-rule winding normal points AWAY from the camera, so a quad wound to
+## match its own normal is a back face - culled from every side a building is
+## ever seen from. That is what every wall, roof slope, window pane and sign in
+## this file was: correct geometry, drawn from nowhere. See
+## Systems/road_render/winding_check.gd, which holds both conventions still.
+static func _wind(st: SurfaceTool, p: Vector3, q: Vector3, r: Vector3, facing: Vector3) -> void:
+	if (q - p).cross(r - p).length_squared() < 1e-12:
+		return
+	for v in [p, r, q]:
+		st.set_normal(facing)
+		st.set_uv(Vector2(v.x, v.z) * 0.2)
+		st.add_vertex(v)
 
 
 ## `flip` reverses the winding. Rings arrive counter-clockwise in (x, z), which in

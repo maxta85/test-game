@@ -28,6 +28,11 @@ func _init() -> void:
 	_road_quad()
 	_junction_fan()
 
+	# 4. A building wall, the same two rules against an arbitrary outward normal
+	#    rather than up. OSMBuildings wound its quads to match their own normal,
+	#    which made every wall, roof slope, window pane and sign a back face.
+	_osm_wall_quad()
+
 	if _failed > 0:
 		print("WINDING CHECK FAILED: %d problem(s)" % _failed)
 		quit(1)
@@ -107,6 +112,35 @@ func _junction_fan() -> void:
 		var c: Vector3 = v[t * 3 + 2]
 		_check((b - a).cross(c - a).length_squared() > 0.000001,
 			"junction fan triangle %d has area, not the zero-area sliver _quad(centre, v0, v1, v1) left" % t)
+
+
+## A wall band straight from the production helper, checked against the one
+## invariant that does not need a reference direction: the stored normal and the
+## winding normal point opposite ways.
+##
+## OSMBuildings wound its quads to match their own normal. Godot draws a face only
+## when its winding normal points AWAY from the camera, so that made every wall,
+## roof slope, window pane and sign in the file a back face - correct geometry,
+## drawn from nowhere, and invisible from the only side a building is seen from.
+func _osm_wall_quad() -> void:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var ring := PackedVector2Array([Vector2(0, 0), Vector2(0, 8), Vector2(6, 8), Vector2(6, 0)])
+	OSMBuildings._band(st, ring, 0.0, 4.0)
+	_normal_against_winding("wall band", st.commit())
+
+
+func _normal_against_winding(label: String, mesh: ArrayMesh) -> void:
+	var arrays: Array = mesh.surface_get_arrays(0)
+	var v: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var n: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+	for t in v.size() / 3:
+		var r: Vector3 = (v[t * 3 + 1] - v[t * 3]).cross(v[t * 3 + 2] - v[t * 3])
+		_check(r.length_squared() > 0.000001, "%s: triangle %d has area" % [label, t])
+		for k in 3:
+			_check(n[t * 3 + k].normalized().dot(r.normalized()) < -0.99,
+				"%s: triangle %d vertex %d normal is opposite its winding, or it is a back face (got %s vs %s)"
+					% [label, t, k, str(n[t * 3 + k]), str(r.normalized())])
 
 
 func _winding_and_normals(label: String, mesh: ArrayMesh) -> void:
