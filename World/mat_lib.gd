@@ -165,20 +165,42 @@ static func palm_bark() -> StandardMaterial3D:
 	# road: under sodium that still reads warm, but as a tree, not a terracotta pole.
 	m.albedo_color = Color(0.13, 0.125, 0.112)
 	m.roughness = 0.92
-	m.uv1_scale = Vector3(0.35, 0.12, 0.35)
-	m.uv1_triplanar = true
-	# Fed raw, FastNoiseLite averages ~0.5 and silently halves the albedo written
-	# above, so the speckle goes through a ramp that keeps the range it looks like
-	# it has: 0.62-1.0 is visible fibre without dropping the trunk into the dark.
-	m.albedo_texture = noise_tex(256, 2.2, 4, 53)
-	var bark_ramp := Gradient.new()
-	bark_ramp.set_color(0, Color(0.62, 0.62, 0.62))
-	bark_ramp.set_color(1, Color(1.0, 1.0, 1.0))
-	(m.albedo_texture as NoiseTexture2D).color_ramp = bark_ramp
-	m.normal_enabled = true
-	m.normal_texture = noise_tex(128, 3.2, 4, 59, true)
-	m.normal_scale = 0.45
+	# Triplanar is off deliberately. It projects the texture from world space in
+	# three axes, which is the wrong basis for a cylinder - and WorldBuilder now
+	# supplies trunk UVs where `u` runs once around the shaft and `v` is already
+	# scaled by PALM_RING_BANDS, so the leaf-scar rings land as horizontal bands.
+	# Triplanar would have thrown those away and smeared the rings diagonally.
+	m.uv1_scale = Vector3.ONE
+	m.albedo_texture = _palm_ring_tex()
 	return m
+
+
+## Leaf-scar rings for a palm shaft: a narrow dark band per scar, with the
+## weathered panel above it.
+##
+## A GradientTexture2D rather than a per-pixel Image loop, because a vertical
+## gradient is exactly this shape - a ramp along one axis - and Godot already
+## draws one. The gradient only varies vertically, so it wraps seamlessly left
+## to right, which matters because the trunk UVs tile once per side: any
+## horizontal variation would show as a stripe down every seam.
+static func _palm_ring_tex() -> GradientTexture2D:
+	# Light smooth panel easing down into the dark scar, then a hard edge back
+	# out. Offset 1.0 repeats the panel top so the last ring meets the first.
+	# Set through `offsets`/`colors` rather than `set_offset`/`set_color`: those
+	# only edit points the gradient already has, and a fresh Gradient has two.
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.55, 0.80, 0.90, 0.97, 1.0])
+	var cols := PackedColorArray()
+	for v in [0.92, 0.80, 0.72, 0.30, 0.26, 0.92]:
+		cols.append(Color(v, v, v * 0.92))
+	g.colors = cols
+	var tex := GradientTexture2D.new()
+	tex.gradient = g
+	tex.width = 8
+	tex.height = 128
+	tex.fill_from = Vector2(0.0, 0.0)
+	tex.fill_to = Vector2(0.0, 1.0)
+	return tex
 
 
 ## Foliage. Two-sided and slightly translucent so streetlights bleed through.
