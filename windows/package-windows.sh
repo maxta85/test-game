@@ -5,23 +5,33 @@
 # reproducible from CI without a Windows box.
 #
 #   ./windows/package-windows.sh              export + checksums
-#   ./windows/package-windows.sh --tag=v0.1.0  also write windows/manifest.json
+#   ./windows/package-windows.sh --tag        also write windows/manifest.json
+#
+# The release version is NOT an argument and NOT an env default: it is read
+# from windows/VERSION, which is the single hand-edited source of truth. --tag
+# writes windows/manifest.json from that input plus the artefact just built, so
+# the manifest is generated rather than maintained by hand. A --tag=X.Y.Z whose
+# value disagrees with windows/VERSION is fatal, not ignored.
 #
 # Env:
-#   GODOT       path to the godot 4.3 binary (default /home/coder/tools/godot)
-#   VERSION     version string (default 0.1.0)
-#   SKIP_TESTS  set to 1 to skip the test.sh gate
+#   GODOT        path to the godot 4.3 binary (default /home/coder/tools/godot)
+#   VERSION      must equal windows/VERSION if set; a disagreement is fatal
+#   SKIP_TESTS   set to 1 to skip the test.sh gate
+#   SKIP_EXPORT  set to 1 to reuse build/CairnsAfterDark.exe instead of exporting
+#
+# NOT skippable: the artefact identity gate (step 5). SKIP_TESTS and
+# SKIP_EXPORT cannot reach it, and there is no flag that can.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 GODOT="${GODOT:-/home/coder/tools/godot}"
-VERSION="${VERSION:-0.1.0}"
 PRESET="Windows Desktop"
 ARTIFACT="CairnsAfterDark.exe"
 OUT="build/$ARTIFACT"
 TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.3.stable"
+VERSION_FILE="windows/VERSION"
 
 say() { printf '\n== %s\n' "$*"; }
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -30,6 +40,20 @@ die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 [ -x "$GODOT" ] || die "godot not found or not executable: $GODOT"
 "$GODOT" --version | grep -q '4\.3\.' || die "need Godot 4.3, got: $("$GODOT" --version)"
 say "godot: $("$GODOT" --version)"
+
+# The version is one input, read once, and every artefact this script produces
+# is derived from it. An env VERSION that disagrees is a fatal error rather
+# than a quiet override: two sources of truth is how the manifest went stale in
+# the first place. Nothing here needs a .exe to exist yet.
+[ -f "$VERSION_FILE" ] || die \
+  "windows/VERSION is missing - it is the single source of truth for the release version"
+DECLARED_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+[ -n "$DECLARED_VERSION" ] || die "windows/VERSION is empty"
+if [ -n "${VERSION:-}" ] && [ "$VERSION" != "$DECLARED_VERSION" ]; then
+  die "VERSION=$VERSION disagrees with windows/VERSION ($DECLARED_VERSION) - one of them is stale, decide which"
+fi
+VERSION="$DECLARED_VERSION"
+say "version: $VERSION (from $VERSION_FILE)"
 
 # Godot 4.3 has no --install-export-templates flag (it silently boots the
 # project instead), so the templates must be unpacked by hand into the
@@ -110,7 +134,27 @@ PY
     || die "generated manifest is not valid JSON"
 fi
 
-# --- 5. installer bundle --------------------------------------------------
+# --- 5. identity gate ------------------------------------------------------
+# The one step no switch can skip. It sits after the optional manifest
+# regeneration, so --tag produces a manifest that describes the artefact that
+# was just built, and it sits before the bundle, so a manifest describing some
+# OTHER binary is refused before a single byte is staged or uploaded.
+#
+# This is the check that would have stopped the 0.1.1 / 212294768 manifest
+# going out on top of a 140877408-byte payload. The manifest is bundled with
+# the installer, the launcher verifies manifest.sha256 against what it
+# downloads, and it fetches manifest.asset from the tag manifest.tag - so a
+# mismatch ships an installer that hands the player the wrong game or fails its
+# own checksum on first run. Packaging is not the moment to find that out.
+#
+# It is deliberately outside the SKIP_TESTS block above and is not guarded by
+# anything: SKIP_EXPORT can reuse an old .exe, which is exactly the situation
+# this has to catch, so the gate must run on reused artefacts too.
+say "verifying artefact identity against windows/manifest.json"
+./Tools/release_identity.sh "$OUT" || die \
+  "refusing to package $OUT - it is not the binary windows/manifest.json describes (details above). Rebuild with --tag, or fix windows/manifest.json and windows/VERSION, then re-run. Nothing was written to build/bundle-*. No override exists for this."
+
+# --- 6. installer bundle --------------------------------------------------
 # The small bootstrap the user actually downloads. It deliberately does NOT
 # contain the 182 MB exe: the launcher fetches that from the release and
 # verifies it, so the first download is a few KB and the payload arrives
@@ -179,7 +223,7 @@ PY
 say "installer bundle: $BUNDLE ($(du -h "$BUNDLE" | cut -f1))"
 ( cd build && sha256sum "$(basename "$BUNDLE")" >> SHA256SUMS )
 
-# --- 6. prove the payload is real, not a Git LFS pointer ------------------
+# --- 7. prove the payload is real, not a Git LFS pointer ------------------
 # The 7 car models are LFS-tracked, and GitHub's zip download does not run the
 # smudge filter - a zip of the repo would ship 133-byte text stubs and no
 # cars. The release is built from this worktree and from the exported pack,
