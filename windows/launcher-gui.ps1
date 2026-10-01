@@ -26,10 +26,14 @@
     Windows. Started by CairnsAfterDark-GUI.bat, which passes -STA: WinForms
     needs a single-threaded apartment and PowerShell 7 defaults to MTA.
 
-    THIS FILE HAS NEVER BEEN EXECUTED. It parses, and its launcher wiring runs
-    headlessly under CAD_GUI_HEADLESS=1 (Tools/verify_launcher.py does that),
-    but no window has ever been created. See windows/README.md,
-    "Runbook: the GUI", for what a human with a Windows box has to check.
+    The v0.1.1 layout ran on Windows once and surfaced three bugs (a VB6
+    .Lines property that is not WinForms, a MessageBox type loaded after the
+    handler that needed it, and a startup note claiming an install that did
+    not exist). This dark layout is new code and has never been run anywhere.
+    CAD_GUI_HEADLESS=1 exercises the wiring only - it exits before a single
+    control is created, so the window itself is verified by nobody. See
+    windows/README.md, "Runbook: the GUI", for what a human with a Windows
+    box has to check.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -138,62 +142,146 @@ if ($env:CAD_GUI_HEADLESS -eq '1') {
 # reported in the log box and in a message box, because after the window is up
 # the console is not looking at anything.
 
+# Palette: night-city dark with one streetlight-amber accent. Every colour the
+# window uses lives here - five values, not a theme engine.
+$colBg      = [System.Drawing.Color]::FromArgb(13, 15, 19)
+$colPanel   = [System.Drawing.Color]::FromArgb(27, 30, 37)
+$colHover   = [System.Drawing.Color]::FromArgb(44, 48, 58)
+$colText    = [System.Drawing.Color]::FromArgb(228, 231, 236)
+$colMuted   = [System.Drawing.Color]::FromArgb(140, 147, 157)
+$colAccent  = [System.Drawing.Color]::FromArgb(240, 166, 42)
+$colLogBg   = [System.Drawing.Color]::FromArgb(9, 10, 13)
+$colOnAmber = [System.Drawing.Color]::FromArgb(24, 18, 6)
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text            = 'Cairns After Dark'
-$form.ClientSize      = New-Object System.Drawing.Size(480, 484)
+$form.ClientSize      = New-Object System.Drawing.Size(560, 576)
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox     = $false
 $form.StartPosition   = 'CenterScreen'
+$form.BackColor       = $colBg
+$form.ForeColor       = $colText
+$form.Font            = New-Object System.Drawing.Font('Segoe UI', 9)
+
+# --------------------------------------------------------------------------
+# Banner: a 560x150 bitmap drawn once - gradient sky, a building silhouette,
+# a few lit windows, the amber line. Drawn rather than shipped because the
+# bundle is two scripts and a manifest; there is no assets folder to put a
+# picture in. A label set Transparent over a PictureBox-painted panel shows
+# the bitmap through it - that is the whole trick.
+# --------------------------------------------------------------------------
+$banner = New-Object System.Windows.Forms.Panel
+$banner.Location  = New-Object System.Drawing.Point(0, 0)
+$banner.Size      = New-Object System.Drawing.Size(560, 150)
+$banner.BackColor = [System.Drawing.Color]::FromArgb(16, 19, 26)
+
+try {
+    $bmp = New-Object System.Drawing.Bitmap(560, 150)
+    $g   = [System.Drawing.Graphics]::FromImage($bmp)
+    $rect = New-Object System.Drawing.Rectangle(0, 0, 560, 150)
+    $grad = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
+        $rect,
+        [System.Drawing.Color]::FromArgb(34, 42, 62),
+        [System.Drawing.Color]::FromArgb(10, 11, 15),
+        [System.Drawing.Drawing2D.LinearGradientMode]::BackwardDiagonal)
+    $g.FillRectangle($grad, $rect)
+
+    # The skyline: dark rectangles over the gradient, deterministic heights so
+    # every player sees the same city. Lit windows only on some of them.
+    $skyBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(7, 8, 11))
+    $winBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(190, 240, 176, 70))
+    $heights  = @(62, 88, 50, 104, 72, 58, 96, 44, 80, 66, 110, 54, 76, 92, 48, 70, 84, 60)
+    $x = -10
+    for ($i = 0; $i -lt $heights.Count; $i++) {
+        $bw = 26 + (($i * 13) % 22)
+        $bh = $heights[$i]
+        $g.FillRectangle($skyBrush, $x, (150 - $bh), $bw, $bh)
+        if ($i % 2 -eq 0) {
+            for ($w = 0; $w -lt 3; $w++) {
+                $wx = $x + 5 + (($i * 7 + $w * 9) % ($bw - 8))
+                $wy = (150 - $bh) + 8 + (($i * 11 + $w * 17) % ($bh - 20))
+                $g.FillRectangle($winBrush, $wx, $wy, 2, 3)
+            }
+        }
+        $x += $bw + 5
+    }
+    $g.FillRectangle((New-Object System.Drawing.SolidBrush $colAccent), 0, 147, 560, 3)
+    $banner.BackgroundImage = $bmp
+    $g.Dispose(); $grad.Dispose(); $skyBrush.Dispose(); $winBrush.Dispose()
+} catch {
+    # The flat dark BackColor above is the whole fallback. A banner that
+    # cannot paint must never be the reason the launcher does not open.
+}
 
 $lblTitle = New-Object System.Windows.Forms.Label
-$lblTitle.Text     = 'Cairns After Dark'
-$lblTitle.Font     = New-Object System.Drawing.Font('Segoe UI', 13, [System.Drawing.FontStyle]::Bold)
-$lblTitle.Location = New-Object System.Drawing.Point(12, 10)
-$lblTitle.Size     = New-Object System.Drawing.Size(456, 26)
+$lblTitle.Text      = 'CAIRNS AFTER DARK'
+$lblTitle.Font      = New-Object System.Drawing.Font('Segoe UI', 21, [System.Drawing.FontStyle]::Bold)
+$lblTitle.ForeColor = $colText
+$lblTitle.BackColor = [System.Drawing.Color]::Transparent
+$lblTitle.Location  = New-Object System.Drawing.Point(22, 14)
+$lblTitle.Size      = New-Object System.Drawing.Size(520, 40)
+
+$lblSub = New-Object System.Windows.Forms.Label
+$lblSub.Text      = 'UNDERGROUND STREET RACING - FAR NORTH QUEENSLAND'
+$lblSub.Font      = New-Object System.Drawing.Font('Segoe UI', 8.25, [System.Drawing.FontStyle]::Bold)
+$lblSub.ForeColor = $colAccent
+$lblSub.BackColor = [System.Drawing.Color]::Transparent
+$lblSub.Location  = New-Object System.Drawing.Point(24, 56)
+$lblSub.Size      = New-Object System.Drawing.Size(520, 16)
 
 # Four lines, filled in by Update-State: is it installed, which build is
 # pinned, which digest, where the saves are. All of it is read out of the
 # manifest and install.ps1's own functions - nothing is written down twice.
 $lblState = New-Object System.Windows.Forms.Label
-$lblState.Location = New-Object System.Drawing.Point(12, 40)
-$lblState.Size     = New-Object System.Drawing.Size(456, 88)
-$lblState.Font     = New-Object System.Drawing.Font('Segoe UI', 9)
+$lblState.Location  = New-Object System.Drawing.Point(24, 80)
+$lblState.Size      = New-Object System.Drawing.Size(512, 62)
+$lblState.Font      = New-Object System.Drawing.Font('Segoe UI', 8.25)
+$lblState.ForeColor = $colMuted
+$lblState.BackColor = [System.Drawing.Color]::Transparent
 # A WinForms Label has no Lines property - that is VB6/ASP.NET. Multi-line text
 # goes in Text, joined with newlines. Set-StrictMode turns the wrong one into a
 # hard stop, which is how a never-executed script dies on its first line.
-$lblState.Text     = 'Reading manifest...'
+$lblState.Text      = 'Reading manifest...'
+foreach ($c in $lblTitle, $lblSub, $lblState) { $banner.Controls.Add($c) }
 
-$bar = New-Object System.Windows.Forms.ProgressBar
-$bar.Minimum  = 0
-$bar.Maximum  = 100
-$bar.Location = New-Object System.Drawing.Point(12, 134)
-$bar.Size     = New-Object System.Drawing.Size(456, 18)
-
+# Status line, then the progress bar. The bar is two panels - a track and a
+# fill whose width is the percentage - because the stock ProgressBar ignores
+# ForeColor while visual styles are on, and turning them off un-themes every
+# other control in the window.
 $lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.Location = New-Object System.Drawing.Point(12, 156)
-$lblStatus.Size     = New-Object System.Drawing.Size(456, 20)
-$lblStatus.Text     = 'Ready.'
+$lblStatus.Location  = New-Object System.Drawing.Point(24, 164)
+$lblStatus.Size      = New-Object System.Drawing.Size(512, 18)
+$lblStatus.ForeColor = $colMuted
+$lblStatus.Text      = 'Ready.'
+
+$barTrack = New-Object System.Windows.Forms.Panel
+$barTrack.Location  = New-Object System.Drawing.Point(24, 188)
+$barTrack.Size      = New-Object System.Drawing.Size(512, 6)
+$barTrack.BackColor = $colPanel
+
+$barFill = New-Object System.Windows.Forms.Panel
+$barFill.Location  = New-Object System.Drawing.Point(0, 0)
+$barFill.Size      = New-Object System.Drawing.Size(0, 6)
+$barFill.BackColor = $colAccent
+$barTrack.Controls.Add($barFill)
 
 $log = New-Object System.Windows.Forms.TextBox
-$log.Multiline  = $true
-$log.ReadOnly   = $true
-$log.ScrollBars = 'Vertical'
-$log.WordWrap   = $false
-$log.Font       = New-Object System.Drawing.Font('Consolas', 9)
-$log.Location   = New-Object System.Drawing.Point(12, 182)
-$log.Size       = New-Object System.Drawing.Size(456, 196)
+$log.Multiline   = $true
+$log.ReadOnly    = $true
+$log.ScrollBars  = 'Vertical'
+$log.WordWrap    = $false
+$log.Font        = New-Object System.Drawing.Font('Consolas', 8.25)
+$log.BackColor   = $colLogBg
+$log.ForeColor   = $colMuted
+$log.BorderStyle = 'FixedSingle'
+$log.Location    = New-Object System.Drawing.Point(24, 326)
+$log.Size        = New-Object System.Drawing.Size(512, 212)
 
 $lblHint = New-Object System.Windows.Forms.Label
 $lblHint.Text      = 'Saves are kept in %APPDATA%\CairnsAfterDark, outside the install folder.'
-$lblHint.Location  = New-Object System.Drawing.Point(12, 462)
-$lblHint.Size      = New-Object System.Drawing.Size(456, 18)
-$lblHint.ForeColor = [System.Drawing.Color]::DimGray
-
-$panel = New-Object System.Windows.Forms.FlowLayoutPanel
-$panel.Location      = New-Object System.Drawing.Point(8, 386)
-$panel.Size          = New-Object System.Drawing.Size(464, 72)
-$panel.WrapContents  = $true
-$panel.FlowDirection = 'LeftToRight'
+$lblHint.Location  = New-Object System.Drawing.Point(24, 548)
+$lblHint.Size      = New-Object System.Drawing.Size(512, 16)
+$lblHint.ForeColor = $colMuted
 
 $script:Buttons       = @()
 $script:EngineProc    = $null
@@ -204,24 +292,38 @@ $script:RemoteNote    = 'Ready.'
 $script:RemoteChecked = $false
 
 function New-LauncherButton {
-    param([string]$Text, [int]$Width = 120)
+    param([string]$Text, [int]$X, [int]$Y, [int]$Width, [int]$Height = 34, [switch]$Primary)
     $b = New-Object System.Windows.Forms.Button
-    $b.Text   = $Text
-    $b.Width  = $Width
-    $b.Height = 30
-    $b.Margin = New-Object System.Windows.Forms.Padding(4, 4, 0, 0)
+    $b.Text      = $Text
+    $b.Location  = New-Object System.Drawing.Point($X, $Y)
+    $b.Size      = New-Object System.Drawing.Size($Width, $Height)
+    $b.FlatStyle = 'Flat'
+    $b.FlatAppearance.BorderSize = 0
+    if ($Primary) {
+        $b.BackColor = $colAccent
+        $b.ForeColor = $colOnAmber
+        $b.Font      = New-Object System.Drawing.Font('Segoe UI', 15, [System.Drawing.FontStyle]::Bold)
+        $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(255, 184, 66)
+    } else {
+        $b.BackColor = $colPanel
+        $b.ForeColor = $colText
+        $b.FlatAppearance.MouseOverBackColor = $colHover
+    }
     $script:Buttons += $b
+    $form.Controls.Add($b)
     return $b
 }
 
-$btnPlay      = New-LauncherButton 'Play' 100
-$btnInstall   = New-LauncherButton 'Install / Repair' 130
-$btnUpdate    = New-LauncherButton 'Check for Updates' 140
-$btnUninstall = New-LauncherButton 'Uninstall' 100
-$btnSaves     = New-LauncherButton 'Saves Folder' 120
-foreach ($b in $btnPlay, $btnInstall, $btnUpdate, $btnUninstall, $btnSaves) { $panel.Controls.Add($b) }
+# One loud verb, four quiet ones - the way every launcher that is not a
+# settings dialog does it. Play installs first when nothing is installed, so
+# it is always the right button.
+$btnPlay      = New-LauncherButton 'PLAY'    24  214 512 52 -Primary
+$btnUpdate    = New-LauncherButton 'Update'  24  278 156
+$btnInstall   = New-LauncherButton 'Repair'  188 278 96
+$btnSaves     = New-LauncherButton 'Saves'   292 278 116
+$btnUninstall = New-LauncherButton 'Uninstall' 416 278 120
 
-foreach ($c in $lblTitle, $lblState, $bar, $lblStatus, $log, $panel, $lblHint) { $form.Controls.Add($c) }
+foreach ($c in $banner, $lblStatus, $barTrack, $log, $lblHint) { $form.Controls.Add($c) }
 
 # --------------------------------------------------------------------------
 # Small helpers
@@ -255,7 +357,7 @@ function New-TempPath ([string]$Suffix) {
 
 function Set-EngineBusy ([string]$What) {
     foreach ($b in $script:Buttons) { $b.Enabled = $false }
-    $bar.Value = 0
+    $barFill.Width = 0
     $lblStatus.Text = $What
     Write-Log ('== ' + $What)
     # Anything already sitting in TEMP is a leftover, not this run's download.
@@ -366,7 +468,7 @@ function Update-Progress {
     $pct = [int](100 * $part.Length / $script:Total)
     if ($pct -lt 0) { $pct = 0 }
     if ($pct -gt 100) { $pct = 100 }
-    $bar.Value = $pct
+    $barFill.Width = [int]($barTrack.ClientSize.Width * $pct / 100)
     # The total is the size pinned in manifest.json. An update that ships a
     # different size saturates the bar early; install.ps1 verifies the digest
     # regardless, so this number is a progress hint and nothing more.
