@@ -83,7 +83,7 @@ static func spawn(world_node: Node, g: RoadGraph, count: int) -> TrafficManager:
 	m.world = world_node
 	m.graph = g
 	m.target_count = maxi(0, count)
-	m.rng.seed = hash(g) if g != null else 1
+	m.rng.seed = _graph_seed(g)
 	m.lights = TrafficLights.new()
 	m.lights.setup(g)
 	while m.cars.size() < m.target_count:
@@ -92,6 +92,34 @@ static func spawn(world_node: Node, g: RoadGraph, count: int) -> TrafficManager:
 			break
 		m.cars.append(c)
 	return m
+
+
+# ------------------------------------------------------------------- seed key
+
+## A seed derived from the graph's CONTENT, not from its identity.
+##
+## `hash(g)` on an Object is derived from the instance, so the same city got a
+## different spawn layout in every process and no traffic result was
+## reproducible. What is stable across processes is the data: node keys are
+## positions quantised onto RoadGraph's own 0.05 m welding grid, and edge
+## endpoints are node ids assigned in build order. Both are properties of the
+## road network, not of the allocation that happened to hold it, so two
+## processes that build the same corridors hash to the same seed and two
+## different networks do not collide by construction.
+##
+## Quantised before hashing because a float bit-pattern is not something to
+## build a seed on: re-serialising the layout data or re-running `build()` in a
+## different order must not change which cars spawn where, and rounding to the
+## welding grid is what makes that true.
+static func _graph_seed(g: RoadGraph) -> int:
+	if g == null:
+		return 1
+	var key := "%d:%d:" % [g.nodes.size(), g.edges.size()]
+	for n in g.nodes:
+		key += String(n["key"]) + ","
+	for e in g.edges:
+		key += "%d-%d;" % [int(e["a"]), int(e["b"])]
+	return hash(key)
 
 
 # --------------------------------------------------------------------- density
