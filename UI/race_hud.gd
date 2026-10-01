@@ -7,6 +7,11 @@ extends CanvasLayer
 ## Built in code rather than as a .tscn because it is a dozen labels and a bar,
 ## and a code-built UI is far easier to read than a scene file of anchors.
 
+## The map. Built here rather than in `Game/main.gd` because a HUD element is
+## this class's business, and the host only has to hand it the graph and the
+## entrants it already has.
+var minimap: Minimap
+
 var _speed: Label
 var _gear: Label
 var _revfill: ColorRect
@@ -21,6 +26,11 @@ var _message_time := 0.0
 
 const REV_W := 320.0
 const PAD := 22.0
+## Minimap edge length in pixels. 236 fits a 1080p frame beside the speed block
+## without crowding it, and at that size the 2.6 x 2.8 km network fits whole -
+## which is the point, since a map cropped to the street you are on cannot tell
+## you where the route goes.
+const MAP := 236.0
 
 
 func _ready() -> void:
@@ -62,6 +72,19 @@ func _ready() -> void:
 	_cash = _label(cashbox, "$0", 18, Color(0.55, 0.9, 0.55))
 	_cash.size = cashbox.size
 	_cash.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+
+	# --- bottom left: the map ---
+	# Bottom left because the speed block owns the bottom right and the race
+	# state owns the top left, and this is the fourth corner. A street racer's
+	# map belongs where the driver's eye already is for the rev counter, and the
+	# HUD's own top-left numbers are read in glances, not watched.
+	var mapbox := _box(root, Control.PRESET_BOTTOM_LEFT, Vector2(PAD, PAD), Vector2(MAP, MAP))
+	minimap = Minimap.new()
+	minimap.name = "Minimap"
+	minimap.set_anchors_preset(Control.PRESET_FULL_RECT)
+	minimap.size = Vector2(MAP, MAP)
+	minimap.visible = false
+	mapbox.add_child(minimap)
 
 	# --- centre: countdown and event messages ---
 	_lights = _box_label(root, Control.PRESET_CENTER_TOP, Vector2(0, 40.0), 110, Color(1.0, 0.25, 0.2))
@@ -184,3 +207,17 @@ func update(car: CarBody, race: RaceDirector, delta: float) -> void:
 	_pos.text = "POS %d/%d" % [pos, maxi(race.entrants.size(), 1)]
 	_cash.text = "$%d" % Cfg.money
 	_wrong.visible = race.is_wrong_way(0)
+
+	# The map follows the car and the field, from the same graph the streets are
+	# built from. Hidden until a race actually has a route on it, so an empty map
+	# is never on screen in the menus.
+	if minimap != null:
+		minimap.visible = race.def != null
+		if car != null:
+			minimap.set_player(car.global_position, car.forward())
+		# Entrant 0 is the player, who is the centre of a rotating map; the rest
+		# are the field.
+		var field: Array = []
+		for i in range(1, race.entrants.size()):
+			field.append(race.entrants[i])
+		minimap.set_rivals(field)
