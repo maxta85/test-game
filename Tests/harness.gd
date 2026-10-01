@@ -23,8 +23,21 @@ extends RefCounted
 ##     that is still building one, is reported rather than quietly absorbed.
 
 ## Counts physics steps from the only place that can see them: inside the tree.
+##
+## PROCESS_MODE_ALWAYS, deliberately. A node that inherits (the default) stops
+## getting `_physics_process` the moment the tree is paused, so an inheriting
+## ticker freezes mid-count - and `ticks()` then sits in its `while` forever:
+## `physics_frame` keeps firing, so the await resumes, re-tests the same frozen
+## counter and re-suspends. That is a spin, not a wait: it burns a core and
+## prints nothing, so the run dies silently at whatever assertion it reached.
+## It was not hypothetical - `test_menu_wiring` pauses the tree mid-race and then
+## waits two ticks for the pause board, and the whole run starved there for three
+## watchdog cycles. A suite that asserts a *paused world* stayed still still has
+## to be able to count ticks across that pause, so the ticker must out-live it.
 class Ticker extends Node:
 	var steps: int = 0
+	func _init() -> void:
+		process_mode = Node.PROCESS_MODE_ALWAYS
 	func _physics_process(_delta: float) -> void:
 		steps += 1
 
