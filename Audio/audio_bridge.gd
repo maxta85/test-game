@@ -22,6 +22,11 @@ extends Node
 ## `_physics_process`.
 var lost: bool = false
 
+## Set when another bridge got here first and this one stopped polling. Not the
+## same thing as `lost`: nothing it was driving has gone away, this one simply
+## has nothing to say.
+var standing_down: bool = false
+
 ## The race being scored. Null is the ordinary state before a race is entered.
 var race: RaceDirector = null
 ## The player's car. Its `engine_rpm` and `throttle` are the whole of what the
@@ -53,6 +58,22 @@ func _ready() -> void:
 		director.name = "AudioDirector"
 		add_child(director)
 	director.set_master_volume(master_volume)
+	_stand_down_duplicate()
+
+
+## A second bridge in the same tree would be a second engine voice and a second
+## poll of the same car, so whoever is second stops. This is not defensive
+## coding: the game wires audio from an autoload, and a host that also builds a
+## bridge in its own `_ready` is making a reasonable choice that must not
+## double the engine.
+func _stand_down_duplicate() -> void:
+	var other := get_tree().root.find_children("*", "AudioBridge", true, false)
+	for n in other:
+		if n != self and n is AudioBridge and not (n as AudioBridge).lost and is_instance_valid((n as AudioBridge).director):
+			push_warning("AudioBridge: a second bridge is already in the tree - this one is standing down.")
+			set_physics_process(false)
+			standing_down = true
+			return
 
 
 ## Physics rate, not the render rate: rpm is drivetrain state and the lights are
