@@ -49,6 +49,7 @@ func build(g: RoadGraph) -> void:
 	_road_surface()
 	_kerbs_and_footpaths()
 	_lane_markings()
+	_junction_control()
 	_intersections()
 	_drainage()
 	_buildings()
@@ -117,6 +118,11 @@ func _mat(key: String) -> StandardMaterial3D:
 	if not _materials.has(key):
 		match key:
 			"asphalt": _materials[key] = MatLib.wet_asphalt()
+			# Four grains of tarmac, one per chunk. See `_asphalt_key`.
+			"asphalt0": _materials[key] = MatLib.wet_asphalt(0.06, 0)
+			"asphalt1": _materials[key] = MatLib.wet_asphalt(0.06, 1)
+			"asphalt2": _materials[key] = MatLib.wet_asphalt(0.06, 2)
+			"asphalt3": _materials[key] = MatLib.wet_asphalt(0.06, 3)
 			"paint_white": _materials[key] = MatLib.road_paint(Color(0.62, 0.60, 0.55))
 			"paint_yellow": _materials[key] = MatLib.road_paint(Color(0.55, 0.40, 0.06))
 			"concrete": _materials[key] = MatLib.concrete()
@@ -339,6 +345,23 @@ func _cell_key(p: Vector2) -> Vector2i:
 	return Vector2i(floori(p.x / ROAD_CHUNK_M), floori(p.y / ROAD_CHUNK_M))
 
 
+## Which grain of tarmac a chunk gets.
+##
+## The asphalt material is triplanar, so its texture is sampled from world
+## position and every 16.7 m of road shows the same tile of grain - a regular
+## grid over the whole map that reads as wallpaper, not as tarmac. A per-chunk UV
+## offset cannot fix that because the shader never reads the UVs; a different
+## material can, and a different material per chunk is a different draw call.
+## Hence four variants and a hash: the repeat becomes 160 m and non-obvious
+## instead of 16.7 m and obvious, at the cost measured in the commit.
+##
+## Hashing the cell rather than the chunk's first edge keeps a junction patch and
+## the road either side of it on the same grain, so the patch does not read as a
+## differently-coloured square of tarmac.
+func _asphalt_key(cell: Vector2i) -> String:
+	return "asphalt%d" % (absi(cell.x * 31 + cell.y * 17) % 4)
+
+
 func _road_surface() -> void:
 	var cells := {}
 	for e in graph.edges:
@@ -357,7 +380,7 @@ func _road_surface() -> void:
 		var mi := MeshInstance3D.new()
 		mi.name = "RoadSurface_%d_%d" % [key.x, key.y]
 		mi.mesh = (cells[key] as SurfaceTool).commit()
-		mi.material_override = _mat("asphalt")
+		mi.material_override = _mat(_asphalt_key(key))
 		mi.position.y = 0.015
 		add_child(mi)
 
@@ -431,10 +454,31 @@ func _blocked_by_junction(p: Vector3) -> bool:
 	return false
 
 
+## Lane markings: the boundaries between lanes, the lines along the kerb, and the
+## stop / give-way rows at the mouths of the approaches.
+##
+## What was here before was one line down the middle of every road and nothing
+## else - no lane boundaries, no edge lines, no junction control - so a street
+## read as a grey ribbon with a dotted spine. Markings are placed from the road
+## class rather than by eye: `lanes_for()` gives the lane count, and lane i's
+## boundary sits at width * i / lanes, which is where the real marking is. The
+## centre boundary (on an even lane count) is the only one that changes colour
+## or rhythm, because that is the only one that means something.
+const MARK_Y := 0.028
+const LINE_W := 0.12
+const LINE_T := 0.012
+const EDGE_LINE_INSET := 0.35
+const SOLID_PITCH := 4.0
+const DASH_PITCH := 7.0
+const DASH_RUN := 3.0
+
+
 func _lane_markings() -> void:
-	# Centre lines: dashed white on streets, solid yellow on arterials.
-	var dash := _box_mesh(Vector3(0.12, 0.012, 3.0), Vector3.ZERO)
-	var solid := _box_mesh(Vector3(0.12, 0.012, 4.0), Vector3.ZERO)
+	# One unit box for every marking. `_add` keys a batch's meshes by material
+	# key alone, so a second mesh under a key already in use would silently
+	# rescale the first one's instances; scale per instance instead, the way the
+	# kerbs do.
+	var box := _box_mesh(Vector3.ONE, Vector3.ZERO)
 	for e in graph.edges:
 		var a: Vector2 = graph.node_pos(int(e["a"]))
 		var b: Vector2 = graph.node_pos(int(e["b"]))
@@ -443,18 +487,154 @@ func _lane_markings() -> void:
 		if length < 6.0:
 			continue
 		var dir := seg / length
+		var nrm := Vector2(-dir.y, dir.x)
 		var ang := atan2(dir.x, dir.y)
-		var arterial: bool = int(e["class"]) >= RoadGraph.RoadClass.ARTERIAL
-		var step := 0.0
-		while step < length - 2.0:
-			var mid: Vector2 = a.lerp(b, (step + 1.4) / length)
-			var xf := Transform3D(Basis.from_euler(Vector3(0, ang, 0)), Vector3(mid.x, 0.028, mid.y))
-			if arterial:
-				_add("markings", solid, xf, "paint_yellow")
-				step += 4.0
+		var cls := int(e["class"])
+		var w: float = float(e["width"])
+		var lanes := int(graph.lanes_for(cls))
+		var basis := Basis.from_euler(Vector3(0, ang, 0))
+		# Not the whole edge: at a junction mouth the tarmac belongs to the
+		# junction, and a lane line drawn across it is a line through a give-way
+		# row. `_clear_span` trims back to where the carriageway starts.
+		var span := _clear_span(a, dir, length)
+		for i in range(1, lanes):
+			var centre := i * 2 == lanes
+			_stripe_run(box, basis, a, dir, nrm, span, -w * 0.5 + w * float(i) / float(lanes),
+					centre and cls >= RoadGraph.RoadClass.ARTERIAL)
+		# Edge lines, set in from the kerb, on anything wider than a single lane.
+		if cls >= RoadGraph.RoadClass.STREET:
+			for side in [-1.0, 1.0]:
+				_stripe_span(box, basis, a, dir, nrm, span, (w * 0.5 - EDGE_LINE_INSET) * side)
+
+
+## Where on an edge the tarmac stops being junction and starts being carriageway,
+## as distances along the edge from `a`. Both ends are trimmed; a short edge that
+## is junction all the way along returns a span with hi <= lo and places nothing.
+func _clear_span(a: Vector2, dir: Vector2, length: float) -> Vector2:
+	var lo := 0.0
+	while lo < length * 0.5 and _in_junction(a + dir * lo):
+		lo += 1.0
+	var hi := length
+	while hi > lo and _in_junction(a + dir * hi):
+		hi -= 1.0
+	return Vector2(lo, hi)
+
+
+func _in_junction(p: Vector2) -> bool:
+	return _blocked_by_junction(Vector3(p.x, 0.0, p.y))
+
+
+## Dashes on the rhythm of a lane line, or an unbroken run of boxes for a solid
+## line. One box per dash rather than one long strip, so the line bends with the
+## road instead of chording across a curve.
+func _stripe_run(mesh: ArrayMesh, basis: Basis, a: Vector2, dir: Vector2, nrm: Vector2,
+		span: Vector2, offset: float, solid: bool) -> void:
+	var pitch := SOLID_PITCH if solid else DASH_PITCH
+	var run := SOLID_PITCH if solid else DASH_RUN
+	var key := "paint_yellow" if solid else "paint_white"
+	var t := span.x
+	while t < span.y - 1.0:
+		var len := minf(run, span.y - t)
+		_add("markings", mesh, _mark_xf(basis, a, dir, nrm, t + len * 0.5, offset, len), key)
+		t += pitch
+
+
+## An unbroken line: one box for the whole span, clipped to it.
+func _stripe_span(mesh: ArrayMesh, basis: Basis, a: Vector2, dir: Vector2, nrm: Vector2,
+		span: Vector2, offset: float) -> void:
+	var len := span.y - span.x
+	if len < 1.0:
+		return
+	_add("markings", mesh, _mark_xf(basis, a, dir, nrm, (span.x + span.y) * 0.5, offset, len),
+			"paint_white")
+
+
+func _mark_xf(basis: Basis, a: Vector2, dir: Vector2, nrm: Vector2, along: float,
+		offset: float, len: float) -> Transform3D:
+	var p := a + dir * along + nrm * offset
+	return Transform3D(basis, Vector3(p.x, MARK_Y, p.y)).scaled_local(Vector3(LINE_W, LINE_T, len))
+
+
+## Stop bars and give-way rows, on the mouth of each approach.
+##
+## The road carrying less than the widest road at an intersection stops; the one
+## carrying more gives way. Where every approach is the same class - the
+## residential crossroads - neither marking is correct, so neither is drawn:
+## give-way rows on all four arms of a suburban street junction is the single
+## fastest way to make a city look like a diagram.
+##
+## Rows and bars sit just outside the junction patch, at the radius
+## `_intersections` draws tarmac to, so they land on the edge of the patch rather
+## than under it.
+func _junction_control() -> void:
+	var box := _box_mesh(Vector3.ONE, Vector3.ZERO)
+	var tri := _tri_marker_mesh()
+	for ni in graph.nodes.size():
+		var n: Dictionary = graph.nodes[ni]
+		if int(n["edges"].size()) < 3:
+			continue
+		var lo := RoadGraph.RoadClass.HIGHWAY
+		var hi := RoadGraph.RoadClass.LANE
+		for ei in n["edges"]:
+			var ec := int(graph.edges[int(ei)]["class"])
+			lo = mini(lo, ec)
+			hi = maxi(hi, ec)
+		if lo == hi:
+			continue
+		var p: Vector2 = n["pos"]
+		var r: float = graph.width_for(int(n["class"])) * 0.5
+		for ei in n["edges"]:
+			var e: Dictionary = graph.edges[int(ei)]
+			var cls := int(e["class"])
+			var w: float = float(e["width"])
+			var dir := (graph.node_pos(graph.other_node(int(ei), ni)) - p).normalized()
+			var ang := atan2(dir.x, dir.y)
+			var basis := Basis.from_euler(Vector3(0, ang, 0))
+			var mouth := p + dir * (r + EDGE_LINE_INSET + 0.25)
+			var xf := Transform3D(basis, Vector3(mouth.x, MARK_Y, mouth.y))
+			if cls < hi:
+				# Stop bar: across the whole approach, 0.4 m deep. Two junctions a
+				# few metres apart would otherwise paint this one on the other's
+				# tarmac, which is the same mistake as painting it on your own
+				# patch and just as visible from the car.
+				if not _patched_by_other(ni, mouth):
+					_add("markings", box, xf.scaled_local(Vector3(w, LINE_T, 0.4)), "paint_white")
 			else:
-				_add("markings", dash, xf, "paint_white")
-				step += 7.0
+				# Give way: a row of triangles, apexes to the junction. The guard
+				# is per triangle, not per row: a row is as wide as the approach,
+				# so on a pair of junctions four metres apart its far end can land
+				# on the neighbour even when its centre cannot.
+				var count := maxi(1, int(w / 0.9))
+				var pitch := w / float(count)
+				for i in count:
+					var at := mouth + Vector2(-dir.y, dir.x) * ((float(i) - (count - 1) * 0.5) * pitch)
+					if _patched_by_other(ni, at):
+						continue
+					_add("giveway", tri,
+							Transform3D(basis, Vector3(at.x, MARK_Y, at.y)), "paint_white")
+
+
+## True when some junction other than `node` has already laid tarmac over p.
+func _patched_by_other(node: int, p: Vector2) -> bool:
+	for j in graph.nodes.size():
+		if j == node or int(graph.nodes[j]["edges"].size()) < 3:
+			continue
+		if p.distance_to(graph.node_pos(j)) < graph.width_for(int(graph.nodes[j]["class"])) * 0.5:
+			return true
+	return false
+
+
+## A flat give-way triangle, apex pointing down local -Z, i.e. at whatever the
+## instance is aimed at. Wound and normalised the way `_junction_fan` does it,
+## which is the one winding in this file that is known to face a camera above.
+static func _tri_marker_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for v in [Vector3(0, 0, -0.3), Vector3(0.3, 0, 0.3), Vector3(-0.3, 0, 0.3)]:
+		st.set_normal(Vector3.UP)
+		st.set_uv(Vector2(v.x, v.z) * 0.5)
+		st.add_vertex(v)
+	return st.commit()
 
 
 func _intersections() -> void:
@@ -468,7 +648,7 @@ func _intersections() -> void:
 		var mi := MeshInstance3D.new()
 		mi.name = "Intersections_%d_%d" % [key.x, key.y]
 		mi.mesh = (cells[key] as SurfaceTool).commit()
-		mi.material_override = _mat("asphalt")
+		mi.material_override = _mat(_asphalt_key(key))
 		mi.position.y = 0.02
 		add_child(mi)
 
