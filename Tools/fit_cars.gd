@@ -21,11 +21,11 @@ extends SceneTree
 ## Recover them with `git checkout <rev> -- assets/cars/<name>.glb` if the
 ## decision is ever revisited.
 const CARS := {
-	"supra_mk4":    {"z_up": false, "length_axis": "z", "target_length": 4.514, "note": "MK4 A80"},
-	"silvia_s13":   {"z_up": false, "length_axis": "z", "target_length": 4.525, "note": "S13"},
-	"silvia_s15":   {"z_up": false, "length_axis": "z", "target_length": 4.545, "note": "S15"},
-	"wrx_gc8":      {"z_up": false, "length_axis": "z", "target_length": 4.345, "note": "GC8 blobeye"},
-	"evo_v":        {"z_up": false, "length_axis": "z", "target_length": 4.300, "note": "CP9A, Evo6 body"},
+	"supra_mk4":    {"z_up": false, "yaw_deg": 180.0, "length_axis": "z", "target_length": 4.514, "note": "MK4 A80"},
+	"silvia_s13":   {"z_up": false, "yaw_deg": 180.0, "length_axis": "z", "target_length": 4.525, "note": "S13"},
+	"silvia_s15":   {"z_up": false, "yaw_deg": 180.0, "length_axis": "z", "target_length": 4.545, "note": "S15"},
+	"wrx_gc8":      {"z_up": false, "yaw_deg": 0.0, "length_axis": "z", "target_length": 4.345, "note": "GC8 blobeye"},
+	"evo_v":        {"z_up": false, "yaw_deg": 180.0, "length_axis": "z", "target_length": 4.300, "note": "CP9A, Evo6 body"},
 }
 
 var lo := Vector3(INF, INF, INF)
@@ -89,6 +89,7 @@ func _fit(cid: String) -> Dictionary:
 	var basis := Basis.IDENTITY
 	if cfg["z_up"]:
 		basis = Basis(Vector3.RIGHT, -PI / 2.0)
+	basis = Basis(Vector3.UP, deg_to_rad(float(cfg["yaw_deg"]))) * basis
 
 	# Pivot: after the basis, drop the car so its bounding box sits on y=0 and is
 	# centred in x and z. The origin is otherwise wherever the uploader left it,

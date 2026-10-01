@@ -216,6 +216,18 @@ func _car_models(t: TestHarness) -> void:
 	var fit: Dictionary = CarFit.ALL[CarVisual.MODELS["kairo_s13"]]
 	t.near(model.position.y, float(fit["offset"].y) + vis.spec.tyre_radius, 0.001,
 		"the model is lifted by a tyre radius so it stands on the ground")
+	var source_nose: Dictionary = preload("res://Tools/check_car_facing.gd").SOURCE_NOSE
+	for car_id in CarVisual.MODELS:
+		var fitted_car := spawn(world, car_id)
+		fitted_car.rotation.y = 0.7
+		var fitted_model := fitted_car.get_node_or_null("Visual/Model") as Node3D
+		t.ok(fitted_model != null, "%s has an imported model for heading validation" % car_id)
+		if fitted_model == null:
+			continue
+		var model_id: String = CarVisual.MODELS[car_id]
+		var nose: Vector3 = (fitted_model.global_basis * source_nose[model_id]).normalized()
+		t.gt(nose.dot(fitted_car.forward()), 0.99,
+			"%s visible nose follows the physics heading" % model_id)
 	await t.drop(world)
 
 
