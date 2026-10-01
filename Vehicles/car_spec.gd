@@ -43,6 +43,9 @@ const AIR_DENSITY := 1.2041
 ## snapping straight.
 ##
 ## Left at its default it reduces exactly to the previous single-tyre behaviour.
+@export var front_slide_tail := 0.72    ## front grip kept when sliding
+@export var front_grip_scale := 1.0       ## front axle peak-grip multiplier
+@export var rear_grip_scale := 1.0        ## rear axle peak-grip multiplier
 @export var rear_slide_tail := 0.72     ## rear grip kept when sliding
 @export var diff_lock := 0.0             ## 0 open, 1 spool. See CarBody.
 

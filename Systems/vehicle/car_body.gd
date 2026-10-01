@@ -580,8 +580,9 @@ func _update_tyres(delta: float) -> void:
 		var load: float = w["load"]
 		var radius: float = w["radius"]
 		var mu: float = spec.tyre_peak_mu * float(w["surface_mu"])
-		# The rear tyre curve is what decides whether this car drifts.
-		var slide_tail: float = spec.rear_slide_tail if not w["front"] else TyreModel.LATERAL_TAIL
+		# Per-axle tyre curve: what decides whether this car drifts.
+		mu *= spec.front_grip_scale if w["front"] else spec.rear_grip_scale
+		var slide_tail: float = spec.front_slide_tail if w["front"] else spec.rear_slide_tail
 
 		var sr := TyreModel.slip_ratio(w["omega"] * radius, v_forward)
 		var sat := TyreModel.slip_angle_tan(v_forward, v_side)
