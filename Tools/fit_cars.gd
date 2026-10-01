@@ -15,12 +15,12 @@ extends SceneTree
 ## Godot's forward is -Z, so a Z-up model needs -90 deg about X: that sends the
 ## model's +Y (its nose) to -Z and its +Z (its roof) to +Y. No extra yaw needed.
 const CARS := {
-	"supra_mk4":    {"z_up": true,  "length_axis": "y", "target_length": 4.514, "note": "MK4 A80"},
+	"supra_mk4":    {"z_up": false, "length_axis": "z", "target_length": 4.514, "note": "MK4 A80"},
 	"silvia_s13":   {"z_up": false, "length_axis": "z", "target_length": 4.525, "note": "S13"},
 	"silvia_s15":   {"z_up": false, "length_axis": "z", "target_length": 4.545, "note": "S15"},
-	"wrx_gc8":      {"z_up": true,  "length_axis": "y", "target_length": 4.345, "note": "GC8 blobeye"},
+	"wrx_gc8":      {"z_up": false, "length_axis": "z", "target_length": 4.345, "note": "GC8 blobeye"},
 	"evo_v":        {"z_up": false, "length_axis": "z", "target_length": 4.300, "note": "CP9A, Evo6 body"},
-	"vt_commodore": {"z_up": true,  "length_axis": "y", "target_length": 4.884, "note": "VT"},
+	"vt_commodore": {"z_up": false, "length_axis": "z", "target_length": 4.884, "note": "VT"},
 	"au_falcon":    {"z_up": true,  "length_axis": "z", "target_length": 4.772, "note": "UNUSABLE"},
 }
 
@@ -63,9 +63,7 @@ func _fit(cid: String) -> Dictionary:
 	if root == null:
 		print("%-14s NO SCENE" % cid)
 		return {}
-	get_root().add_child(root)
-	_walk(root)
-	get_root().remove_child(root)
+	_walk(root, Transform3D.IDENTITY)
 	root.free()
 
 	if lo.x > INF:
@@ -105,10 +103,21 @@ func _fit(cid: String) -> Dictionary:
 	print("%-14s scale=%.6f  verts=%-8d meshes=%-4d tex=%d/%d  -> %.2f x %.2f x %.2f m" % [
 		cid, s, verts, meshes, textured, meshes,
 		out_size.y, out_size.x, out_size.z])
+
+	# A model that measures to a speck or a hangar is not usable, and CarVisual
+	# falling back to the procedural box is a far better failure than an
+	# invisible car. Texture count alone did not catch this: three cars were
+	# fully textured while rendering 2 cm across or 3 m underground.
+	var car_sized: bool = out_size.x > 1.0 and out_size.x < 2.6 \
+		and out_size.y > 0.9 and out_size.y < 2.2 \
+		and out_size.z > 3.0 and out_size.z < 6.0
+	if textured > 0 and not car_sized:
+		printerr("%-14s NOT CAR SIZED %.2f x %.2f x %.2f m - marked unusable" % [
+			cid, out_size.x, out_size.y, out_size.z])
 	return {
 		"id": cid, "note": cfg["note"], "scale": s, "basis": basis,
 		"offset": t, "verts": verts, "meshes": meshes, "textured": textured,
-		"ok": textured > 0,
+		"ok": textured > 0 and car_sized,
 	}
 
 
@@ -146,7 +155,15 @@ func _write(rows: Array) -> void:
 	print("\nwrote assets/cars/fit.gd (%d cars)" % rows.size())
 
 
-func _walk(n: Node) -> void:
+## `parent_xf` is this node's own transform composed with all of its ancestors'.
+## It is threaded down rather than read from `global_transform`, because the
+## scene GLTFDocument builds is not in the tree here and global_transform
+## therefore returns IDENTITY for every mesh. Measuring with identity bounds is
+## what put the Evo and the Supra at 2 cm and the WRX 3 m underground: the glTF
+## node graph carries the scale and translation that the raw mesh AABB never
+## sees.
+func _walk(n: Node, parent_xf: Transform3D) -> void:
+	var xf: Transform3D = parent_xf * (n as Node3D).transform if n is Node3D else parent_xf
 	if n is MeshInstance3D:
 		var mi := n as MeshInstance3D
 		var m := mi.mesh
@@ -160,11 +177,10 @@ func _walk(n: Node) -> void:
 			var arr := m.surface_get_arrays(0)
 			if arr[Mesh.ARRAY_VERTEX] != null:
 				verts += (arr[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
-		var xf: Transform3D = mi.global_transform
 		var ab: AABB = mi.get_aabb()
 		for i in 8:
 			var c: Vector3 = xf * ab.get_endpoint(i)
 			lo = Vector3(minf(lo.x, c.x), minf(lo.y, c.y), minf(lo.z, c.z))
 			hi = Vector3(maxf(hi.x, c.x), maxf(hi.y, c.y), maxf(hi.z, c.z))
 	for c in n.get_children():
-		_walk(c)
+		_walk(c, xf)
