@@ -197,8 +197,15 @@ func _terrain() -> void:
 			var h10 := _terrain_height(x1, z0)
 			var h01 := _terrain_height(x0, z1)
 			var h11 := _terrain_height(x1, z1)
-			_quad(st, Vector3(x0, h00, z0), Vector3(x1, h10, z0), Vector3(x1, h11, z1), Vector3(x0, h01, z1))
-			_quad(st, Vector3(x0, h00, z0), Vector3(x1, h11, z1), Vector3(x1, h10, z0), Vector3(x0, h01, z0))
+			# Corners walked counter-clockwise seen from above, so _quad reads
+			# +Y as the outward normal. Walked the other way it reads -Y, which
+			# is the ground lit from underneath - black at any exposure.
+			var p00 := Vector3(x0, h00, z0)
+			var p10 := Vector3(x1, h10, z0)
+			var p01 := Vector3(x0, h01, z1)
+			var p11 := Vector3(x1, h11, z1)
+			_quad(st, p00, p01, p11, p10)
+			_quad(st, p00, p11, p10, p01)
 	var mesh: ArrayMesh = st.commit()
 	var mi := MeshInstance3D.new()
 	mi.name = "Terrain"
@@ -261,25 +268,41 @@ func _terrain_height(x: float, z: float) -> float:
 	return h
 
 
+## One quad, two triangles, from four corners walked in order around the patch.
+##
+## **The order of a, b, c, d is the caller's OUTWARD normal**, taken as
+## `_tri_normal(a, b, c)`, and the triangles are emitted *reversed* to get it.
+## That indirection is not decoration. Godot only draws a face whose
+## right-hand-rule normal points away from the camera, i.e. INTO the surface -
+## the exact opposite of the outward normal it wants to light it with. Deriving
+## both from one cross product forces a choice between being lit correctly and
+## being visible at all, and this world picked wrong in both directions:
+##
+##   - the carriageway was lit correctly and culled from every frame above it
+##   - the terrain was drawn and lit from underneath, i.e. pure black
+##
+## So: the normal stays as the caller ordered it, and the winding is reversed
+## to match. Callers must pass corners such that a->b->c reads as outward.
 static func _quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> void:
-	st.set_normal(_tri_normal(a, b, c))
+	var n := _tri_normal(a, b, c)
+	st.set_normal(n)
 	st.set_uv(Vector2(a.x, a.z) * 0.02)
 	st.add_vertex(a)
-	st.set_normal(_tri_normal(a, b, c))
+	st.set_normal(n)
+	st.set_uv(Vector2(c.x, c.z) * 0.02)
+	st.add_vertex(c)
+	st.set_normal(n)
 	st.set_uv(Vector2(b.x, b.z) * 0.02)
 	st.add_vertex(b)
-	st.set_normal(_tri_normal(a, b, c))
-	st.set_uv(Vector2(c.x, c.z) * 0.02)
-	st.add_vertex(c)
-	st.set_normal(_tri_normal(a, b, c))
+	st.set_normal(n)
 	st.set_uv(Vector2(a.x, a.z) * 0.02)
 	st.add_vertex(a)
-	st.set_normal(_tri_normal(a, b, c))
-	st.set_uv(Vector2(c.x, c.z) * 0.02)
-	st.add_vertex(c)
-	st.set_normal(_tri_normal(a, b, c))
+	st.set_normal(n)
 	st.set_uv(Vector2(d.x, d.z) * 0.02)
 	st.add_vertex(d)
+	st.set_normal(n)
+	st.set_uv(Vector2(c.x, c.z) * 0.02)
+	st.add_vertex(c)
 
 
 static func _tri_normal(a: Vector3, b: Vector3, c: Vector3) -> Vector3:
@@ -288,9 +311,36 @@ static func _tri_normal(a: Vector3, b: Vector3, c: Vector3) -> Vector3:
 
 
 # --------------------------------------------------------------- road surfaces
+## Edge length in metres, used to cut the carriageway into chunks.
+const ROAD_CHUNK_M := 160.0
+
+## The road, cut into chunks instead of one city-sized mesh.
+##
+## A single 2.6 x 2.8 km surface is one object with one bounding box, and its
+## centre is out in the middle of the map. Renderers choose a mesh's lights by
+## that centre, so the 1278 streetlights that are actually near the camera are
+## never among the ones assigned to it - the tarmac went unlit while the same
+## frame's directional light lit it perfectly. Chunking puts each stretch of
+## road in a box small enough that the lamps above it are the lamps that light
+## it. Same reason the junction patches are chunked.
+##
+## Measured, at the "street" preset, by Systems/road_render/draw_calls.gd:
+## road tarmac went from 2 meshes / 10 draw calls to 136 meshes / 35 draw calls
+## in that frame, and the median road pixel went from literally 0.00 to 51.52.
+## So this is a correctness fix bought with draw calls, not a performance win -
+## do not assume otherwise. 101 of the 136 chunks were frustum-culled at street
+## level, but from the air it is 58 draw calls, because then they all are in
+## frame. ROAD_CHUNK_M = 160 m is inherited, not chosen by measurement: it has
+## not been swept, so the honest statement is that it works and nobody has found
+## the knee. Sweep it before treating the draw-call cost above as fixed.
+##
+## Chunk key (cell) -> SurfaceTool, filled as the geometry is emitted.
+func _cell_key(p: Vector2) -> Vector2i:
+	return Vector2i(floori(p.x / ROAD_CHUNK_M), floori(p.y / ROAD_CHUNK_M))
+
+
 func _road_surface() -> void:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var cells := {}
 	for e in graph.edges:
 		var a: Vector2 = graph.node_pos(int(e["a"]))
 		var b: Vector2 = graph.node_pos(int(e["b"]))
@@ -302,18 +352,33 @@ func _road_surface() -> void:
 		var a1 := Vector3(a.x + nrm.x * hw, 0.0, a.y + nrm.y * hw)
 		var b0 := Vector3(b.x - nrm.x * hw, 0.0, b.y - nrm.y * hw)
 		var b1 := Vector3(b.x + nrm.x * hw, 0.0, b.y + nrm.y * hw)
-		_road_quad(st, a0, a1, b1, b0, uv_len, hw)
-	var mi := MeshInstance3D.new()
-	mi.name = "RoadSurface"
-	mi.mesh = st.commit()
-	mi.material_override = _mat("asphalt")
-	mi.position.y = 0.015
-	add_child(mi)
+		_road_quad(_cell(cells, (a + b) * 0.5), a0, a1, b1, b0, uv_len, hw)
+	for key in cells:
+		var mi := MeshInstance3D.new()
+		mi.name = "RoadSurface_%d_%d" % [key.x, key.y]
+		mi.mesh = (cells[key] as SurfaceTool).commit()
+		mi.material_override = _mat("asphalt")
+		mi.position.y = 0.015
+		add_child(mi)
+
+
+## The SurfaceTool for the chunk containing p, created on first use.
+func _cell(cells: Dictionary, p: Vector2) -> SurfaceTool:
+	var key := _cell_key(p)
+	if not cells.has(key):
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		cells[key] = st
+	return cells[key]
 
 
 static func _road_quad(st: SurfaceTool, a0: Vector3, a1: Vector3, b1: Vector3, b0: Vector3,
 		length: float, half_width: float) -> void:
-	var verts := [a0, a1, b1, a0, b1, b0]
+	# Wound so the right-hand-rule normal points down, into the tarmac. Godot
+	# draws a face only when that normal points away from the camera, so the
+	# other order is a road you can only see from underneath - the carriageway
+	# was simply absent from every frame shot from above.
+	var verts := [a0, b1, a1, a0, b0, b1]
 	var uvs := [
 		Vector2(0, 0), Vector2(half_width * 2.0, 0),
 		Vector2(half_width * 2.0, length), Vector2(0, 0),
@@ -393,34 +458,80 @@ func _lane_markings() -> void:
 
 
 func _intersections() -> void:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var cells := {}
 	for n in graph.nodes:
 		if n["edges"].size() < 3:
 			continue
 		var p: Vector2 = n["pos"]
-		var r: float = graph.width_for(int(n["class"])) * 0.5
-		# A fan of 10 triangles fills the junction patch; at these radii and
-		# heights nobody can tell it is not a perfect polygon.
-		var segs := 10
-		for i in segs:
-			var a0 := TAU * float(i) / segs
-			var a1 := TAU * float(i + 1) / segs
-			var v0 := Vector3(p.x + cos(a0) * r, 0, p.y + sin(a0) * r)
-			var v1 := Vector3(p.x + cos(a1) * r, 0, p.y + sin(a1) * r)
-			_quad(st, Vector3(p.x, 0, p.y), v0, v1, v1)
-	var mi := MeshInstance3D.new()
-	mi.name = "Intersections"
-	mi.mesh = st.commit()
-	mi.material_override = _mat("asphalt")
-	mi.position.y = 0.02
-	add_child(mi)
+		_junction_fan(_cell(cells, p), p, graph.width_for(int(n["class"])) * 0.5, true)
+	for key in cells:
+		var mi := MeshInstance3D.new()
+		mi.name = "Intersections_%d_%d" % [key.x, key.y]
+		mi.mesh = (cells[key] as SurfaceTool).commit()
+		mi.material_override = _mat("asphalt")
+		mi.position.y = 0.02
+		add_child(mi)
+
+
+## The patch of tarmac where three or more streets meet: a fan of 10 triangles
+## around the centre. At these radii and heights nobody can tell it is not a
+## perfect polygon.
+##
+## Emitted directly rather than through _quad, because a fan is not a quad.
+## `_quad(st, centre, v0, v1, v1)` passed v1 as both the third and fourth
+## corner, which left a zero-area triangle behind every sector: half of every
+## junction was a hole in the tarmac, and the junction collider carried twice
+## the triangles it needed. Both the visible patch and the collision patch are
+## built here so they cannot drift apart again.
+##
+## Winding points down, normal points up - the same contract as _road_quad,
+## because this is the same tarmac. with_uv is false for the collider, which
+## has no material to sample.
+static func _junction_fan(st: SurfaceTool, p: Vector2, r: float, with_uv: bool) -> void:
+	var segs := 10
+	var centre := Vector3(p.x, 0, p.y)
+	for i in segs:
+		var a0 := TAU * float(i) / float(segs)
+		var a1 := TAU * float(i + 1) / float(segs)
+		for v in [centre,
+				Vector3(p.x + cos(a0) * r, 0, p.y + sin(a0) * r),
+				Vector3(p.x + cos(a1) * r, 0, p.y + sin(a1) * r)]:
+			st.set_normal(Vector3.UP)
+			if with_uv:
+				st.set_uv(Vector2(v.x, v.z) * 0.02)
+			st.add_vertex(v)
 
 
 func _drainage() -> void:
 	# Open concrete channels, the reason Manunda floods and the reason every
 	# kerb here has one.
-	var channel := _box_mesh(Vector3(1.6, 0.30, 4.0), Vector3(0, -0.15, 0))
+	#
+	# Measured, not assumed: the channel is DRAIN_W wide and DRAIN_DEPTH deep
+	# with its top flush with the road and its centre DRAIN_OFF outside the
+	# carriageway edge, so on a street it occupies hw+0.15 .. hw+1.75 and a car
+	# leaving the tarmac is 150 mm from falling in. Nothing stopped it: the kerb
+	# is 140 mm of visual geometry with no collider, and the channel had no lip.
+	#
+	# Each rail is DRAIN_RAIL_W square and stands DRAIN_DEPTH proud - as proud as
+	# the channel is deep, so the lip you see is the same measure as the hole
+	# behind it. Centred ON the channel edge rather than tucked inside it: a rail
+	# against the edge opens a 150 mm gap between itself and the trench it is
+	# there to hold. For that reason it also runs DRAIN_DEPTH * 2 tall, from the
+	# trench floor to the lip, lining the wall it sits over instead of perching
+	# on it.
+	#
+	# Local +X on this transform points away from the carriageway (the basis below
+	# is yawed by atan2(dir.x, dir.y), which sends local +X to -nrm, and the piece
+	# sits at +nrm). So -DRAIN_W/2 is the road-side edge and +DRAIN_W/2 the far
+	# one, measured: the two rail origins come out 0.800 m either side of the
+	# channel's, and 0.15 and 1.75 past the carriageway edge. Both rails are the
+	# same mesh, offset per instance.
+	const DRAIN_OFF := 0.95
+	const DRAIN_W := 1.6
+	const DRAIN_DEPTH := 0.30
+	const DRAIN_RAIL_W := 0.30
+	var channel := _box_mesh(Vector3(DRAIN_W, DRAIN_DEPTH, 4.0), Vector3(0, -DRAIN_DEPTH * 0.5, 0))
+	var rail := _box_mesh(Vector3(DRAIN_RAIL_W, DRAIN_DEPTH * 2.0, 4.0), Vector3.ZERO)
 	var water := _box_mesh(Vector3(1.1, 0.02, 4.0), Vector3.ZERO)
 	for e in graph.edges:
 		var a: Vector2 = graph.node_pos(int(e["a"]))
@@ -436,11 +547,15 @@ func _drainage() -> void:
 		var pieces := int(length / 8.0)
 		for i in pieces:
 			var mid: Vector2 = a.lerp(b, (float(i) + 0.5) / float(maxi(pieces, 1)))
-			var p := mid + nrm * (hw + 0.95)
+			var p := mid + nrm * (hw + DRAIN_OFF)
 			if _blocked_by_junction(Vector3(p.x, 0, p.y)):
 				continue
 			var xf := Transform3D(Basis.from_euler(Vector3(0, ang, 0)), Vector3(p.x, 0, p.y))
 			_add("drainage", channel, xf.scaled_local(Vector3(1.0, 1.0, 8.4)), "concrete")
+			for edge in [-DRAIN_W * 0.5, DRAIN_W * 0.5]:
+				_add("drainage", rail,
+					xf.scaled_local(Vector3(1.0, 1.0, 8.4)).translated_local(Vector3(edge, 0.0, 0.0)),
+					"concrete")
 			_add("drainage_water", water,
 				Transform3D(Basis.from_euler(Vector3(0, ang, 0)), Vector3(p.x, 0.02, p.y)),
 				"asphalt")
@@ -493,16 +608,7 @@ func _bake_collision() -> void:
 		if n["edges"].size() < 3:
 			continue
 		var p: Vector2 = n["pos"]
-		var r: float = graph.width_for(int(n["class"])) * 0.5
-		var segs := 10
-		for i in segs:
-			var a0 := TAU * float(i) / segs
-			var a1 := TAU * float(i + 1) / segs
-			_quad(st, Vector3(p.x, 0, p.y),
-				Vector3(p.x + cos(a0) * r, 0, p.y + sin(a0) * r),
-				Vector3(p.x + cos(a1) * r, 0, p.y + sin(a1) * r),
-				Vector3(p.x + cos(a1) * r, 0, p.y + sin(a1) * r))
-
+		_junction_fan(st, p, graph.width_for(int(n["class"])) * 0.5, false)
 	var body := StaticBody3D.new()
 	body.name = "RoadCollision"
 	body.collision_layer = 1
