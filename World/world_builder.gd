@@ -10,8 +10,25 @@ extends Node3D
 
 const KERB_HEIGHT := 0.14
 const FOOTPATH_WIDTH := 1.6
-const BUILDING_SETBACK := 9.0
 const PALM_SPACING := 17.0
+## Grid resolution of the mapped-footprint coverage test. Coarse on purpose: it
+## answers plot-sized questions, and a fine grid costs 16x the marks for nothing.
+const OSM_CELL := 16.0
+## How far back from the back of the footpath a frontage building stands. Wide
+## enough that the carport does not hang over the verge.
+const FRONTAGE_OFFSET := 3.0
+## Frontage plot pitch. Two houses either side of a 22 m pitch is a normal
+## suburban lot spacing for the block sizes this map actually has.
+const PLOT_PITCH := 22.0
+
+## Artkit planting for the blocks the kit fills. Registered names only - anything
+## else is skipped by `ArtKitScatter` and reported, not silently dropped.
+##
+## Free-standing yard things only. `_vegetation()` already owns the road verge, so
+## anything placed here that belongs on the footpath would double up with it.
+const YARD_PROPS := [
+	"palm_alexandrine", "tree_rain_tree", "palm_fan", "bush_scrub", "bin",
+]
 
 var graph: RoadGraph
 var rng := RandomNumberGenerator.new()
@@ -530,242 +547,163 @@ static func _trimesh(mesh: ArrayMesh) -> ConcavePolygonShape3D:
 # rather than as a grey road network.
 # =============================================================================
 
-## Low-rise Queensland houses: raised on stumps for flood water, corrugated roof,
-## a carport out front, and lit windows. Placed in the blocks between streets.
+## Real mapped buildings, then the artkit for whatever the map did not cover.
+##
+## `OSMBuildings` owns the footprints. It brings 2198 rings out of
+## `assets/maps/cairns_buildings.json`, the carriageway test that keeps a car out of
+## a wall, and the stumps a Queenslander stands on. None of that is expressible as
+## an artkit placement - `wrap_footprint()` takes a storey count and no lift - so
+## the footprints keep their own material batching and the kit is given the gap.
+##
+## The kit goes in through `ArtKitScatter` and nowhere else. That is what makes it
+## one mesh per material rather than one per placement: a raw generator called in
+## the loop builds fresh geometry every time, every signature differs, and a suburb
+## arrives as ~2200 draw calls instead of ~20.
 func _buildings() -> void:
-	var wall_mesh := _box_mesh(Vector3(1, 1, 1), Vector3.ZERO)
-	var roof_mesh := _gabled_roof_mesh(1.0, 1.0, 1.0)
-	var window_mesh := _box_mesh(Vector3(1, 1, 1), Vector3.ZERO)
-	var fence_mesh := _box_mesh(Vector3(1, 1, 1), Vector3.ZERO)
-
-	# Tint palettes: real Queensland suburbs are not one colour, they are
-	# forty years of paint that nobody could agree on.
-	var wall_tints := [
-		Color(0.52, 0.50, 0.46), Color(0.44, 0.47, 0.44), Color(0.58, 0.53, 0.47),
-		Color(0.38, 0.42, 0.40), Color(0.62, 0.58, 0.52), Color(0.48, 0.45, 0.42),
-	]
-	var roof_tints := [
-		Color(0.30, 0.31, 0.30), Color(0.36, 0.30, 0.26), Color(0.26, 0.30, 0.30),
-		Color(0.42, 0.38, 0.33), Color(0.32, 0.26, 0.24),
-	]
-
-	var placed := 0
-	var lights: Array = []
-	for block in _blocks():
-		var origin: Vector2 = block["centre"]
-		var half: Vector2 = block["half"]
-		var ang: float = float(block["angle"])
-		var is_commercial: bool = bool(block.get("commercial", false))
-		var is_industrial: bool = bool(block.get("industrial", false))
-
-		var front := Vector2(cos(ang), sin(ang))
-		var side := Vector2(-front.y, front.x)
-		var cols: int = 2 if (half.x < 42.0 or is_commercial or is_industrial) else 3
-		var rows: int = 3 if (half.y < 44.0 or is_commercial or is_industrial) else 4
-
-		for ci in cols:
-			for ri in rows:
-				var u: float = (float(ci) / maxf(float(cols - 1), 1.0) - 0.5) * (half.x * 1.7)
-				var v: float = (float(ri) / maxf(float(rows - 1), 1.0) - 0.5) * (half.y * 1.7)
-				var p: Vector2 = origin + front * u + side * v
-				var near: Dictionary = graph.nearest_road(Vector3(p.x, 0, p.y))
-				if float(near["lateral"]) < BUILDING_SETBACK + float(near["edge_width"] if near.has("edge_width") else 0.0):
-					continue
-				if float(near["lateral"]) < BUILDING_SETBACK:
-					continue
-
-				if is_industrial:
-					_industrial_shed(p, ang, wall_mesh, roof_mesh, wall_tints, roof_tints, lights)
-				elif is_commercial:
-					_shopfront(p, ang, wall_mesh, roof_mesh, window_mesh, wall_tints, roof_tints, lights)
-				else:
-					_house(p, ang, wall_mesh, roof_mesh, window_mesh, fence_mesh, wall_tints, roof_tints, lights)
-				placed += 1
-
-	for l in lights:
-		add_child(l)
-	print("[World] %d buildings placed" % placed)
+	var osm := OSMBuildings.build(self, graph)
+	var scatter := ArtKitScatter.attach(self, _artkit_fill(osm))
+	print("[World] artkit filled the gaps OSM left: %d buildings, %d props, %d draw calls, %d instances, %.0fk triangles"
+		% [int(scatter.stats.get("buildings", 0)), int(scatter.stats.get("props", 0)),
+			int(scatter.stats.get("nodes", 0)), int(scatter.stats.get("instances", 0)),
+			float(scatter.stats.get("triangles", 0)) / 1000.0])
 
 
-func _blocks() -> Array:
-	## The gaps between streets, derived from the graph rather than authored, so
-	## buildings always sit inside a real block.
+## The kit's placement list: buildings and yard planting along the frontages OSM
+## left empty.
+##
+## Frontages, not blocks, and that is the whole difference between art and a
+## curiosity. `_blocks()` finds 19 blocks on this map - real OSM data is mostly
+## T-junctions, so almost nothing is ever fully enclosed - and 19 blocks put 21
+## houses in a 31 km city. A road already knows its own frontage: walk its length
+## at a setback and build on the side the map left blank. That scales with the
+## street network rather than with the junctions.
+##
+## The cells are the other half of the decision. OSM covers western Cairns unevenly,
+## and without a coverage test the fill either doubles up on mapped houses or leaves
+## a hole where the map ran out; both read as a bug from the driver's seat.
+func _artkit_fill(osm: Dictionary) -> Array:
+	var cells := _osm_cells(osm.get("buildings", []))
 	var out: Array = []
-	for n in graph.nodes:
-		# 3 edges or more, not exactly 4. A block only has to be enclosed by
-		# streets, and a T-junction does that as well as a crossroads. Requiring
-		# exactly 4 was invisible on the authored Manunda lattice, where almost
-		# every junction was a crossroads, and cost almost the entire city on real
-		# OSM data, where most junctions are T-junctions: 359 nodes, 13 buildings.
-		if n["edges"].size() < 3:
+	var n := 0
+
+	for e in graph.edges:
+		var a: Vector2 = graph.node_pos(int(e["a"]))
+		var b: Vector2 = graph.node_pos(int(e["b"]))
+		var length: float = a.distance_to(b)
+		if length < PLOT_PITCH:
 			continue
-		var p: Vector2 = n["pos"]
-		# Sample a ring of points around the junction; if we stay off-road all
-		# the way round, we are inside a block.
-		var radii := [0.0, 55.0, 90.0]
-		for r in radii:
-			var corners: Array = []
-			var ok := true
-			for k in 4:
-				var a := TAU * float(k) / 4.0 + PI * 0.25
-				var q: Vector2 = p + Vector2(cos(a), sin(a)) * r
-				var near: Dictionary = graph.nearest_road(Vector3(q.x, 0, q.y))
-				if float(near["lateral"]) < 13.0:
-					ok = false
-					break
-				corners.append(q)
-			if ok and r > 0.0:
+		var dir := (b - a) / length
+		var nrm := Vector2(-dir.y, dir.x)
+		var plots := maxi(1, int(length / PLOT_PITCH))
+		var step: float = length / float(plots)
+		# Back of footpath, then a front yard, off this edge's own width, so a
+		# highway frontage stands further back than a lane's.
+		var off: float = _frontage_offset(float(e["width"]))
+		var kind := _kind_for(int(e["class"]))
+
+		for side in [-1.0, 1.0]:
+			for i in plots:
+				var p: Vector2 = a.lerp(b, (float(i) + 0.5) / float(plots)) + nrm * (off * side)
+				if _skip_frontage(p, cells):
+					continue
+				var pos := Vector3(p.x, 0.0, p.y)
 				out.append({
-					"centre": p, "half": Vector2(r, r), "angle": 0.0,
-					# Shops follow the big roads, not a hardcoded patch of the map.
-					# The first pass put the commercial strip near the origin while
-					# the racing happens three blocks west, so the streets anyone
-					# actually drives were the only ones with nothing on them.
-					"commercial": _road_class_at(p) >= RoadGraph.RoadClass.ARTERIAL,
-					"industrial": p.x < -280.0 and p.y > 200.0,
+					"building": kind,
+					"pos": pos,
+					# Front to the road. `facing()` is the kit's own answer to which
+					# way its geometry looks, so the guess stays in one place.
+					"yaw": ArtKitBatch.facing(pos,
+						Vector3(p.x - nrm.x * off * side, 0.0, p.y - nrm.y * off * side)),
+					"seed": n,
 				})
-				break
+				n += 1
+
+				# Yard planting in the half pitch to the next plot.
+				var q: Vector2 = p + dir * (step * 0.5)
+				if not _skip_frontage(q, cells):
+					var q3 := Vector3(q.x, 0.0, q.y)
+					out.append({
+						"prop": YARD_PROPS[posmod(n, YARD_PROPS.size())],
+						"pos": q3,
+						"yaw": ArtKitBatch.facing(q3, Vector3(p.x, 0.0, p.y)),
+						"seed": n,
+					})
+					n += 1
 	return out
 
 
-## Class of the road nearest a point, or LANE if the block is nowhere near one.
-func _road_class_at(p: Vector2) -> int:
-	var near: Dictionary = graph.nearest_road(Vector3(p.x, 0, p.y))
-	var eid: int = int(near["edge"])
+## What stands on this class of road. Shops follow the big roads rather than a
+## hardcoded patch of the map - the same call the block grid used to make, so the
+## commercial strip still lands where anyone actually drives.
+func _kind_for(cls: int) -> String:
+	match cls:
+		RoadGraph.RoadClass.ARTERIAL: return "qld_shop"
+		RoadGraph.RoadClass.HIGHWAY: return "walk_up_block"
+		_: return "qld_house"
+
+
+## Nothing to build here: too near a carriageway, in a junction mouth, or on a cell
+## OSM has already put a real house on.
+func _skip_frontage(p: Vector2, cells: Dictionary) -> bool:
+	if _too_close_to_road(p):
+		return true
+	if _blocked_by_junction(Vector3(p.x, 0.0, p.y)):
+		return true
+	return cells.has(Vector2i(int(floor(p.x / OSM_CELL)), int(floor(p.y / OSM_CELL))))
+
+
+## Occupancy grid over the mapped rings, one cell per OSM_CELL.
+##
+## Bounding boxes rather than edge walking: the only question asked downstream is
+## "is this block mapped at all", so marking a few cells too many cannot change an
+## answer, and 2198 small rings cost one tight loop each. A mapped stadium can span
+## a hundred cells, so anything that big contributes its middle cell alone - a
+## sparse mark can only ever make a block look emptier than it is, and the fallback
+## house lands in ground the map never claimed.
+func _osm_cells(entries: Array) -> Dictionary:
+	var cells := {}
+	for e in entries:
+		var ring: PackedVector2Array = e.get("ring", PackedVector2Array())
+		if ring.size() < 3:
+			continue
+		var lo := Vector2(INF, INF)
+		var hi := Vector2(-INF, -INF)
+		for q in ring:
+			lo = Vector2(minf(lo.x, q.x), minf(lo.y, q.y))
+			hi = Vector2(maxf(hi.x, q.x), maxf(hi.y, q.y))
+		var x0 := int(floor(lo.x / OSM_CELL))
+		var x1 := int(floor(hi.x / OSM_CELL))
+		var z0 := int(floor(lo.y / OSM_CELL))
+		var z1 := int(floor(hi.y / OSM_CELL))
+		if (x1 - x0 + 1) * (z1 - z0 + 1) > 64:
+			cells[Vector2i(int(floor((lo.x + hi.x) * 0.5 / OSM_CELL)),
+				int(floor((lo.y + hi.y) * 0.5 / OSM_CELL)))] = true
+			continue
+		for gx in range(x0, x1 + 1):
+			for gz in range(z0, z1 + 1):
+				cells[Vector2i(gx, gz)] = true
+	return cells
+
+
+## How far back from a road's centreline a frontage building stands: half the
+## carriageway, the footpath behind it, then the yard.
+func _frontage_offset(width: float) -> float:
+	return width * 0.5 + FOOTPATH_WIDTH + FRONTAGE_OFFSET
+
+
+## Too near a carriageway to build on.
+##
+## Measured to the kerb, not to the centreline. The old test was a bare
+## `lateral < BUILDING_SETBACK` - 9 m from the middle of the road - which on a
+## 9 m street is inside its own kerb, so it rejected every residential frontage in
+## the city and left only the arterials standing. Measured: 413 buildings, all of
+## them `qld_shop`, zero houses, on a network that is 270 streets and 131 arterials.
+func _too_close_to_road(p: Vector2) -> bool:
+	var near: Dictionary = graph.nearest_road(Vector3(p.x, 0.0, p.y))
+	var eid := int(near["edge"])
 	if eid < 0 or eid >= graph.edges.size():
-		return RoadGraph.RoadClass.LANE
-	return int(graph.edges[eid]["class"])
-
-
-func _house(p: Vector2, ang: float, wall_mesh: ArrayMesh, roof_mesh: ArrayMesh,
-		window_mesh: ArrayMesh, fence_mesh: ArrayMesh, wall_tints: Array, roof_tints: Array,
-		lights: Array) -> void:
-	var w := rng.randf_range(8.0, 12.0)
-	var d := rng.randf_range(7.0, 10.0)
-	# Queenslanders stand up on stumps because the ground floods. That gap under
-	# the floor is one of the most recognisable things about the architecture.
-	var lift := rng.randf_range(0.8, 1.5)
-	var h := rng.randf_range(2.7, 3.2)
-	var tint: Color = wall_tints[rng.randi() % wall_tints.size()]
-	var roof: Color = roof_tints[rng.randi() % roof_tints.size()]
-	var basis := Basis.from_euler(Vector3(0, -ang, 0))
-	var base := Vector3(p.x, 0, p.y)
-
-	var wall_key := "wall_%d" % (wall_tints.find(tint))
-	_materials[wall_key] = MatLib.wall(tint)
-	_add("houses", wall_mesh,
-		Transform3D(basis, base + Vector3(0, lift + h * 0.5, 0)).scaled_local(Vector3(w, h, d)),
-		wall_key)
-
-	var roof_key := "roof_%d" % (roof_tints.find(roof))
-	_materials[roof_key] = MatLib.corrugated(roof)
-	_add("roofs", roof_mesh,
-		Transform3D(basis, base + Vector3(0, lift + h, 0)).scaled_local(Vector3(w * 1.16, 1.5, d * 1.12)),
-		roof_key)
-
-	# Front verandah posts and a carport - the two things that say "Queensland".
-	for i in 3:
-		var u := (float(i) / 2.0 - 0.5) * (w - 1.0)
-		_add("houses", wall_mesh,
-			Transform3D(basis, base + basis * Vector3(u, lift + h * 0.5, -d * 0.5 - 1.6))
-				.scaled_local(Vector3(0.18, h, 0.18)), wall_key)
-	_add("roofs", roof_mesh,
-		Transform3D(basis, base + basis * Vector3(w * 0.5 + 1.9, lift + h * 0.55, -d * 0.2))
-			.scaled_local(Vector3(4.0, 0.7, d * 0.9)), roof_key)
-
-	# Windows: most of the street is dark, some are warm. That mix is the point.
-	var win_key := "window_lit"
-	if not _materials.has(win_key):
-		_materials[win_key] = MatLib.emissive(Color(1.0, 0.74, 0.44), 1.1)
-	var dark_key := "window_dark"
-	if not _materials.has(dark_key):
-		_materials[dark_key] = MatLib.emissive(Color(0.10, 0.13, 0.18), 0.0)
-	for i in 2:
-		var lit: bool = rng.randf() < 0.45
-		var u2 := (float(i) - 0.5) * w * 0.45
-		_add("windows", window_mesh,
-			Transform3D(basis, base + basis * Vector3(u2, lift + h * 0.55, -d * 0.5 - 0.03))
-				.scaled_local(Vector3(1.1, 1.2, 0.06)),
-			win_key if lit else dark_key)
-
-	# Front fence and a concrete driveway slab.
-	_add("fences", fence_mesh,
-		Transform3D(basis, base + basis * Vector3(0, 0.55, -d * 0.5 - 4.0))
-			.scaled_local(Vector3(w + 3.0, 1.1, 0.10)), wall_key)
-	_add("fences", fence_mesh,
-		Transform3D(basis, base + basis * Vector3(-w * 0.5 - 1.5, 0.55, -d * 0.5 - 2.0))
-			.scaled_local(Vector3(0.10, 1.1, 4.0)), wall_key)
-	_add("fences", fence_mesh,
-		Transform3D(basis, base + basis * Vector3(w * 0.5 + 1.5, 0.55, -d * 0.5 - 2.0))
-			.scaled_local(Vector3(0.10, 1.1, 4.0)), wall_key)
-
-
-func _shopfront(p: Vector2, ang: float, wall_mesh: ArrayMesh, roof_mesh: ArrayMesh,
-		window_mesh: ArrayMesh, wall_tints: Array, roof_tints: Array, lights: Array) -> void:
-	var w := rng.randf_range(12.0, 20.0)
-	var d := rng.randf_range(9.0, 13.0)
-	var h := rng.randf_range(3.6, 5.0)
-	var tint: Color = wall_tints[rng.randi() % wall_tints.size()]
-	var basis := Basis.from_euler(Vector3(0, -ang, 0))
-	var base := Vector3(p.x, 0, p.y)
-	var key := "wall_%d" % wall_tints.find(tint)
-	_materials[key] = MatLib.wall(tint)
-	_add("shops", wall_mesh, Transform3D(basis, base + Vector3(0, h * 0.5, 0)).scaled_local(Vector3(w, h, d)), key)
-	_add("shops", roof_mesh, Transform3D(basis, base + Vector3(0, h, 0)).scaled_local(Vector3(w * 1.1, 1.3, d * 1.1)), "concrete")
-
-	# A big lit shopfront window, and a sign.
-	var glow: String = ["neon_pink", "neon_cyan", "sodium"][rng.randi() % 3]
-	if not _materials.has(glow):
-		_materials[glow] = MatLib.emissive(MatLib.SODIUM if glow == "sodium" else (MatLib.NEON_PINK if glow == "neon_pink" else MatLib.NEON_CYAN), 2.4)
-	_add("shops", window_mesh,
-		Transform3D(basis, base + basis * Vector3(0, 1.9, -d * 0.5 - 0.05)).scaled_local(Vector3(w * 0.8, 2.6, 0.08)), glow)
-	_add("shops", window_mesh,
-		Transform3D(basis, base + basis * Vector3(0, h - 0.6, -d * 0.5 - 0.12)).scaled_local(Vector3(w * 0.7, 0.9, 0.10)), glow)
-
-	var l := OmniLight3D.new()
-	l.light_color = MatLib.SODIUM if glow != "neon_cyan" else MatLib.NEON_CYAN
-	l.light_energy = 4.5
-	l.omni_range = 26.0
-	l.light_volumetric_fog_energy = 0.0
-	l.position = base + basis * Vector3(0, 3.2, -d * 0.5 - 2.0)
-	lights.append(l)
-
-	# A vertical sign on the corner. This is the single cheapest thing that makes
-	# a street read as a city at night: a saturated bar of light standing above
-	# the roofline, doubled in the wet road, visible from three blocks away.
-	if rng.randf() < 0.85:
-		var sign_col: Color = [MatLib.NEON_PINK, MatLib.NEON_CYAN, MatLib.SODIUM, Color(1.0, 0.25, 0.12)][rng.randi() % 4]
-		var sign_key := "sign_%s" % sign_col.to_html(false)
-		if not _materials.has(sign_key):
-			_materials[sign_key] = MatLib.emissive(sign_col, 3.2)
-		var sh := rng.randf_range(4.5, 8.0)
-		var side_x: float = (w * 0.5 - 0.5) * (1.0 if rng.randf() < 0.5 else -1.0)
-		_add("signs", window_mesh,
-			Transform3D(basis, base + basis * Vector3(side_x, h + sh * 0.5 - 0.3, -d * 0.5 - 0.2))
-				.scaled_local(Vector3(0.6, sh, 0.4)), sign_key)
-
-
-func _industrial_shed(p: Vector2, ang: float, wall_mesh: ArrayMesh, roof_mesh: ArrayMesh,
-		wall_tints: Array, roof_tints: Array, lights: Array) -> void:
-	var w := rng.randf_range(18.0, 30.0)
-	var d := rng.randf_range(12.0, 20.0)
-	var h := rng.randf_range(4.5, 6.5)
-	var tint := Color(0.30, 0.31, 0.30)
-	if not _materials.has("shed"):
-		_materials["shed"] = MatLib.corrugated(tint)
-	var basis := Basis.from_euler(Vector3(0, -ang, 0))
-	var base := Vector3(p.x, 0, p.y)
-	_add("sheds", wall_mesh, Transform3D(basis, base + Vector3(0, h * 0.5, 0)).scaled_local(Vector3(w, h, d)), "shed")
-	_add("sheds", roof_mesh, Transform3D(basis, base + Vector3(0, h, 0)).scaled_local(Vector3(w * 1.06, 1.1, d * 1.06)), "shed")
-	if rng.randf() < 0.5:
-		var l := OmniLight3D.new()
-		l.light_color = MatLib.MERCURY
-		l.light_energy = 3.0
-		l.omni_range = 28.0
-		l.light_volumetric_fog_energy = 0.0
-		l.position = base + Vector3(0, h - 0.5, -d * 0.5 - 1.0)
-		lights.append(l)
-
+		return true
+	return float(near["lateral"]) < _frontage_offset(float(graph.edges[eid]["width"]))
 
 ## Coconut palms. The single most identifiable thing about a north Queensland
 ## street, and they break up the roofline so the suburb is not a row of boxes.
@@ -986,25 +924,6 @@ func _car_meet() -> void:
 
 
 # ------------------------------------------------------------------- primitives
-static func _gabled_roof_mesh(w: float, h: float, d: float) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var hw := w * 0.5
-	var hd := d * 0.5
-	var apex := Vector3(0, h * 0.5, 0)
-	var corners := [
-		Vector3(-hw, -h * 0.5, -hd), Vector3(hw, -h * 0.5, -hd),
-		Vector3(hw, -h * 0.5, hd), Vector3(-hw, -h * 0.5, hd),
-	]
-	for i in 4:
-		var a: Vector3 = corners[i]
-		var b: Vector3 = corners[(i + 1) % 4]
-		_tri(st, a, b, apex)
-		_tri(st, b, a, apex)
-	var mesh := st.commit()
-	return mesh
-
-
 static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
 	var n := _tri_normal(a, b, c)
 	for v in [a, b, c]:
