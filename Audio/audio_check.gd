@@ -303,10 +303,20 @@ func _check_wired() -> void:
 		_ok(service._tyre_db(sliding) > service._tyre_db(resting) + 10.0,
 				"and the squeal is the louder of the two  (%.1f dB vs %.1f dB)" % [
 					service._tyre_db(sliding), service._tyre_db(resting)])
-		_ok(service._tyre_db(resting) > AudioBuses.SILENCE_DB,
-				"but never a gap in the sound  (%.1f dB)" % service._tyre_db(resting))
-		_ok(service._tyre_db(0.0) > AudioBuses.SILENCE_DB,
-				"nor at no slip at all  (%.1f dB)" % service._tyre_db(0.0))
+		# Measured, not assumed: a floor under the tyre voice meant a parked car
+		# squealed continuously at -40 dB, which is a noise nobody asked for and
+		# nobody can turn off. The gap between "silent" and "a squeal" is a slew
+		# rate rather than a level, and that is what keeps the onset from being a
+		# click on the one frame a tyre noise is allowed to be heard.
+		_ok(service._tyre_db(resting) == AudioBuses.SILENCE_DB,
+				"and silent at rest  (%.1f dB)" % service._tyre_db(resting))
+		_ok(service._tyre_db(0.0) == AudioBuses.SILENCE_DB,
+				"including at no slip at all  (%.1f dB)" % service._tyre_db(0.0))
+		_ok(service._tyre_db(0.5) > AudioBuses.SILENCE_DB + 20.0,
+				"while half a slide is still a squeal  (%.1f dB)" % service._tyre_db(0.5))
+		_ok(AudioService.TYRE_SLEW_DB > 0.0 and AudioService.TYRE_SLEW_DB <= 12.0,
+				"and the slew rate is the one a tyre noise can open with  (%.1f dB a frame)" % [
+						AudioService.TYRE_SLEW_DB])
 
 		# An impact is a crash at speed and a bump at walking pace, and a scrape is
 		# one thump rather than a stream of them.

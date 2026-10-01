@@ -36,7 +36,6 @@ const RECIPES := {
 	# GO rises, because a rising interval reads as go and a beep does not.
 	"go": {"kind": Kind.TONE, "dur": 0.45, "f0": 520.0, "f1": 1040.0, "gain": 0.55, "attack": 0.004, "decay": 0.22},
 	"shift": {"kind": Kind.NOISE, "dur": 0.08, "f0": 900.0, "f1": 1400.0, "gain": 0.35, "attack": 0.001, "decay": 0.02},
-	"screech": {"kind": Kind.NOISE, "dur": 0.55, "f0": 1100.0, "f1": 1500.0, "gain": 0.40, "attack": 0.02, "decay": 0.25},
 	"hit": {"kind": Kind.PULSE, "dur": 0.50, "f0": 74.0, "f1": 41.0, "gain": 0.85, "attack": 0.001, "decay": 0.10},
 	"ui_ok": {"kind": Kind.TONE, "dur": 0.14, "f0": 880.0, "f1": 880.0, "gain": 0.30, "attack": 0.003, "decay": 0.05},
 }
