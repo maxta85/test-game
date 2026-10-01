@@ -290,6 +290,13 @@ $script:PartFiles     = @()
 $script:Total         = 0
 $script:RemoteNote    = 'Ready.'
 $script:RemoteChecked = $false
+# install.ps1 keeps its update-check failure reason in its OWN $script:
+# RemoteFail - a dot-sourced [scriptblock]::Create does not bind $script: to
+# this file's scope, so reading it unset here is a StrictMode hard stop, and
+# inside a timer tick that surfaces as the WinForms unhandled-exception box.
+# Declared here so the read is always safe; if the engine's copy never reaches
+# this scope the fallback message below is shown instead of the detail.
+$script:RemoteFail    = ''
 
 function New-LauncherButton {
     param([string]$Text, [int]$X, [int]$Y, [int]$Width, [int]$Height = 34, [switch]$Primary)
@@ -561,7 +568,11 @@ $timer.Add_Tick({
     # while it does. Everything after that is the engine's own progress.
     if (-not $script:RemoteChecked) {
         $script:RemoteChecked = $true
-        Update-RemoteNote
+        # Update-RemoteNote catches its own failures, but a throw out of a tick
+        # handler becomes the WinForms unhandled-exception dialog, which is the
+        # ugliest possible answer to "the update check failed". Belt on top of
+        # the braces.
+        try { Update-RemoteNote } catch { $lblStatus.Text = 'Could not check for updates.' }
         return
     }
     if ($null -eq $script:EngineProc) { return }
