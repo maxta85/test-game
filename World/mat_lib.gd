@@ -149,6 +149,38 @@ static func wall(tint: Color) -> StandardMaterial3D:
 	return m
 
 
+## Coconut bark. Its own material rather than `wall()` because the trunks were
+## the worst-looking thing in the frame and `wall()` is why: a 0.30 albedo with no
+## albedo texture at all is three times the tarmac's 0.105, so under a sodium lamp
+## a trunk returns more light than the road it is planted in and renders as a flat
+## orange slab - 1621 of them, and the "everything is orange" complaint is mostly
+## this. Bark is grey-brown, not orange: the sodium in the frame is supposed to be
+## the lamp's, not the material's.
+static func palm_bark() -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	# A palm trunk is vertical, so it takes the lamp square-on while the road
+	# under the same lamp takes it at 25 degrees - and a trunk at a "realistic"
+	# 0.165 grey-brown came out as bright terracotta, the loudest thing in every
+	# night frame. Halved and pulled toward neutral: under sodium that still
+	# reads warm, but as a tree instead of a plastic pole.
+	m.albedo_color = Color(0.0, 0.0, 1.0)
+	m.roughness = 0.92
+	m.uv1_scale = Vector3(0.35, 0.12, 0.35)
+	m.uv1_triplanar = true
+	# Fed raw, FastNoiseLite averages ~0.5 and silently halves the albedo written
+	# above, so the speckle goes through a ramp that keeps the range it looks like
+	# it has: 0.62-1.0 is visible fibre without dropping the trunk into the dark.
+	m.albedo_texture = noise_tex(256, 2.2, 4, 53)
+	var bark_ramp := Gradient.new()
+	bark_ramp.set_color(0, Color(0.62, 0.62, 0.62))
+	bark_ramp.set_color(1, Color(1.0, 1.0, 1.0))
+	(m.albedo_texture as NoiseTexture2D).color_ramp = bark_ramp
+	m.normal_enabled = true
+	m.normal_texture = noise_tex(128, 3.2, 4, 59, true)
+	m.normal_scale = 0.45
+	return m
+
+
 ## Foliage. Two-sided and slightly translucent so streetlights bleed through.
 static func foliage(tint: Color) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
