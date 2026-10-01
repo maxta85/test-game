@@ -512,6 +512,12 @@ function Invoke-Update {
     if (-not $ok) { return }
 
     Set-Content -LiteralPath $VersionFile -Value "$($remote.version) ($($remote.tag))" -Encoding UTF8
+    # Re-pin the local manifest to the build now installed. Without this the
+    # state check compares the new exe against the OLD pin forever: the GUI
+    # reports "NOT the pinned build", the update check offers the same version
+    # again on every launch, and Install / Repair re-downloads the superseded
+    # build back over the newer one.
+    ($remote | ConvertTo-Json) | Set-Content -LiteralPath $ManifestFile -Encoding UTF8
     Write-InstallState -Manifest $remote -Repo $repo
     Write-Ok "updated to $($remote.version) - your saves were not touched"
 }
