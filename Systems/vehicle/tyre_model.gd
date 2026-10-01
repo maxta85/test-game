@@ -20,6 +20,8 @@ const EPS_SPEED := 1.2
 
 ## Grip plateaus reached once the tyre is fully sliding.
 const LATERAL_TAIL := 0.72      ## a sliding tyre keeps most of its cornering force
+## Slip angle, in radians, at which a tyre makes its most grip.
+const PEAK_SLIP := 0.13
 const LONGITUDINAL_TAIL := 0.80 ## a locked or spinning tyre keeps most of its drag
 
 ## Slip (as a fraction of peak_slip) at which the tail decay has mostly settled.
@@ -51,10 +53,15 @@ static func longitudinal(slip_ratio: float, load: float, peak_mu: float, peak_sl
 
 ## Lateral force in newtons, opposing the direction of travel across the tyre.
 ## Negative for a rightward slip angle, positive for a leftward one.
-static func lateral(slip_angle_tan: float, load: float, peak_mu: float, peak_slip: float = 0.13) -> float:
+##
+## `tail` is how much grip is left once the tyre is properly alight, and the
+## rear axle's value is what makes the car hold a slide instead of snapping
+## straight. Defaults to the shared constant so untouched cars are unchanged.
+static func lateral(slip_angle_tan: float, load: float, peak_mu: float,
+		peak_slip: float = PEAK_SLIP, tail: float = LATERAL_TAIL) -> float:
 	if load <= 0.0:
 		return 0.0
-	return -peak_mu * load * signf(slip_angle_tan) * shape(slip_angle_tan, peak_slip, LATERAL_TAIL)
+	return -peak_mu * load * signf(slip_angle_tan) * shape(slip_angle_tan, peak_slip, tail)
 
 
 ## Longitudinal slip ratio from wheel and ground speeds.
