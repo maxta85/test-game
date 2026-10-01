@@ -159,11 +159,11 @@ static func wall(tint: Color) -> StandardMaterial3D:
 static func palm_bark() -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	# A palm trunk is vertical, so it takes the lamp square-on while the road
-	# under the same lamp takes it at 25 degrees - and a trunk at a "realistic"
-	# 0.165 grey-brown came out as bright terracotta, the loudest thing in every
-	# night frame. Halved and pulled toward neutral: under sodium that still
-	# reads warm, but as a tree instead of a plastic pole.
-	m.albedo_color = Color(0.0, 0.0, 1.0)
+	# under the same lamp takes it at 25 degrees - and the old wall() albedo of
+	# 0.30 returned more light than the tarmac it is planted in, so every trunk
+	# rendered as a flat orange slab. Grey-brown and dark enough to lose to the
+	# road: under sodium that still reads warm, but as a tree, not a terracotta pole.
+	m.albedo_color = Color(0.13, 0.125, 0.112)
 	m.roughness = 0.92
 	m.uv1_scale = Vector3(0.35, 0.12, 0.35)
 	m.uv1_triplanar = true
