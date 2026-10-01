@@ -416,16 +416,66 @@ Do these in order. Steps 1–2 are cheap and catch most of what can be wrong;
    machine is hard to triage. Consider shipping a separate console-wrapper
    build.
 4. **No first-run GPU/driver check** and no crash reporter.
-5. **The update check cannot work until `windows/` reaches `main`.**
-   `Get-RemoteManifest` reads
-   `raw.githubusercontent.com/maxta85/test-game/main/windows/manifest.json`,
-   and that URL currently 404s, so `Invoke-Update` always reports *up to date*.
-   It degrades safely (verified), but the feature is inert. The installed
-   build and its shortcuts work regardless. Verified live, not assumed:
-   `curl -o /dev/null -w '%{http_code}'
-   https://raw.githubusercontent.com/maxta85/test-game/main/windows/manifest.json`
-   returns `404`.
-6. **`build/` is gitignored**, so the release artefacts (`CairnsAfterDark.exe`,
+5. **The update check cannot work for a player, because the release repo is
+   PRIVATE.** This is the reported bug ("the launcher does not pick up GitHub
+   updates"), and this section was previously wrong about why - it blamed
+   `windows/` not having reached `main`, and said `Invoke-Update` reports *up
+   to date*. Both wrong. Measured on 2026-09-30, from a clean machine,
+   unauthenticated:
+
+   ```
+   curl -o /dev/null -w '%{http_code}\n' \
+     https://raw.githubusercontent.com/maxta85/test-game/main/windows/manifest.json
+   -> 404        (body: "404: Not Found")
+
+   curl -o /dev/null -w '%{http_code}\n' \
+     https://github.com/maxta85/test-game/releases/download/v0.1.1/CairnsAfterDark.exe
+   -> 404
+
+   curl https://api.github.com/repos/maxta85/test-game            -> 404 Not Found
+   gh   api repos/maxta85/test-game                               -> "private": true
+   ```
+
+   `windows/manifest.json` **is** on `main` (authenticated fetch returns the
+   0.1.1 manifest, 354 bytes). GitHub answers **404, not 403**, for a private
+   repo, precisely so it does not confirm the repo exists - so a 404 here means
+   "private or wrong path", never "not published yet". The launcher reported it
+   as *could not reach GitHub*, which reads like being offline and sent the
+   whole diagnosis the wrong way. It now says what actually happened.
+
+   **The fix for a player is not in this folder: make the release publicly
+   reachable** (public repo, or publish the release somewhere public). Until
+   then, an installed copy can never update, and neither can a new one install.
+
+   For machines that *do* have access, `install.ps1` reads `GITHUB_TOKEN` (or
+   `GH_TOKEN`) from the environment - never from a file, because these files
+   ship inside the release zip. That makes the manifest fetch work, and the
+   payload download too, via the releases API: a private repo's
+   `/releases/download/` path 404s *even with a token* (measured with
+   `Authorization: token`, with `Bearer`, and anonymous), so
+   `Get-ReleaseAssetUrl` resolves the asset id and follows the API's 302 to a
+   signed `release-assets.githubusercontent.com` URL. Digest verification is
+   unchanged and still happens before anything is installed.
+
+6. **The update check was also broken on PowerShell 7 for any repo.** The
+   fetch ended in `$req.Close()`, and `HttpWebRequest.Close()` exists in .NET
+   Framework only - on PowerShell 7 (.NET Core) it threw
+   `MethodNotFoundException` inside a `finally`, which the surrounding
+   `catch { return $null }` turned into "no update", even against a *public*
+   URL. Reproduced on pwsh 7.4.6. This repo supports PowerShell 7 deliberately
+   (see the `pwsh.exe` handling and the `-STA` in `CairnsAfterDark-GUI.bat`),
+   so that was a real hole. Disposing the *response* is what returns the
+   connection; the request object does not need closing.
+
+7. **The version comparison was string inequality.** "Any difference means an
+   update exists" offered a 0.1.1 player 0.1.0 as an update, and a 0.1.9 player
+   0.1.1. It is now `Get-UpdateVerdict`, which orders the versions numerically
+   and returns `update` / `current` / `ahead` - a remote *older* than the
+   install is reported as such instead of being offered. `launcher-gui.ps1`
+   calls it rather than carrying its own comparison, which is how the two had
+   drifted apart in the first place.
+
+8. **`build/` is gitignored**, so the release artefacts (`CairnsAfterDark.exe`,
    the installer zip, `RELEASE-NOTES.md`) exist only on whichever machine ran
    `windows/package-windows.sh`. The published release is the copy that counts.
 
