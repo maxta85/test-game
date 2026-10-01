@@ -150,6 +150,22 @@ static func wall(tint: Color) -> StandardMaterial3D:
 	m.roughness = 0.85
 	m.uv1_scale = Vector3(0.1, 0.1, 0.1)
 	m.uv1_triplanar = true
+	# Albedo speckle as well as a normal map. Flat albedo under a sodium lamp is
+	# cardboard: one value across a whole wall, so the only thing giving the
+	# surface any variation is the normal map, and a normal map alone reads as
+	# relief on a sheet of card. Painted render is patchy - a roller leaves the
+	# wall lighter where it was laid down and darker where the weather got it -
+	# and that mottle is what stops the flat side of a building reading as a
+	# rectangle of colour.
+	#
+	# Ramped like the tarmac's, for the same reason: fed raw, FastNoiseLite
+	# averages ~0.5 and silently halves the tint, which reads as every wall being
+	# grubby rather than mottled. 0.74-1.0 keeps the mottle and loses ~13%.
+	m.albedo_texture = noise_tex(128, 1.6, 4, 907)
+	var wall_ramp := Gradient.new()
+	wall_ramp.set_color(0, Color(0.74, 0.74, 0.74))
+	wall_ramp.set_color(1, Color(1.0, 1.0, 1.0))
+	(m.albedo_texture as NoiseTexture2D).color_ramp = wall_ramp
 	m.normal_enabled = true
 	m.normal_texture = noise_tex(128, 2.5, 3, 131, true)
 	m.normal_scale = 0.15
