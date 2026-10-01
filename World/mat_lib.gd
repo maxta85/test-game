@@ -36,7 +36,14 @@ static func noise_tex(size: int, freq: float, octaves: int, seed_v: int,
 
 ## Wet asphalt. The star of the show: low roughness, strong normal detail for
 ## the aggregate, and a slight sheen so sodium lights smear along it.
-static func wet_asphalt(uv_scale: float = 0.06) -> StandardMaterial3D:
+##
+## `seed` exists because the tarmac is triplanar: the grain is sampled from world
+## position, so every square metre of road shows the same 16.7 m tile of it and the
+## repeat is a grid across the whole map. Per-mesh UV offsets cannot break that -
+## the shader never reads them - so the only lever is a different material, and
+## `seed` moves the noise without moving the mean: variants differ in grain, not
+## in brightness, which is what stops the road looking blotchy instead of tiled.
+static func wet_asphalt(uv_scale: float = 0.06, seed: int = 0) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	# Wet asphalt is a near-mirror, so almost all the light it returns is
 	# specular reflection of the sky - and this sky is nearly black. Physically
@@ -47,7 +54,7 @@ static func wet_asphalt(uv_scale: float = 0.06) -> StandardMaterial3D:
 	# driven by a noise texture so the reflection breaks up instead of reading
 	# as a uniform sheet of plastic.
 	m.roughness = 0.14
-	m.roughness_texture = noise_tex(256, 0.55, 4, 37)
+	m.roughness_texture = noise_tex(256, 0.55, 4, 37 + seed * 7)
 	m.metallic = 0.0
 	m.metallic_specular = 1.0
 	m.uv1_scale = Vector3(uv_scale, uv_scale, uv_scale)
@@ -56,14 +63,14 @@ static func wet_asphalt(uv_scale: float = 0.06) -> StandardMaterial3D:
 	# raw, FastNoiseLite averages ~0.5 and silently halves every value written
 	# above, which is how the road stayed invisible no matter how bright the
 	# lamps got. A ramp of 0.72-1.0 keeps the speckle and loses ~14%.
-	m.albedo_texture = noise_tex(256, 0.9, 4, 11)
+	m.albedo_texture = noise_tex(256, 0.9, 4, 11 + seed * 13)
 	var albedo_ramp := Gradient.new()
 	albedo_ramp.set_color(0, Color(0.72, 0.72, 0.72))
 	albedo_ramp.set_color(1, Color(1.0, 1.0, 1.0))
 	var albedo_tex := m.albedo_texture as NoiseTexture2D
 	albedo_tex.color_ramp = albedo_ramp
 	m.normal_enabled = true
-	m.normal_texture = noise_tex(256, 1.6, 5, 23, true)
+	m.normal_texture = noise_tex(256, 1.6, 5, 23 + seed * 17, true)
 	m.normal_scale = 0.28
 	# No flat emission. An emissive floor lifts the whole surface evenly and
 	# kills the specular contrast that actually makes a road look wet.

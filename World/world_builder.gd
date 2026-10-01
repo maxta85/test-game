@@ -118,6 +118,11 @@ func _mat(key: String) -> StandardMaterial3D:
 	if not _materials.has(key):
 		match key:
 			"asphalt": _materials[key] = MatLib.wet_asphalt()
+			# Four grains of tarmac, one per chunk. See `_asphalt_key`.
+			"asphalt0": _materials[key] = MatLib.wet_asphalt(0.06, 0)
+			"asphalt1": _materials[key] = MatLib.wet_asphalt(0.06, 1)
+			"asphalt2": _materials[key] = MatLib.wet_asphalt(0.06, 2)
+			"asphalt3": _materials[key] = MatLib.wet_asphalt(0.06, 3)
 			"paint_white": _materials[key] = MatLib.road_paint(Color(0.62, 0.60, 0.55))
 			"paint_yellow": _materials[key] = MatLib.road_paint(Color(0.55, 0.40, 0.06))
 			"concrete": _materials[key] = MatLib.concrete()
@@ -340,6 +345,23 @@ func _cell_key(p: Vector2) -> Vector2i:
 	return Vector2i(floori(p.x / ROAD_CHUNK_M), floori(p.y / ROAD_CHUNK_M))
 
 
+## Which grain of tarmac a chunk gets.
+##
+## The asphalt material is triplanar, so its texture is sampled from world
+## position and every 16.7 m of road shows the same tile of grain - a regular
+## grid over the whole map that reads as wallpaper, not as tarmac. A per-chunk UV
+## offset cannot fix that because the shader never reads the UVs; a different
+## material can, and a different material per chunk is a different draw call.
+## Hence four variants and a hash: the repeat becomes 160 m and non-obvious
+## instead of 16.7 m and obvious, at the cost measured in the commit.
+##
+## Hashing the cell rather than the chunk's first edge keeps a junction patch and
+## the road either side of it on the same grain, so the patch does not read as a
+## differently-coloured square of tarmac.
+func _asphalt_key(cell: Vector2i) -> String:
+	return "asphalt%d" % (absi(cell.x * 31 + cell.y * 17) % 4)
+
+
 func _road_surface() -> void:
 	var cells := {}
 	for e in graph.edges:
@@ -358,7 +380,7 @@ func _road_surface() -> void:
 		var mi := MeshInstance3D.new()
 		mi.name = "RoadSurface_%d_%d" % [key.x, key.y]
 		mi.mesh = (cells[key] as SurfaceTool).commit()
-		mi.material_override = _mat("asphalt")
+		mi.material_override = _mat(_asphalt_key(key))
 		mi.position.y = 0.015
 		add_child(mi)
 
@@ -626,7 +648,7 @@ func _intersections() -> void:
 		var mi := MeshInstance3D.new()
 		mi.name = "Intersections_%d_%d" % [key.x, key.y]
 		mi.mesh = (cells[key] as SurfaceTool).commit()
-		mi.material_override = _mat("asphalt")
+		mi.material_override = _mat(_asphalt_key(key))
 		mi.position.y = 0.02
 		add_child(mi)
 
