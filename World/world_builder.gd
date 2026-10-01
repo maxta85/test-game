@@ -814,7 +814,7 @@ func _too_close_to_road(p: Vector2) -> bool:
 ## Coconut palms. The single most identifiable thing about a north Queensland
 ## street, and they break up the roofline so the suburb is not a row of boxes.
 func _vegetation() -> void:
-	var trunk_mesh := _tapered_cylinder_mesh(0.22, 0.34, 1.0, 7)
+	var trunk_mesh := _palm_trunk_mesh(0.34, 1.0)
 	var frond_mesh := _frond_mesh()
 	var bush_mesh := _icosphere(rng.randf_range(1.4, 2.6), 0)
 
@@ -849,8 +849,12 @@ func _vegetation() -> void:
 			for f in frond_count:
 				var ang := TAU * float(f) / frond_count + rng.randf() * 0.2
 				var droop := rng.randf_range(0.35, 0.75)
+				# h * 0.5, not h. The shaft mesh is a unit height centred on its own
+				# origin, and `scaled_local` then stretches it either side of that
+				# origin, so its top lands at h/2 - not at h. Placing the crown at
+				# h left every palm wearing its fronds a trunk-height in the air.
 				_add("fronds", frond_mesh,
-					Transform3D(Basis.from_euler(Vector3(droop, ang, 0)), Vector3(p.x, h * 0.99, p.y))
+					Transform3D(Basis.from_euler(Vector3(droop, ang, 0)), Vector3(p.x, h * 0.5, p.y))
 						.scaled_local(Vector3(1.0, 1.0, 1.0)), "palm_frond")
 			palms += 1
 
@@ -1030,6 +1034,74 @@ static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
 		st.add_vertex(v)
 
 
+## `_tri` with the normal and UVs supplied, for the surfaces that cannot use the
+## world-X/Z projection. UVs default to zero for materials that do not sample a
+## texture at all, which is most of them.
+static func _tri_n(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, n: Vector3,
+		uva := Vector2.ZERO, uvb := Vector2.ZERO, uvc := Vector2.ZERO) -> void:
+	var verts := [a, b, c]
+	var uvs := [uva, uvb, uvc]
+	for i in 3:
+		st.set_normal(n)
+		st.set_uv(uvs[i])
+		st.add_vertex(verts[i])
+
+
+## Where a palm trunk is thickest, as a fraction of its base radius, bottom to
+## top. A coconut palm is not a cone: the base flares out into buttress roots,
+## the shaft runs near-parallel for most of its height, and it swells again
+## right at the crown where the fronds carry the load out.
+##
+## A table rather than a formula because the shape is the art and a formula would
+## be a worse way to say it. Read here as "how much radius is left at 0%, 20%,
+## 45%, 72% and 100% of the trunk" - the last row dipping back up is the crown
+## swelling, which is what stops the top of the trunk reading as a cut pipe.
+const PALM_TRUNK_PROFILE := [1.0, 0.78, 0.62, 0.55, 0.60]
+const PALM_TRUNK_SIDES := 8
+const PALM_RING_BANDS := 14.0
+
+
+## A palm shaft: segmented along its height so the taper above is real geometry,
+## ringed with UVs that carry the leaf-scar banding.
+##
+## It cannot go through `_tri`, which projects every vertex's UV from world X/Z.
+## That is right for a road surface lying flat and useless here - a trunk needs
+## `u` to run around its circumference and `v` up its length, or the ring
+## texture lands as stripes across it instead of bands around it.
+static func _palm_trunk_mesh(r_base: float, h: float) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var last := PALM_TRUNK_PROFILE.size() - 1
+	var dy := h / float(last)
+	for ri in last:
+		var t0f := float(ri) / float(last)
+		var t1f := float(ri + 1) / float(last)
+		var r0 := r_base * float(PALM_TRUNK_PROFILE[ri])
+		var r1 := r_base * float(PALM_TRUNK_PROFILE[ri + 1])
+		var y0 := -h * 0.5 + t0f * h
+		var y1 := y0 + dy
+		# The ring texture repeats PALM_RING_BANDS times up the shaft, and once
+		# per side around it, so both axes tile on a seamless texture.
+		var v0 := t0f * PALM_RING_BANDS
+		var v1 := t1f * PALM_RING_BANDS
+		for s in PALM_TRUNK_SIDES:
+			var a0 := TAU * float(s) / float(PALM_TRUNK_SIDES)
+			var a1 := TAU * float(s + 1) / float(PALM_TRUNK_SIDES)
+			var u0 := float(s)
+			var u1 := float(s + 1)
+			var lo0 := Vector3(cos(a0) * r0, y0, sin(a0) * r0)
+			var lo1 := Vector3(cos(a1) * r0, y0, sin(a1) * r0)
+			var hi0 := Vector3(cos(a0) * r1, y1, sin(a0) * r1)
+			var hi1 := Vector3(cos(a1) * r1, y1, sin(a1) * r1)
+			# Normals point straight out from the axis so the shaft reads round
+			# at 8 sides instead of faceted.
+			var n0 := Vector3(cos(a0), 0.0, sin(a0))
+			var n1 := Vector3(cos(a1), 0.0, sin(a1))
+			_tri_n(st, lo0, lo1, hi0, n0, Vector2(u0, v0), Vector2(u1, v0), Vector2(u0, v1))
+			_tri_n(st, lo1, hi1, hi0, n1, Vector2(u1, v0), Vector2(u1, v1), Vector2(u0, v1))
+	return st.commit()
+
+
 static func _tapered_cylinder_mesh(r_bottom: float, r_top: float, h: float, sides: int) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -1046,23 +1118,68 @@ static func _tapered_cylinder_mesh(r_bottom: float, r_top: float, h: float, side
 	return mesh
 
 
-## A single palm frond: a tapered, drooping blade built from quads.
+## One palm frond, as a frond rather than a blade: a rachis that arcs up off the
+## crown and droops at the tip, with leaflets hung off both sides of it.
+##
+## The old version was a single tapered strip in one plane - five quads, ten
+## triangles, one normal for all of them. That is the flat-card read from every
+## angle, and no material can fix it: a plane either faces the streetlight or it
+## does not, and from most of the circle around the tree it does not.
+##
+## The fix is geometry. Each leaflet is its own surface with its own normal,
+## angled off the rachis and swept along it, so the crown presents a different
+## angle to the lamp at every point and picks up light in patches the way real
+## foliage does. It is deliberately still 48 triangles: a full coconut frond
+## carries over a hundred leaflets, and this mesh is drawn 14,562 times.
 static func _frond_mesh() -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var segs := 5
 	var length := 3.2
-	for i in segs:
-		var t0 := float(i) / segs
-		var t1 := float(i + 1) / segs
-		var w0: float = sin(t0 * PI) * 0.55 + 0.05
-		var w1: float = sin(t1 * PI) * 0.55 + 0.05
-		var p0 := Vector3(0, -t0 * t0 * 1.5, t0 * length)
-		var p1 := Vector3(0, -t1 * t1 * 1.5, t1 * length)
-		_tri(st, p0 + Vector3(-w0, 0, 0), p0 + Vector3(w0, 0, 0), p1 + Vector3(-w1, 0, 0))
-		_tri(st, p0 + Vector3(w0, 0, 0), p1 + Vector3(-w1, 0, 0), p1 + Vector3(w1, 0, 0))
-	var mesh := st.commit()
-	return mesh
+	var leafs := 12
+
+	for i in leafs:
+		# Leaflets crowd toward the tip on a real frond, so the spacing is
+		# stepped rather than even.
+		var t := pow((float(i) + 0.4) / float(leafs), 0.86)
+		var side := 1.0 if i % 2 == 0 else -1.0
+		var base := _frond_rachis(t, length)
+		# Each leaflet leans out and back off the rachis, and the lean widens
+		# toward the tip. That spread is what gives the frond volume.
+		var spread := 0.55 + t * 0.75
+		var drop := 0.18 + t * 0.5
+		var reach := 0.46 + (1.0 - t) * 0.52
+		var out := Vector3(side * spread, -drop, 0.35).normalized()
+		# Normal to this leaflet's own plane, so it catches the lamp separately
+		# from its neighbours rather than sharing one flat facing.
+		var across := Vector3.UP.cross(out).normalized()
+		var normal := across.cross(out).normalized()
+		if normal.y < 0.0:
+			normal = -normal
+		# A blade, not a spike: narrow where it leaves the rachis, widest a third
+		# of the way along, tapering to the point.
+		var mid := base + out * reach * 0.55
+		var tip := base + out * reach
+		var w1 := 0.075 + t * 0.045
+		var blade_lo := base - across * 0.03
+		var blade_hi := base + across * 0.03
+		var mid_out := mid + across * w1
+		var mid_in := mid - across * w1
+		var tip_out := tip + across * 0.012
+		var tip_in := tip - across * 0.012
+		_tri_n(st, blade_lo, blade_hi, mid_out, normal)
+		_tri_n(st, blade_lo, mid_out, mid_in, normal)
+		_tri_n(st, mid_in, mid_out, tip_out, normal)
+		_tri_n(st, mid_in, tip_out, tip_in, normal)
+	return st.commit()
+
+
+## The rachis: up off the crown, over, and down at the tip. `t` is 0 at the
+## crown and 1 at the point, and the same curve is used by the whole frond so the
+## leaflets sit on the spine rather than near it.
+static func _frond_rachis(t: float, length: float) -> Vector3:
+	var rise := 0.95 * sin(t * PI * 0.55)
+	var droop := 1.65 * pow(t, 2.4)
+	return Vector3(0.0, rise - droop, t * length)
 
 
 static func _icosphere(radius: float, subdiv: int) -> ArrayMesh:
