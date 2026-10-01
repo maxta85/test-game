@@ -158,18 +158,38 @@ func load_game() -> bool:
 	var parsed: Variant = JSON.parse_string(f.get_as_text())
 	f.close()
 	if typeof(parsed) != TYPE_DICTIONARY:
-		push_error("save corrupt: not a dictionary")
+		push_error("save corrupt: not a dictionary - quarantined")
+		_quarantine(-1)
 		return false
 	var d: Dictionary = parsed
-	if int(d.get("version", 0)) != SAVE_VERSION:
-		push_error("save version mismatch, ignoring")
+	var found := int(d.get("version", 0))
+	if found != SAVE_VERSION:
+		# Deliberate, not silent. This used to be a `push_error` and a bare
+		# `return false`, which left the player's file unreadable and their
+		# balance on the 500 defaults with nothing but an error in a log to say
+		# so. The file is moved aside rather than deleted, so nothing is thrown
+		# away, and `money` - the one field whose meaning has not changed since
+		# v1 - comes back with it. Everything else is a new career, which is the
+		# honest outcome when the layout is one this build cannot read. Whoever
+		# bumps SAVE_VERSION writes that migration here.
+		push_error("save is version %d, this build writes %d - quarantined, not discarded"
+			% [found, SAVE_VERSION])
+		_quarantine(found)
+		money = int(d.get("money", money))
+		money_changed.emit(money)
 		return false
 
 	money = int(d.get("money", 500))
 	active_car = String(d.get("active_car", "kairo_s13"))
-	owned_cars = _default_cars()
+	# The saved list, and only the saved list. Seeding `_default_cars()` here and
+	# appending the file's own list on top of it handed the starting cars back
+	# twice on the first read and once more on every boot after that, because the
+	# bloated list is what gets written back out. `Garage` carried a `_dedupe_owned`
+	# to paper over it; the empty-list case below is the only repair wanted.
+	var cars: Array[String] = []
 	for c in Array(d.get("owned_cars", [])):
-		owned_cars.append(String(c))
+		cars.append(String(c))
+	owned_cars = cars
 	races_completed = Dictionary(d.get("races_completed", {}))
 	upgrades = Dictionary(d.get("upgrades", {}))
 	cosmetics = Dictionary(d.get("cosmetics", {}))
@@ -186,3 +206,13 @@ func load_game() -> bool:
 	money_changed.emit(money)
 	progress_changed.emit()
 	return true
+
+
+## Moves a save this build will not read to a sibling file instead of leaving it
+## where every boot fails on it again, and instead of deleting it: the player has
+## a career in there. The version it was written at is in the name, so a folder
+## of quarantines says which build stranded which save.
+func _quarantine(found: int) -> void:
+	DirAccess.rename_absolute(
+		ProjectSettings.globalize_path(SAVE_PATH),
+		ProjectSettings.globalize_path("%s.v%d.quarantined" % [SAVE_PATH, found]))

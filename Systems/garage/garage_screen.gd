@@ -61,6 +61,13 @@ func _ready() -> void:
 	_list = ItemList.new()
 	_list.position = Vector2(PAD, PAD + 52.0)
 	_list.size = Vector2(LIST_W, 470.0)
+	# A keyboard-focusable list eats A and D as the built-in ui_left/ui_right
+	# before `_unhandled_input` ever sees them, and on a one-column list those two
+	# do nothing at all - so with focus the advertised "A / D change car" was
+	# unreachable and the row handler only ever ran for a mouse click. Measured.
+	# Taking focus leaves the mouse path untouched: `item_selected` still fires for
+	# a click, it just stops shadowing the keys.
+	_list.focus_mode = Control.FOCUS_NONE
 	add_child(_list)
 	_list.item_selected.connect(_on_row)
 
@@ -89,6 +96,7 @@ func _ready() -> void:
 	_parts = ItemList.new()
 	_parts.position = Vector2(PAD, PAD + 530.0)
 	_parts.size = Vector2(LIST_W + PREVIEW_W, 160.0)
+	_parts.focus_mode = Control.FOCUS_NONE
 	add_child(_parts)
 	_parts.item_selected.connect(_on_part)
 
@@ -257,6 +265,13 @@ func _readout(s: Dictionary, key: String) -> String:
 # --------------------------------------------------------------------- the input
 
 func _unhandled_input(event: InputEvent) -> void:
+	# The screen is built once and then parked, hidden, for the whole rest of the
+	# session. Hiding a Control stops it drawing and stops its `_gui_input`, but
+	# NOT `_unhandled_input` - so an unguarded screen here ate ESC mid-race and
+	# emitted `closed`, bouncing the player to the main menu instead of pausing.
+	# Measured: with the garage hidden and a race running, ESC landed here.
+	if not is_visible_in_tree():
+		return
 	if event.is_action_pressed("garage_right"):
 		_move(1)
 	elif event.is_action_pressed("garage_left"):
@@ -270,11 +285,25 @@ func _unhandled_input(event: InputEvent) -> void:
 	get_viewport().set_input_as_handled()
 
 
+## Steps the browse cursor and draws the car it lands on.
+##
+## Two measured reasons this cannot be left to the list. `ItemList.select()` does
+## not emit `item_selected`, so the row handler above never ran from here and the
+## card never moved; and the cursor has to start from the row the player is
+## looking at, not from `garage.selected()`, because browsing a car they do not
+## own is refused on purpose and would otherwise snap the cursor straight back
+## to the committed car on the very next keypress.
 func _move(step: int) -> void:
 	var ids := garage.roster_ids()
 	if ids.is_empty():
 		return
-	_select(String(ids[clampi(ids.find(garage.selected()) + step, 0, ids.size() - 1)]))
+	var here := int(ids.find(garage.selected()))
+	var row := _list.get_selected_items()
+	if not row.is_empty() and int(row[0]) < ids.size():
+		here = int(row[0])
+	var car_id := String(ids[clampi(here + step, 0, ids.size() - 1)])
+	_select(car_id)
+	_show(car_id)
 
 
 func _on_row(index: int) -> void:

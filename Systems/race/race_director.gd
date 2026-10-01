@@ -371,8 +371,12 @@ func _conclude() -> void:
 
 
 ## The wallet defaults to the Cfg autoload, looked up through the scene tree
-## rather than by the bare global name: autoload identifiers are not registered
-## in a `--script` context, and the director has to load in one.
+## rather than the bare global name. The bare name works here too - measured
+## under the suite's `--script` runner, `Cfg` and `root.get_node_or_null("Cfg")`
+## are the same object, which `Tests/test_1economy.gd` asserts - so the lookup is
+## for the null, not for the name: a director built before the tree is up must
+## be able to come up with no wallet and refuse an entry, not crash on it. Same
+## reason and same shape as `Garage._autoload()`.
 func _money() -> Object:
 	if wallet != null:
 		return wallet
