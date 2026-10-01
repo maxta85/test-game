@@ -36,6 +36,16 @@ func _initialize() -> void:
 	print("  %d suites discovered" % suites.size())
 	print("=".repeat(58))
 
+	# The first physics frame of a process dispatches no node callbacks at all,
+	# so it is spent here rather than by whichever suite runs first. Measured on
+	# this engine (4.3, --headless --fixed-fps 60): a node added to root in
+	# _initialize and then awaited frame by frame reads steps = 0 after frame 1
+	# and steps = n after frame n+1. Left alone, the first suite's first
+	# `await t.ticks(n)` returns having run n-1 steps, so its physics numbers
+	# are short by one and nobody can see it - a car whose physics never ran is
+	# a car whose throttle never arrived.
+	await physics_frame
+
 	for path in suites:
 		var name: String = String(path).get_file().replace("test_", "").replace(".gd", "")
 		if filter != "" and not name.contains(filter):
