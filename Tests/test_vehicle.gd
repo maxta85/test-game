@@ -31,7 +31,10 @@ static func make_world(t: TestHarness) -> Node3D:
 
 
 static func spawn(world: Node3D, car_id: String) -> CarBody:
-	var spec := CarDB.get_spec(car_id)
+	return spawn_spec(world, CarDB.get_spec(car_id))
+
+
+static func spawn_spec(world: Node3D, spec: CarSpec) -> CarBody:
 	spec.start_position = Vector3(0, spec.tyre_radius + 0.04, 0)
 	spec.start_rotation = Vector3.ZERO
 	var car := CarBody.new()
@@ -75,6 +78,11 @@ func run(t: TestHarness) -> void:
 	await _player_input_steers_the_right_way(t)
 	await _drivetrain_differences(t)
 	await _handbrake_drift(t)
+	await _drift_hold(t)
+	await _drift_throttle_selects_the_angle(t)
+	await _drift_needs_the_locked_diff(t)
+	await _drift_unwinds(t)
+	await _untuned_cars_are_untouched(t)
 	await _traction_limits(t)
 	await _stability(t)
 	await _spec_numbers(t)
@@ -552,3 +560,138 @@ func _stability(t: TestHarness) -> void:
 	t.between(car.engine_rpm, 0.0, car.spec.redline * 1.05, "rev limiter holds")
 	t.between(absf(car.global_position.x), 0.0, 20.0, "car does not wander off the road in a straight line")
 	await t.drop(world)
+
+
+## --- drift ---------------------------------------------------------------
+##
+## The tuning surface is two numbers per car: `rear_slide_tail`, how much grip the
+## rear tyre keeps once it is properly alight, and `diff_lock`. Nothing else
+## changed, so these tests are measured against the same fixed grid of countersteer
+## and throttle that the tuning was chosen on.
+##
+## Before it, the kairo_s13 drifted in 8 of 25 grid points and every one of them
+## was at the very edge of the controls; everywhere else it snapped straight.
+## The helper below is that grid, so the numbers quoted in these tests are
+## directly comparable to the ones the tuning came from.
+
+## Injects a slide the way a handbrake flick would, then holds the given
+## countersteer and throttle and measures what the car settles into.
+## Returns mean |body slip| in degrees over the last second, the speed, and the
+## fraction of that second the car spent on the same side of neutral it was
+## flicked to. A car being held sideways stays there; the snap-through that used
+## to make this one undriveable ping-ponged across neutral and spent half its
+## time on the wrong side.
+static func _hold_slide(t: TestHarness, car: CarBody, lock: float, throttle: float) -> Dictionary:
+	car.throttle = 0.0
+	car.steer = 0.0
+	car.handbrake = 0.0
+	car.global_position = Vector3.ZERO
+	car.global_transform.basis = Basis.IDENTITY
+	car.linear_velocity = Vector3(25.0, 0.0, -43.3)
+	car.angular_velocity = Vector3.ZERO
+	car.sleeping = false
+	car.current_gear = 2
+	var sum := 0.0
+	var kph := 0.0
+	var n := 0
+	var on_side := 0
+	var side := 0.0
+	for i in 480:
+		await t.ticks(1)
+		car.auto_shift()
+		car.steer = -lock
+		car.throttle = throttle
+		var slip := car.slip_angle_body
+		if i >= 300:
+			sum += rad_to_deg(absf(car.slip_angle_body))
+			kph += car.speed_kph
+			n += 1
+			if side == 0.0 and not is_zero_approx(slip):
+				side = signf(slip)
+			elif side != 0.0 and signf(slip) == side:
+				on_side += 1
+	n = maxi(n, 1)
+	return {"angle": sum / n, "kph": kph / n, "on_side": float(on_side) / n}
+
+
+## The headline: a rear-drive car that is tuned to drift can be *held* sideways.
+## Snap-through was the old failure - the slide crossed straight past neutral to
+## the opposite lock in about a second at every steering angle - so the assertion
+## that matters is not that it reaches an angle but that it STAYS at one.
+func _drift_hold(t: TestHarness) -> void:
+	var world := make_world(t)
+	var car := spawn(world, "kairo_s13")
+	await t.ticks(6)
+	var r := await _hold_slide(t, car, 0.55, 0.60)
+	t.between(r["angle"], 18.0, 45.0, "kairo_s13 settles into a held drift at 55%% lock / 60%% throttle (%.0f deg)" % r["angle"])
+	t.gt(r["on_side"], 0.60, "the car stays on the side it was flicked to rather than ping-ponging across neutral (%.0f%%)" % (r["on_side"] * 100.0))
+	t.between(r["kph"], 15.0, 55.0, "and it carries speed through the slide (%.0f kph)" % r["kph"])
+	await t.drop(world)
+
+
+## The point of a drift is that the driver's right foot picks the angle. More
+## throttle must mean more angle, which means the restoring moment the rear
+## gives up has to be balanced by thrust the driver is holding down.
+func _drift_throttle_selects_the_angle(t: TestHarness) -> void:
+	var world := make_world(t)
+	var car := spawn(world, "kairo_s13")
+	await t.ticks(6)
+	var off := await _hold_slide(t, car, 0.55, 0.30)
+	var on := await _hold_slide(t, car, 0.55, 0.60)
+	t.gt(on["angle"], off["angle"],
+		"more throttle means more angle (%.0f deg at 30%%, %.0f deg at 60%%)" % [off["angle"], on["angle"]])
+	t.gt(off["angle"], 12.0, "and even the light throttle holds an angle rather than snapping straight (%.0f deg)" % off["angle"])
+	await t.drop(world)
+
+
+## Why the diff is in the tuning group at all. An open diff dumps the drive
+## torque into the unloaded inside rear while the loaded outside rear - the one
+## actually making the force that holds the slide - gets nothing extra, so
+## there is no thrust to hold the slide with. Same car, same tyres, diff open.
+func _drift_needs_the_locked_diff(t: TestHarness) -> void:
+	var world := make_world(t)
+	var locked := spawn(world, "kairo_s13")
+	await t.ticks(6)
+	var a := await _hold_slide(t, locked, 0.55, 0.60)
+
+	var open_spec := CarDB.get_spec("kairo_s13")
+	open_spec.diff_lock = 0.0
+	var open_car := spawn_spec(world, open_spec)
+	await t.ticks(6)
+	var b := await _hold_slide(t, open_car, 0.55, 0.60)
+
+	t.gt(a["angle"], b["angle"] + 5.0,
+		"locking the diff is what lets the slide be held (%.0f deg locked vs %.0f deg open)" % [a["angle"], b["angle"]])
+	await t.drop(world)
+
+
+## The other half: a drift you cannot get out of is a spin. Lifting off and
+## straightening must unwind the car, and it must end up going the same way it
+## started rather than delivered to the opposite lock.
+func _drift_unwinds(t: TestHarness) -> void:
+	var world := make_world(t)
+	var car := spawn(world, "kairo_s13")
+	await t.ticks(6)
+	var held := await _hold_slide(t, car, 0.55, 0.60)
+	car.steer = 0.0
+	car.throttle = 0.0
+	car.brake = 0.3
+	for i in 180:
+		await t.ticks(1)
+		car.auto_shift()
+	t.between(rad_to_deg(absf(car.slip_angle_body)), 0.0, 10.0,
+		"lifting off and straightening unwinds the slide (%.0f deg in, %.0f deg out)" % [held["angle"], rad_to_deg(absf(car.slip_angle_body))])
+	await t.drop(world)
+
+
+## Only the two rear-drive cars are tuned. Everything else must be byte-for-byte
+## the old behaviour, or this has quietly changed cars nobody asked it to.
+func _untuned_cars_are_untouched(t: TestHarness) -> void:
+	for car_id in CarDB.ALL_IDS:
+		var spec := CarDB.get_spec(car_id)
+		if car_id == "kairo_s13" or car_id == "hayate_turbo":
+			t.ok(spec.diff_lock > 0.0, "%s is set up to drift" % car_id)
+			t.between(spec.rear_slide_tail, 0.4, 0.72, "%s has a rear tyre that lets go" % car_id)
+		else:
+			t.eq(spec.diff_lock, 0.0, "%s keeps an open diff" % car_id)
+			t.eq(spec.rear_slide_tail, TyreModel.LATERAL_TAIL, "%s keeps the stock rear tyre" % car_id)

@@ -247,7 +247,11 @@ func _read_traffic(delta: float) -> void:
 		if not is_instance_valid(r):
 			continue
 		var d: float = _gap_to(r)
-		if d > 0.0 and d < PASS_RANGE:
+		# Ahead of us or level with us: a car abeam has no longitudinal gap at
+		# all, and excluding it let the driver read the tarmac the car was
+		# sitting on as a clear pass lane. Two cars abreast is the case where
+		# there is no gap, and neither of them has a positive gap.
+		if d >= 0.0 and d < PASS_RANGE:
 			# Only cars genuinely in front, and only ones actually on the road we
 			# are on: a fixed few metres is a car in the next lane on a wide street
 			# and a car squarely in the way on a back street.

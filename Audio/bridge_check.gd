@@ -7,6 +7,12 @@ extends SceneTree
 ## countdown reaches the cue bank as 3-2-1-GO exactly once each, and the car's
 ## rpm reaches the engine voice.
 ##
+## It drives the bridge the game runs - `AudioService`'s - rather than making one
+## of its own. An autoload has been in the tree since the first frame, so a
+## bridge built here would be the second one and would stand down on its first
+## frame, testing nothing. Driving the incumbent means what is checked is the
+## path the game actually takes.
+##
 ## The negative cases are the point. A bridge that read nothing would leave the
 ## synth at idle, and a bridge that fired on every poll would produce sixty beeps
 ## a second, so both of those are asserted against directly rather than left to
@@ -64,6 +70,10 @@ func _initialize() -> void:
 # ------------------------------------------------------------------ the wiring
 
 func _run() -> void:
+	# One frame before anything is read: the autoload is in the tree from the
+	# start but its `_ready` is not called until the tree starts iterating, so
+	# `AudioService.instance` is null until then.
+	await process_frame
 	var graph := RoadGraph.new()
 	graph.build(ManundaLayout.corridors())
 	var def := RaceDef.circuit(graph, 0, 700.0, "bridge_test", "Bridge Test", 1)
@@ -109,14 +119,15 @@ func _car(world: Node3D) -> CarBody:
 
 
 func _check_wiring(world: Node3D) -> void:
-	_ok(AudioDirector.instance == null, "the check starts with no audio director in the tree")
-	var bridge := AudioBridge.new()
-	bridge.name = "Bridge"
-	world.add_child(bridge)
-	await physics_frame
-	_ok(bridge.director != null, "the bridge makes an AudioDirector when the scene has not")
+	var service := AudioService.instance
+	_ok(service != null, "the game has a bridge to drive, from its autoload")
+	if service == null:
+		return
+	var bridge := service.bridge
+	_ok(bridge != null, "the service is holding one")
+	_ok(bridge.director != null, "and it has a director")
 	_ok(bridge.director == AudioDirector.instance,
-			"and it is the one the rest of the game reaches through the static")
+			"which is the one the rest of the game reaches through the static")
 
 	# The knob, driven the way a settings menu drives it.
 	bridge.master_volume = 0.5
@@ -134,12 +145,23 @@ func _check_wiring(world: Node3D) -> void:
 	await physics_frame
 	await physics_frame
 	_fails(bridge.lost, "and a director on its own is not a loss either")
+	bridge.race = null
 
-	_drop(bridge)
-	await process_frame
-	_ok(AudioDirector.instance == null, "the director goes with the bridge that made it")
+	# The duplicate, which is what a host that also wires audio from its own
+	# `_ready` produces: a second bridge, a second engine voice and a second poll
+	# of the same car. The second one stops rather than doubling the game.
+	var second := AudioBridge.new()
+	second.name = "BridgeDuplicate"
+	world.add_child(second)
 	await physics_frame
-	_fails(is_instance_valid(bridge), "and the bridge itself is gone, so this case is not checking a live one")
+	await physics_frame
+	_ok(second.standing_down, "a second bridge stands down instead of doubling the engine")
+	_ok(second.director == null or second.director == bridge.director,
+			"and never makes a second engine voice")
+	_drop(second)
+	await process_frame
+	_fails(is_instance_valid(second), "and the bridge itself is gone, so this case is not checking a live one")
+	_fails(bridge.standing_down, "and the game's own bridge is still polling")
 
 
 ## The countdown, end to end, off a real `RaceDirector`. The bridge is attached
@@ -149,9 +171,7 @@ func _check_countdown(world: Node3D, graph: RoadGraph, def: RaceDef) -> void:
 	var car := _car(world)
 	var race := RaceDirector.new()
 	race.wallet = Wallet.new()
-	var bridge := AudioBridge.new()
-	bridge.name = "BridgeCountdown"
-	world.add_child(bridge)
+	var bridge := AudioService.instance.bridge
 	bridge.race = race
 	bridge.car = car
 	await physics_frame
@@ -160,8 +180,10 @@ func _check_countdown(world: Node3D, graph: RoadGraph, def: RaceDef) -> void:
 	_ok(race.try_enter(def), "the test race is paid for")
 	var cues: Array[String] = []
 	_eq(race.lights, 0, "an unstarted race is sitting at no lights")
-	_eq(bridge.director.cues_played, 0, "so an idle director makes no sound - no GO at race load")
-	_eq(bridge.director.last_cue, "", "and nothing is left behind as the last cue")
+	var before := bridge.director.cues_played
+	await physics_frame
+	await physics_frame
+	_eq(bridge.director.cues_played, before, "so an idle director makes no sound - no GO at race load")
 
 	_ok(race.start(def, graph, [GridCar.new(), GridCar.new()]), "the race starts")
 	await physics_frame
@@ -179,7 +201,7 @@ func _check_countdown(world: Node3D, graph: RoadGraph, def: RaceDef) -> void:
 
 	# Polled at 60 Hz through a second of racing, the lights do not change. If
 	# the bridge fired on the poll rather than on the change, this is sixty cues.
-	var before := bridge.director.cues_played
+	before = bridge.director.cues_played
 	for _i in 60:
 		race.tick(1.0 / 60.0)
 		await physics_frame
@@ -193,7 +215,10 @@ func _check_countdown(world: Node3D, graph: RoadGraph, def: RaceDef) -> void:
 	_collect(bridge.director, cues)
 	_eq(cues, ["count_3"] as Array[String], "and the lights come back on with a fresh beep")
 
-	_drop(bridge)
+	# Detached rather than freed: this bridge is the game's, and the service polls
+	# it every frame.
+	bridge.race = null
+	bridge.car = null
 	car.queue_free()
 	await process_frame
 	await process_frame
@@ -205,9 +230,7 @@ func _check_countdown(world: Node3D, graph: RoadGraph, def: RaceDef) -> void:
 func _check_engine(world: Node3D) -> void:
 	var car := _car(world)
 	var race := RaceDirector.new()
-	var bridge := AudioBridge.new()
-	bridge.name = "BridgeEngine"
-	world.add_child(bridge)
+	var bridge := AudioService.instance.bridge
 	bridge.race = race
 	bridge.car = car
 	await physics_frame
@@ -235,7 +258,12 @@ func _check_engine(world: Node3D) -> void:
 			"full throttle on a real car takes the revs off idle  (%.0f -> %.0f rpm)" % [idle_rpm, hot_rpm])
 	_ok(hz_hot > hz_idle * 1.5,
 			"and the engine voice follows them  (%.1f -> %.1f Hz)" % [hz_idle, hz_hot])
-	var want := EngineSynth.firing_frequency(hot_rpm)
+	# Against the cylinders the voice is actually sounding, not the synth's
+	# six-cylinder default: the service retunes it to the car, and an
+	# expectation pinned to the default would be asserting that it does not.
+	_ok(synth.cylinders == int(AudioService.CYLINDERS["kairo_s13"]),
+			"and it is sounding the cylinders this car has, not the default  (%d)" % synth.cylinders)
+	var want := EngineSynth.firing_frequency(hot_rpm, synth.cylinders)
 	_ok(absf(hz_hot - want) < want * 0.15,
 			"landing on the pitch those revs should be sounding  (%.1f Hz, want ~%.1f)" % [hz_hot, want])
 
@@ -258,7 +286,8 @@ func _check_engine(world: Node3D) -> void:
 	var on := _settled(synth)
 	_ok(on > off * 1.5, "throttle opens the engine as well as moving it  (%.4f -> %.4f)" % [off, on])
 
-	_drop(bridge)
+	bridge.race = null
+	bridge.car = null
 	car.queue_free()
 	await process_frame
 	await process_frame
@@ -287,9 +316,7 @@ func _check_freed(world: Node3D, graph: RoadGraph, def: RaceDef) -> void:
 	var car := _car(world)
 	var race := RaceDirector.new()
 	race.wallet = Wallet.new()
-	var bridge := AudioBridge.new()
-	bridge.name = "BridgeFreed"
-	world.add_child(bridge)
+	var bridge := AudioService.instance.bridge
 	bridge.race = race
 	bridge.car = car
 	await physics_frame
@@ -324,7 +351,8 @@ func _check_freed(world: Node3D, graph: RoadGraph, def: RaceDef) -> void:
 	await physics_frame
 	_eq(bridge.director.cues_played, mark + 1, "and the lights work again on the new one")
 
-	_drop(bridge)
+	bridge.race = null
+	bridge.car = null
 	second.queue_free()
 	await process_frame
 	await process_frame
@@ -372,7 +400,10 @@ func _teardown(world: Node3D) -> void:
 	# wait was meant to avoid.
 	OS.delay_msec(500)
 	AudioCues._cache.clear()
-	_ok(AudioDirector.instance == null, "no audio director is left holding the tree open at exit")
+	var service := AudioService.instance
+	_ok(service != null and service.bridge != null and service.bridge.race == null
+			and service.bridge.car == null,
+			"the game's bridge is left holding nothing but its own director")
 
 
 ## Stopped *and* unstreamed. A stopped player still holds its `AudioStreamWAV`,

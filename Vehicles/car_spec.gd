@@ -36,6 +36,16 @@ const AIR_DENSITY := 1.2041
 @export var tyre_peak_mu := 1.05        ## dry-ish; rain scales this down
 @export var wheel_inertia := 1.05
 
+# --- drift character ---
+## A drift car is not a grippy car that spins. It is a car whose REAR tyre gives
+## up more grip once it is alight, so the front axle at opposite lock has
+## something to balance and the car settles at a steady angle instead of
+## snapping straight.
+##
+## Left at its default it reduces exactly to the previous single-tyre behaviour.
+@export var rear_slide_tail := 0.72     ## rear grip kept when sliding
+@export var diff_lock := 0.0             ## 0 open, 1 spool. See CarBody.
+
 # --- engine ---
 @export var idle_rpm := 850.0
 @export var redline := 7500.0

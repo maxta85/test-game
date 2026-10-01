@@ -47,7 +47,7 @@ func _ready() -> void:
 	# that is actually settable.
 	_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	_env.ambient_light_sky_contribution = 0.0
-	_env.ambient_light_energy = 0.55
+	_env.ambient_light_energy = Look.AMBIENT_ENERGY
 	_env.ambient_light_color = Color(0.34, 0.42, 0.62)
 
 	# --- fog --------------------------------------------------------------
@@ -67,11 +67,11 @@ func _ready() -> void:
 	# Sodium lamps and neon should bleed. Without this a night scene looks like
 	# a day scene with the brightness turned down.
 	_env.glow_enabled = true
-	_env.glow_intensity = 0.55
+	_env.glow_intensity = Look.GLOW_INTENSITY
 	_env.glow_strength = 1.0
 	_env.glow_bloom = 0.08
 	_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
-	_env.glow_hdr_threshold = 0.95
+	_env.glow_hdr_threshold = Look.GLOW_THRESHOLD
 	_env.glow_hdr_scale = 2.0
 
 	# --- reflections / SSR ------------------------------------------------
@@ -92,7 +92,7 @@ func _ready() -> void:
 
 	_env.adjustment_enabled = true
 	_env.adjustment_brightness = 1.03
-	_env.adjustment_contrast = 1.10
+	_env.adjustment_contrast = Look.ADJUSTMENT_CONTRAST
 	_env.adjustment_saturation = 1.12
 
 	_env.tonemap_mode = Environment.TONE_MAPPER_ACES
@@ -129,7 +129,7 @@ func _apply_rain() -> void:
 	_env.fog_depth_end = lerpf(620.0, 260.0, r)
 	_env.fog_depth_begin = lerpf(40.0, 10.0, r)
 	_env.volumetric_fog_density = lerpf(0.012, 0.030, r)
-	_env.glow_intensity = lerpf(0.55, 0.66, r)
+	_env.glow_intensity = Look.GLOW_INTENSITY * lerpf(1.0, 1.2, r)
 	_sky_mat.sky_horizon_color = Color(0.085, 0.105, 0.155).lerp(Color(0.040, 0.050, 0.070), r)
 
 
