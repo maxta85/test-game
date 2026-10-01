@@ -118,8 +118,7 @@ func _drive() -> void:
 				await _grab("%s_%02d" % [name_s, int(elapsed / FRAME_EVERY)])
 		_hold({})
 
-	_report(car)
-	get_tree().quit(0)
+	get_tree().quit(_report(car))
 
 
 func _sample(car: Node, phase: String) -> void:
@@ -147,7 +146,7 @@ func _grab(tag: String) -> void:
 	img.save_png("%s/playtest_%s.png" % [OUT_DIR, tag])
 
 
-func _report(car: Node) -> void:
+func _report(car: Node) -> int:
 	# Travel measured along the car's own forward axis at the start, so a model
 	# mounted 180 degrees out shows up as negative travel rather than as a
 	# plausible-looking distance.
@@ -199,3 +198,4 @@ func _report(car: Node) -> void:
 		for line in log:
 			f.store_line(line)
 		f.close()
+	return fails.size()
