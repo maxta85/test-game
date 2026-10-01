@@ -85,3 +85,4 @@ const GLOW_THRESHOLD := 0.95
 ## buys punch at the cost of the whole bottom stop of the range, which is the
 ## exact range a night scene lives in.
 const ADJUSTMENT_CONTRAST := 1.0
+
