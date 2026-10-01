@@ -54,23 +54,5 @@ const ALL := {
 		"textured": 85,
 		"usable": true,
 	},
-	"vt_commodore": {
-		"scale": 0.989728,
-		"rot_deg": Vector3(-0.0, 0.0, 0.0),
-		"offset": Vector3(-0.0000, -0.1548, 0.1998),
-		"note": "VT",
-		"verts": 39541,
-		"textured": 14,
-		"usable": true,
-	},
-	"au_falcon": {
-		"scale": 0.010025,
-		"rot_deg": Vector3(-90.0, -0.0, 0.0),
-		"offset": Vector3(-0.0000, 2.3860, 0.6920),
-		"note": "UNUSABLE",
-		"verts": 1026571,
-		"textured": 0,
-		"usable": false,
-	},
 }
 
