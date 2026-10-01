@@ -249,7 +249,7 @@ func _build_lights() -> void:
 	# High and only slightly behind, raking down the roof and boot. It used to
 	# sit at z=+3.4, which put it between the car and the chase camera, so every
 	# rear-facing shot got a blown white blob across the tail instead of a car.
-	fill.position = Vector3(0, 4.2, 1.6)
+	fill.position = Vector3(0, 2.5, 5.4)
 	fill.omni_range = 11.0
 	fill.omni_attenuation = 1.6
 	fill.light_color = Color(0.72, 0.80, 1.0)

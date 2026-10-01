@@ -32,8 +32,20 @@ const CAR_SHOTS := {
 }
 
 
+## Wide street view with the car in it. Same frame character as the layout
+## preset below - up the street, not across it - but anchored on the car.
+## "street" used to frame `OSMLayout.start_line()`, and that point is not where
+## a race puts its cars: `RaceDirector._grid_slot` builds the grid from the
+## ROUTE's start line, which on the default race is 1096 m from the layout's, so
+## the shot contained a street with no car in it while the HUD read POS 1/2.
+const STREET_SHOT := [Vector3(0.0, 3.2, -17.0), Vector3(0, 1.0, 0.0), 50.0]
+
 static func apply(node: Node, preset_name: String) -> bool:
 	if preset_name == "street":
+		# Car first, layout second: in a running race the car is the subject, and
+		# only a scene with no car at all needs the map-derived fallback.
+		if _apply_to_car(node, STREET_SHOT):
+			return true
 		return _apply_to_start_line(node)
 	if CAR_SHOTS.has(preset_name):
 		return _apply_to_car(node, CAR_SHOTS[preset_name])

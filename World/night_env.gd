@@ -95,6 +95,24 @@ func _ready() -> void:
 	_env.adjustment_contrast = Look.ADJUSTMENT_CONTRAST
 	_env.adjustment_saturation = 1.12
 
+	# Tonemap. ACES at 1.45, and both numbers were swept against a blown-out
+	# white car and KEPT, so that nobody spends the day again on the two knobs
+	# that are not the problem. Measured on `carhero`, paint = % of roof/boot/
+	# bumper at 255, detail = local contrast in those panels (a panel line IS
+	# this), sky/road = the two things that were already right:
+	#
+	#     exposure 1.45 (kept)  paint 35.99%  detail 2.96  sky 36.5  road 1.99
+	#     exposure 1.15         paint 11.96%  detail 3.73  sky 29.5  road 1.51
+	#     exposure 0.95         paint  5.37%  detail 4.39  sky 24.6  road 1.19
+	#     filmic     1.00       paint  6.63%  detail 3.18  sky 50.2  road 7.11
+	#     reinhardt  0.80       paint  4.69%  detail 3.32  sky 55.0  road 8.89
+	#
+	# Exposure does buy paint detail and it pays for it out of the sky and the
+	# wet road, which is the flattening this scene can least afford. Filmic and
+	# Reinhardt fix the highlights but lift the whole frame - the sky measures
+	# 50-55 against ACES's 36.5, and a night scene whose sky is brighter than its
+	# streetlights has stopped being a night scene. The white car was fixed at
+	# the source instead: see the HeroFill in `Systems/vehicle/car_visual.gd`.
 	_env.tonemap_mode = Environment.TONE_MAPPER_ACES
 	_env.tonemap_exposure = 1.45
 	_env.tonemap_white = 1.2
@@ -116,6 +134,8 @@ func _ready() -> void:
 
 	environment = _env
 	_apply_rain()
+
+
 
 
 ## Rain: heavier rain means you see less far, a darker sky, and *thicker
