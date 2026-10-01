@@ -341,13 +341,17 @@ on a machine with no graphics driver at all.
 
 ## Runbook: the GUI
 
-`launcher-gui.ps1` and `CairnsAfterDark-GUI.bat` **have never been executed on
-Windows**, and neither has `install.ps1` — see the section above. What *has*
-run is the file's launcher wiring, under `CAD_GUI_HEADLESS=1`, on Linux with
-PowerShell 7.6.6: it loads `install.ps1`, finds `manifest.json`, and reaches
-the real `Invoke-Install` under `-WhatIf`. No window has ever been created, no
-button has ever been pressed, and the console `.bat` is unchanged and remains
-the tested path.
+`launcher-gui.ps1`'s original grey layout ran once on Windows for 0.1.1 and
+surfaced three real bugs (all fixed: a VB6-style `.Lines` assignment, a
+MessageBox type loaded after the handler that needed it, and a startup note
+claiming an install that did not exist). The dark banner layout shipped after
+that **has never been run on Windows**, and neither has `install.ps1` — see
+the section above. What *has* run is the file's launcher wiring, under
+`CAD_GUI_HEADLESS=1`, on Linux with PowerShell 7.6.6: it loads
+`install.ps1`, finds `manifest.json`, and reaches the real `Invoke-Install`
+under `-WhatIf`. The headless check exits before the first control is
+created, so no pixel of the new window has ever been drawn, and the console
+`.bat` is unchanged and remains the tested path.
 
 Do these in order. Steps 1–2 are cheap and catch most of what can be wrong;
 3–8 are the ones that can lose data or a player's evening.
@@ -355,19 +359,23 @@ Do these in order. Steps 1–2 are cheap and catch most of what can be wrong;
 1. **The window opens at all.** Extract the bundle to e.g.
    `C:\Games\CairnsAfterDarkGUI` (a *different* folder from step 1 of the
    console runbook — two installs in one folder hides ordering bugs) and
-   double-click `CairnsAfterDark-GUI.bat`. Expect: a window titled *Cairns
-   After Dark*, a minimised console behind it, four lines of state, five
-   buttons, and `Ready.` or an update note. *A window that never appears is
+   double-click `CairnsAfterDark-GUI.bat`. Expect: a dark window titled
+   *Cairns After Dark* with a drawn banner (gradient, skyline silhouette,
+   amber line — if the banner falls back to flat dark, that is the catch
+   block doing its job, not a failure), a minimised console behind it, four
+   lines of state in the banner, one large **PLAY** button over four small
+   ones, and `Ready.` or an update note. *A window that never appears is
    the `-STA` apartment, a missing `launcher-gui.ps1`, or the pwsh-vs-Windows
    PowerShell split; check the minimised console for the error.*
 2. **The state panel is right before you install anything.** It must read
-   *Not installed yet*, `Pinned : 0.1.0 (v0.1.0)`, `Digest : 636ebd59fac58bf2…`
+   *Not installed yet*, `Pinned : 0.1.1 (v0.1.1)`, `Digest : ef6580420b6fd8ee…`
    (the first 16 hex of `manifest.json`, not a guess) and the `%APPDATA%` saves
    path. If it says *Installed* on a fresh folder, stop and find out why.
-3. **Install, and watch the progress bar.** Press **Install / Repair**. The bar
-   must advance and the log must fill with `install.ps1`'s own lines
+3. **Install, and watch the progress bar.** Press **PLAY** (it installs when
+   nothing is installed) or **Repair**. The thin amber bar under the status
+   line must advance and the log must fill with `install.ps1`'s own lines
    (`==> install: downloading…`, `==> verifying SHA-256`, `sha256 ok
-   (636ebd59fac58bf2…)`). Then *Done.*, and the state panel flips to
+   (ef6580420b6fd8ee…)`). Then *Done.*, and the state panel flips to
    *Installed … (sha256 verified)*. *This is the step the GUI exists for: if
    the bar sits at 0% and jumps at the end, that is the known BITS buffering
    behaviour, not a failure.*
@@ -375,11 +383,11 @@ Do these in order. Steps 1–2 are cheap and catch most of what can be wrong;
    `CairnsAfterDark.bat` and confirm it prints *already installed and verified*
    and skips the download. The two entry points must be interchangeable.
 5. **Repair.** Append a byte to `CairnsAfterDark.exe`
-   (`echo x >> CairnsAfterDark.exe`) and press **Install / Repair** again: the
+   (`echo x >> CairnsAfterDark.exe`) and press **Repair**: the
    state panel must change to *Installed, but NOT the pinned build*, and
    pressing the button must re-download rather than trust the file. This is
    `Test-ManifestMatchesFile` doing its job, read from the GUI.
-6. **Play.** Press **Play**. The game must start, and the window must come back
+6. **Play.** Press **PLAY**. The game must start, and the window must come back
    to the front with *Done.* Buttons must be re-enabled afterwards; if they
    stay greyed, the engine's exit was never noticed.
 7. **Uninstall, with the confirmation.** Press **Uninstall**, then *No* at the
@@ -388,7 +396,7 @@ Do these in order. Steps 1–2 are cheap and catch most of what can be wrong;
    *Then repeat the whole of console-runbook step 7 from this folder and from
    a git checkout: the "does this look like a game install folder" guard lives
    in `install.ps1` and the GUI must not be able to talk it out of firing.*
-8. **Check for Updates.** Press it. With the network up it will report *You
+8. **Update.** Press it. With the network up it will report *You
    are up to date* (the remote manifest 404s — see gap 5 — so this is the
    expected result, not a bug). Then make the remote differ (point
    `manifest.json` at a newer tag on a branch) and press it again: the GUI must
@@ -396,7 +404,10 @@ Do these in order. Steps 1–2 are cheap and catch most of what can be wrong;
    is the one that downloads. *That double confirmation is deliberate: the
    GUI's box is consent, `install.ps1`'s `Read-Host` is the engine's, and a
    window-less child would hang forever waiting for an answer nobody can give.*
-9. **Saves Folder** opens `%APPDATA%\CairnsAfterDark` in Explorer, and creates
+   *The background check must not pop a dialog — it only writes the status
+   line. 0.1.1 popped a MessageBox for "could not reach GitHub" on every
+   launch, which is why that behaviour is gone.*
+9. **Saves** opens `%APPDATA%\CairnsAfterDark` in Explorer, and creates
    it if it is not there. **Close the window mid-download** (start a repair and
    hit the X): it must refuse to close.
 10. **Only then** the polish: resize/DPI on a 4K screen, the minimised console
