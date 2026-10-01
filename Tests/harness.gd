@@ -23,14 +23,31 @@ extends RefCounted
 ##     that is still building one, is reported rather than quietly absorbed.
 
 ## Counts physics steps from the only place that can see them: inside the tree.
+##
+## PROCESS_MODE_ALWAYS, deliberately. A node that inherits (the default) stops
+## getting `_physics_process` the moment the tree is paused, so an inheriting
+## ticker freezes mid-count - and `ticks()` then sits in its `while` forever:
+## `physics_frame` keeps firing, so the await resumes, re-tests the same frozen
+## counter and re-suspends. That is a spin, not a wait: it burns a core and
+## prints nothing, so the run dies silently at whatever assertion it reached.
+## It was not hypothetical - `test_menu_wiring` pauses the tree mid-race and then
+## waits two ticks for the pause board, and the whole run starved there for three
+## watchdog cycles. A suite that asserts a *paused world* stayed still still has
+## to be able to count ticks across that pause, so the ticker must out-live it.
 class Ticker extends Node:
 	var steps: int = 0
+	func _init() -> void:
+		process_mode = Node.PROCESS_MODE_ALWAYS
 	func _physics_process(_delta: float) -> void:
 		steps += 1
 
 
 var passed: int = 0
 var failed: int = 0
+## Wall-clock ceiling on one awaited tick inside `ticks()`, so a tick that never
+## lands fails itself instead of eating whatever timeout the run is under.
+## Sized in `ticks()`; see the comment there for the measurement it comes from.
+const TICK_BUDGET_MS := 30000
 ## Set by the runner. MainLoop is null inside `_init`, so the tree is handed in.
 var tree: SceneTree = null
 
@@ -47,6 +64,7 @@ var _suite_t0: int = 0
 var _suite_passed: int = 0
 var _suite_failed: int = 0
 var _time_scale: float = 1.0
+var _slowest_tick_ms: int = 0
 
 
 ## Wires the harness to the tree and waits until the world is genuinely
@@ -68,14 +86,43 @@ func attach(p_tree: SceneTree) -> void:
 ## in a process dispatches no node callbacks, so `await t.ticks(1)` after
 ## `add_child` could watch a world that never moved - and a car whose physics
 ## never runs is a car that never gets its throttle.
+##
+## Bounded by `TICK_BUDGET_MS`, because the failure this guards against is
+## silent. `physics_frame` is emitted whether or not anything was dispatched, so
+## if the ticker's `_physics_process` stops running the `while` below never
+## exits: the process spins at 100% of a core, prints nothing, and dies on
+## whatever external timeout happens to be holding it. That is precisely how the
+## ticker-pause hang burned three watchdog cycles at exactly 344 assertions with
+## "0 failed". A second ticker, a helper awaiting its own `_physics_process`, or
+## any `while` of the same shape re-opens the identical silence, and a comment
+## does not stop anyone - so the wait fails itself, loudly and attributed, and
+## the run carries on and reports.
+##
+## `TICK_BUDGET_MS` is 30 s against a slowest observed tick of 1193 ms across a
+## clean 17-suite run - about 25x headroom, so it cannot fire on real work - and
+## it fires 30x sooner than the 900 s run budget it stands in for. The slowest
+## tick of the run is printed in the summary, so the margin stays checkable.
 func ticks(n: int) -> void:
 	for i in n:
 		if _ticker == null:
 			await tree.physics_frame
 			continue
 		var want: int = _ticker.steps + 1
+		var t0 := Time.get_ticks_msec()
+		var deadline: int = t0 + TICK_BUDGET_MS
 		while _ticker.steps < want:
+			if Time.get_ticks_msec() > deadline:
+				problem("a tick asked for at %d ms did not arrive within %.1f s. " % [
+						t0, TICK_BUDGET_MS / 1000.0]
+					+ "The tree is %s and the harness ticker had been dispatched %d time(s) "
+					% ["PAUSED" if tree.paused else "running", _ticker.steps]
+					+ "when the wait gave up. A tick that never lands is not a slow suite: "
+					+ "it is a node whose _physics_process stopped being called. Without this "
+					+ "the run would burn its whole budget right here and print nothing.",
+					true)
+				return
 			await tree.physics_frame
+		_slowest_tick_ms = maxi(_slowest_tick_ms, Time.get_ticks_msec() - t0)
 
 
 ## Builds a scene tree root the tests can hang a world off.
@@ -136,6 +183,20 @@ func end_suite() -> void:
 			_suite, Engine.time_scale, _time_scale] \
 			+ "A suite that sets the clock and does not put it back threw part way through a case.")
 		Engine.time_scale = _time_scale
+	# The third engine-wide switch, and the only one that turns a run GREEN
+	# without having tested anything. `time_scale` and the node census above
+	# cannot see it: `ticks()` still returns on a paused tree, because the
+	# counter it reads moves whether or not the rest of the world does. So a
+	# suite that pauses and forgets to unpause hands every later suite a
+	# standing-still world, and each "the car moved" assertion passes against a
+	# car that never moved - 30 real frames that moved nothing.
+	if tree != null and tree.paused:
+		problem("%s left the tree PAUSED when it returned. " % _suite
+			+ "ticks() still completes on a paused tree, so every assertion after it "
+			+ "measures a world standing still rather than a world that moved. "
+			+ "Un-pausing now so the rest of the run still means something; the suite "
+			+ "that left it stopped is the one to fix.", true)
+		tree.paused = false
 	var left := foreign_nodes()
 	if not left.is_empty():
 		_problems.append("%s left %d node(s) in the world when it returned: %s. " % [
@@ -216,6 +277,10 @@ func summary() -> int:
 	for i in _order.size():
 		order_line.append("%s (%.1fs)" % [_order[i], _times[i] if i < _times.size() else 0.0])
 	print("  order: %s" % " -> ".join(order_line))
+	# The margin TICK_BUDGET_MS is sized against, kept visible so the constant
+	# stays checkable instead of becoming folklore.
+	print("  slowest single tick: %d ms (budget %d ms)" % [
+		_slowest_tick_ms, TICK_BUDGET_MS])
 	for f in _failures:
 		print("  FAILED: %s" % f)
 		print("          previous suite: %s" % (_prior_for(f)))
