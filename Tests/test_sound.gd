@@ -55,6 +55,12 @@ const WATCH := 0.45
 ## ...and the longer window for proving a bed is a loop rather than a blip.
 const WATCH_LOOP := 0.6
 
+## How long to wait for the audio server to mix before a meter window opens, in
+## milliseconds. A mix is about 90 ms of wall clock under `--audio-driver
+## Dummy`, so this is an order of magnitude of headroom, and a window is only
+## worth opening once there is something in it to measure.
+const METER_MIX_WAIT_MS := 1000
+
 ## Metres between the car and the wall it is thrown at. A contact is a trigger
 ## that cannot be faked - `body_entered` needs a closing speed - so this suite
 ## throws a car at something rather than calling the impact handler.
@@ -96,6 +102,7 @@ func run(t: TestHarness) -> void:
 	await _countdown(t)
 	await _quiet_again(t)
 	_bank(t)
+	await _drop_world()
 
 
 # ------------------------------------------------------------------- at rest
@@ -347,6 +354,23 @@ func _bank(t: TestHarness) -> void:
 
 # ----------------------------------------------------------------- fixtures
 
+## This suite's world, gone again before it returns. It hangs off the tree root
+## rather than under the harness, so nothing else frees it: left standing it was
+## reported by the harness' census every run ("sound left 1 node(s) in the
+## world"), and the *next* suite - and the next run of this one - inherited a
+## ground plate and a wall it did not build. An order-dependent suite hands
+## someone a false pass or a false failure later, which is a worse cost than the
+## ground plate ever was.
+##
+## One process frame is what a delete queue costs, and `end_suite` runs the
+## census as soon as this returns, so the wait is the whole of it.
+func _drop_world() -> void:
+	if _world != null and is_instance_valid(_world):
+		_world.queue_free()
+		_world = null
+	await _tree.process_frame
+
+
 ## A ground plate and a wall. The car needs something under it or it is in free
 ## fall, and a free-falling car is not one whose drivetrain means anything.
 func _world_ready() -> void:
@@ -445,13 +469,17 @@ func _slide(amount: float) -> void:
 func _peak_both(bus: String, secs: float = WATCH) -> Vector2:
 	var idx := AudioServer.get_bus_index(bus)
 	var peak := Vector2(-200.0, -200.0)
+	var opened := await _await_mix()
 	var until := Time.get_ticks_msec() + int(secs * 1000.0)
 	while Time.get_ticks_msec() < until:
 		peak.x = maxf(peak.x, AudioServer.get_bus_peak_volume_left_db(idx, 0.0))
 		peak.y = maxf(peak.y, AudioServer.get_bus_peak_volume_right_db(idx, 0.0))
 		await _tree.process_frame
-	peak.x = maxf(peak.x, AudioServer.get_bus_peak_volume_left_db(idx, 0.0))
-	peak.y = maxf(peak.y, AudioServer.get_bus_peak_volume_right_db(idx, 0.0))
+	# A window the server never mixed for has measured nothing at all, and the
+	# block it inherited is all there is.
+	if not opened:
+		peak.x = maxf(peak.x, AudioServer.get_bus_peak_volume_left_db(idx, 0.0))
+		peak.y = maxf(peak.y, AudioServer.get_bus_peak_volume_right_db(idx, 0.0))
 	return peak
 
 
@@ -461,11 +489,17 @@ func _settle(secs: float = 0.5) -> void:
 	await _tree.create_timer(secs).timeout
 
 
-## Frames until the bus is quiet, or the budget runs out. Both voices fade per
-## *rendered* frame, so this is a frame count on purpose: the test runner runs
-## frames flat out, and a wall-clock wait would expire long before the fade had
-## moved. Returns the frames it took so the caller can assert it was not the
-## budget.
+## Frames until the bus is quiet, or the budget runs out. Returns the frames it
+## took so the caller can assert it was not the budget - which is all either
+## caller does with it, so this is a diagnostic rather than a measurement.
+##
+## A frame count is the right unit for *what it waits on*: the tyre voice walks
+## `volume_db` in `AudioService._physics_process`, so its level moves per step.
+## It is emphatically not the right unit for the meter, which only moves when
+## the audio server mixes - roughly every 90 ms of wall clock, while this
+## runner's frames take about 30 microseconds. So this almost always returns the
+## budget, and it used to be read as "the bus is still loud". Nothing here
+## asserts on that; `_peak` is the read, and it waits for its own mixes.
 func _wait_silent(bus: String, budget: int = 4000) -> int:
 	var idx := AudioServer.get_bus_index(bus)
 	var peak := 0.0
@@ -486,11 +520,30 @@ func _frames(n: int) -> void:
 ## The highest the audio server's own meter for a bus reached across a window of
 ## real time. The meters are updated on the audio thread, so a single read can
 ## miss a 140 ms click entirely - which is how the first version of this read
-## nothing at all and looked like a dead cue.
+## nothing at all and looked like a dead cue. So the window is a maximum, and it
+## starts by waiting for a mix.
+##
+## That wait is the whole of "do not report a sound that has already stopped",
+## and it is a placement fix rather than a filter. A bus meter is not a live
+## value: it holds the peak of the last block the audio server mixed, and under
+## `--audio-driver Dummy` the server mixes about once per 90 ms of wall clock
+## while `--fixed-fps` runs the tree at ~33,600 frames per wall second. A
+## maximum taken over that window includes the block the server mixed *before*
+## the window opened, which is a number about a state that has since ended.
+## Measured - an Engine bus that reported -32 dB with no CarBody anywhere in the
+## tree, while the five mixes that fell inside the same window read -45.8,
+## -70.3, -84.3, -85.6 and -100.1 dB. The same on SFX: five in-window mixes
+## between -87.9 and -86.5 dB, reported as -13.6 dB, which was the wheelspin
+## that had been shut off a fraction of a millisecond before the window opened.
+##
+## Waiting for a mix can only remove those readings and cannot hide a real one:
+## a stream that is still making a sound is still making it while the window is
+## open, and the mixes inside the window say so.
 func _peak(bus: String, secs: float = WATCH, right: bool = false) -> float:
 	var idx := AudioServer.get_bus_index(bus)
 	if idx < 0:
 		return -200.0
+	var opened := await _await_mix()
 	var best := -200.0
 	var deadline := Time.get_ticks_msec() + int(secs * 1000.0)
 	while Time.get_ticks_msec() < deadline:
@@ -498,4 +551,25 @@ func _peak(bus: String, secs: float = WATCH, right: bool = false) -> float:
 				else AudioServer.get_bus_peak_volume_left_db(idx, 0.0)
 		best = maxf(best, level)
 		await _tree.process_frame
+	# The server never mixed inside the wait, so this window measured nothing
+	# and the block it inherited is all there is.
+	if not opened:
+		best = maxf(best, AudioServer.get_bus_peak_volume_right_db(idx, 0.0) if right \
+				else AudioServer.get_bus_peak_volume_left_db(idx, 0.0))
 	return best
+
+
+## Blocks until the audio server has mixed at least once, so the first meter
+## read of a window is one that belongs to the window. `AudioServer` counts the
+## time since the last mix, and that counter restarting is the only signal there
+## is that a mix has happened.
+func _await_mix() -> bool:
+	var since := AudioServer.get_time_since_last_mix()
+	var deadline := Time.get_ticks_msec() + METER_MIX_WAIT_MS
+	while Time.get_ticks_msec() < deadline:
+		var now := AudioServer.get_time_since_last_mix()
+		if now < since:
+			return true
+		since = now
+		await _tree.process_frame
+	return false
