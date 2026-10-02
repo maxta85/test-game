@@ -14,14 +14,18 @@ extends SceneTree
 ## target_length: real-world length in metres, from the published spec.
 ## Godot's forward is -Z, so a Z-up model needs -90 deg about X: that sends the
 ## model's +Y (its nose) to -Z and its +Z (its roof) to +Y. No extra yaw needed.
+## The five JDM cars that are actually in the game. au_falcon and vt_commodore
+## were cut: no CarDB id referenced either, and both are off-brief for a JDM
+## drift game set in Manunda. au_falcon was dead weight regardless - zero
+## textures across 1,026,571 verts, the largest asset in the repo at 48 MB.
+## Recover them with `git checkout <rev> -- assets/cars/<name>.glb` if the
+## decision is ever revisited.
 const CARS := {
-	"supra_mk4":    {"z_up": false, "length_axis": "z", "target_length": 4.514, "note": "MK4 A80"},
-	"silvia_s13":   {"z_up": false, "length_axis": "z", "target_length": 4.525, "note": "S13"},
-	"silvia_s15":   {"z_up": false, "length_axis": "z", "target_length": 4.545, "note": "S15"},
-	"wrx_gc8":      {"z_up": false, "length_axis": "z", "target_length": 4.345, "note": "GC8 blobeye"},
-	"evo_v":        {"z_up": false, "length_axis": "z", "target_length": 4.300, "note": "CP9A, Evo6 body"},
-	"vt_commodore": {"z_up": false, "length_axis": "z", "target_length": 4.884, "note": "VT"},
-	"au_falcon":    {"z_up": true,  "length_axis": "z", "target_length": 4.772, "note": "UNUSABLE"},
+	"supra_mk4":    {"z_up": false, "yaw_deg": 180.0, "length_axis": "z", "target_length": 4.514, "note": "MK4 A80"},
+	"silvia_s13":   {"z_up": false, "yaw_deg": 180.0, "length_axis": "z", "target_length": 4.525, "note": "S13"},
+	"silvia_s15":   {"z_up": false, "yaw_deg": 180.0, "length_axis": "z", "target_length": 4.545, "note": "S15"},
+	"wrx_gc8":      {"z_up": false, "yaw_deg": 0.0, "length_axis": "z", "target_length": 4.345, "note": "GC8 blobeye"},
+	"evo_v":        {"z_up": false, "yaw_deg": 180.0, "length_axis": "z", "target_length": 4.300, "note": "CP9A, Evo6 body"},
 }
 
 var lo := Vector3(INF, INF, INF)
@@ -85,6 +89,7 @@ func _fit(cid: String) -> Dictionary:
 	var basis := Basis.IDENTITY
 	if cfg["z_up"]:
 		basis = Basis(Vector3.RIGHT, -PI / 2.0)
+	basis = Basis(Vector3.UP, deg_to_rad(float(cfg["yaw_deg"]))) * basis
 
 	# Pivot: after the basis, drop the car so its bounding box sits on y=0 and is
 	# centred in x and z. The origin is otherwise wherever the uploader left it,

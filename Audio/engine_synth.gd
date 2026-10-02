@@ -47,15 +47,22 @@ const CUT_LOAD := 5200.0
 ## and a raw DC offset on a bus thumps harder than the engine.
 const DC_R := 0.997
 
+## Nothing turns over until something starts it. A synthesiser that defaults to
+## running is an engine that idles in the main menu, with no car anywhere in
+## the world to be idling: measured on the Engine bus at -32 dB with zero
+## CarBody nodes in the tree. `EngineVoice` does not even play until it is told
+## to, so this is belt and braces - but the state this defaults to is the state
+## a car-less world has to be in, and it belongs here rather than being set once
+## by a caller that may never arrive.
 var mix_rate: float = MIX_RATE
 var cylinders: int = DEFAULT_CYLINDERS
-var running: bool = true
+var running: bool = false
 
 var _target_rpm: float = IDLE_RPM
 var _target_load: float = 0.0
 var _rpm: float = IDLE_RPM
 var _load: float = 0.0
-var _fade: float = 1.0
+var _fade: float = 0.0
 var _phase: float = 0.0
 var _noise: float = 0.0
 var _lp: float = 0.0
@@ -85,10 +92,13 @@ func set_engine(rpm: float, load: float) -> void:
 	_target_load = clampf(load, 0.0, 1.0) if is_finite(load) else 0.0
 
 
-## Fades the engine in or out instead of cutting it, so stopping the car does
-## not click. The voice keeps rendering silence afterwards rather than being
-## stopped, which is the other half of the same problem: stopping a generator
-## mid-buffer is a step.
+## Fades the engine in or out instead of cutting it, so starting and stopping a
+## car does not click. How long it is left rendering after `false` is
+## `EngineVoice`'s decision and not this class's: the fade is a ramp on samples,
+## and samples only exist while somebody is rendering them, so this can only
+## close as fast as a ring the audio server is draining lets it. The voice stops
+## the player itself once the ramp has landed, and that - not this flag - is
+## what makes the Engine bus actually empty.
 func set_running(on: bool) -> void:
 	running = on
 

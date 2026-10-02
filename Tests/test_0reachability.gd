@@ -59,7 +59,7 @@ const SHIPPED_GEOMETRY := [
 		"id": "artkit",
 		"module": "res://artkit/scatter.gd",
 		"nodes": ["ArtKitScatter"],
-		"why": "ArtKitScatter.attach() from WorldBuilder._buildings() fills the blocks OSM left unmapped",
+		"why": "ArtKitScatter.attach() from WorldBuilder._buildings() fills the frontages OSM left unmapped",
 	},
 	{
 		"id": "osm buildings",

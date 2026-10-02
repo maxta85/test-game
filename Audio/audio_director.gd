@@ -81,17 +81,23 @@ func play_cue(name: String, gain_db: float = 0.0) -> bool:
 ## rpm in revolutions per minute, load as 0..1. Called every frame with
 ## whatever the car happens to have, so it never throws on the first frame's
 ## zeroed rpm and never has to be guarded by the caller.
+##
+## Also what starts the voice, and it is the *only* thing that does: a director
+## nobody has fed has no engine, and one that plays on its own is an idling
+## engine in a menu with no car in it.
 func set_engine(rpm: float, load: float) -> void:
 	if _voice != null:
-		_voice.synth.running = true
+		_voice.set_sounding(true)
 		_voice.synth.set_engine(rpm, load)
 
 
-## Fades the engine out rather than cutting it, and leaves the voice running
-## silent so the fade can finish on its own.
+## Fades the engine out and then takes the voice down. The fade is the
+## anti-click half; the stop is what makes the Engine bus empty, because a
+## generator ring nobody is emptying keeps being played back after the thing
+## that fed it has gone.
 func stop_engine() -> void:
 	if _voice != null:
-		_voice.synth.set_running(false)
+		_voice.set_sounding(false)
 
 
 ## The countdown hook. `RaceDirector.lights` is 3, 2, 1 through the countdown

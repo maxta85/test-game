@@ -73,6 +73,10 @@ const SLIP_FULL := 0.85
 const IMPACT_COOLDOWN := 0.18
 ## Below this closing speed a contact is a bump, not a crash.
 const IMPACT_KPH := 12.0
+## How far the tyre voice is allowed to move in one physics frame, in dB. A full
+## slide is 74 dB above silence, so this is a tenth of the travel per frame: a
+## fade, not a cut.
+const TYRE_SLEW_DB := 6.0
 
 ## Host-level menu signals. The screens' own signals are consumed inside
 ## `MenuFlow`, so these three plus the screen changing is every press that does
@@ -90,6 +94,7 @@ var _tyre: AudioStreamPlayer = null
 var _car: CarBody = null
 var _car_id: String = ""
 var _gear: int = -99
+var _tyre_target := AudioBuses.SILENCE_DB
 var _impact_lock := 0.0
 var _menus: MenuFlow = null
 var _screen: String = ""
@@ -118,8 +123,6 @@ func _ready() -> void:
 	# over keeps the engine on one node even if something else registers a
 	# director later.
 	bridge.director = _owned
-	print("[Audio] beds up (music %.0f dB, night %.0f dB), engine voice live on %s" % [
-		MUSIC_DB, NIGHT_DB, AudioBuses.ENGINE])
 
 
 func _exit_tree() -> void:
@@ -133,6 +136,9 @@ func _exit_tree() -> void:
 		_owned.stop_engine()
 		var voice := _owned.find_child("EngineVoice", true, false) as EngineVoice
 		if voice != null:
+			# A hard stop, not the voice's own: at teardown there is no next
+			# frame for a fade-out to finish in, and a ring that outlives the
+			# process is a warning rather than a sound.
 			voice.stop()
 			voice.stream = null
 	for bed in [_music, _night, _tyre]:
@@ -174,6 +180,16 @@ func _physics_process(delta: float) -> void:
 	_impact_lock = maxf(0.0, _impact_lock - delta)
 	var car := _player_car()
 	if car == null:
+		# Nothing to drive means nothing to hear. A voice left on is an engine
+		# holding the revs the car had when it was freed and a tyre squealing at
+		# full level forever, which is the same dead sound as one that never
+		# starts. Both of those are `EngineVoice.set_sounding` and `_slip_to`'s
+		# problem rather than this branch's: the engine's fade used to be asked
+		# for here and then left to a generator ring nobody was emptying, so the
+		# Engine bus measured -20 dB with no car in the world and was still
+		# there 4000 frames after one was freed.
+		_director().stop_engine()
+		_slip_to(0.0)
 		return
 	bridge.car = car
 	# Only when there is one: a host that handed its director in through
@@ -188,9 +204,7 @@ func _physics_process(delta: float) -> void:
 		if d != null and car.engine_rpm > 0.0:
 			d.play_cue("shift")
 
-	var slip := _slip(car)
-	_tyre.volume_db = _tyre_db(slip)
-	_tyre.pitch_scale = 0.9 + 0.5 * slip
+	_slip_to(_slip(car))
 
 
 # --------------------------------------------------------------------- sources
@@ -304,7 +318,6 @@ func _set_voice(car: CarBody) -> void:
 	var synth := d.engine_synth()
 	if synth != null:
 		synth.cylinders = int(CYLINDERS.get(id, DEFAULT_CYLINDERS))
-	print("[Audio] engine voice: %s, %d cylinders" % [id.to_upper(), synth.cylinders])
 
 
 ## How hard the tyres are being abused, 0..1. Read from the wheels rather than
@@ -322,10 +335,23 @@ func _slip(car: CarBody) -> float:
 	return clampf((worst - SLIP_FLOOR) / maxf(SLIP_FULL - SLIP_FLOOR, 0.001), 0.0, 1.0)
 
 
-## Slip as a level: -6 dB at a full slide, a floor rather than -inf below it so
-## a slide that is nearly over is quiet rather than a gap in the sound.
+## The tyre voice, walked toward its target rather than set to it. The tyres go
+## from straight to a full slide inside one physics frame, and a bed that changes
+## level by 40 dB in a frame is a click, which is the one thing a tyre loop must
+## not be.
+func _slip_to(slip: float) -> void:
+	_tyre_target = _tyre_db(slip)
+	_tyre.volume_db = move_toward(_tyre.volume_db, _tyre_target, TYRE_SLEW_DB)
+	_tyre.pitch_scale = 0.9 + 0.5 * slip
+
+
+## Slip as a level: silence with the tyres straight, and -6 dB at a full slide.
+## Not a floor just above zero, because a floor is still audible - at -40 dB the
+## SFX bus measured -46 dB with a car parked on the grid doing nothing, which is
+## a squeal from a car that is not sliding. The slew above is what stops the gap
+## at the other end from being a step.
 func _tyre_db(slip: float) -> float:
-	return linear_to_db(clampf(slip, 0.02, 1.0)) + TYRE_DB
+	return AudioBuses.SILENCE_DB if slip <= 0.0 else linear_to_db(clampf(slip, 0.0, 1.0)) + TYRE_DB
 
 
 ## Its own director, held by reference and never `AudioDirector.instance`: every

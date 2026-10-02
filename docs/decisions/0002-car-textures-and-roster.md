@@ -94,15 +94,56 @@ Two different things, and they were conflated:
 
 ## Consequences
 
-- **Roster is already JDM-correct.** All 7 cars are JDM (MX-5, AE86, S13, GC8,
-  S15, A80, CP9A). Nothing to cut.
-- The two non-JDM assets, `au_falcon.glb` (Ford Falcon, AU) and
-  `vt_commodore.glb` (Holden Commodore, AU), are **unused strays** — no CarDB id
-  references either. `au_falcon` is additionally `usable: false` (`textured: 0`).
-  Left in place; not deleted, since asset deletion is not this task's call.
-- `burnt_orange` in `PAINTS` (`car_visual.gd:30`) is defined but referenced by no
-  car. Harmless.
+- **The roster is already JDM-correct.** All 7 playable cars are JDM (MX-5,
+  AE86, S13, GC8, S15, A80, CP9A). Nothing in `CarDB` needed cutting.
+- **Two off-brief assets were cut**: `au_falcon.glb` (48 MB) and
+  `vt_commodore.glb` (2.7 MB). Neither is referenced by any `CarDB` id, and a
+  JDM drift game set in Manunda has no use for a Ford Falcon or a Holden
+  Commodore. They are *not* kept as unlockable rares: making them playable
+  would mean new `CarSpec` entries (mass, gearing, price), a `MODELS` entry and
+  unlock logic, which is speculative feature work with no design behind it.
+  `au_falcon` was dead weight regardless — zero textures across 1,026,571 verts,
+  and the largest asset in the repo. Both are recoverable in one command:
+  `git checkout <rev> -- assets/cars/<name>.glb`.
+- **`burnt_orange` in `PAINTS` (`car_visual.gd:30`)** is defined but referenced
+  by no car. Harmless.
 - Making the two box cars textured is **art sourcing, not code**.
+
+## The gitignored PNGs are correct, and proven so
+
+`assets/cars/*.png` is 35 MB (not 176 MB) and is the right thing to leave out.
+The claim that a clean-clone export would ship untextured cars is false —
+verified, not assumed:
+
+```
+git clone <repo> /tmp/clean-export   # 0 *.png, 0 *.ctex, no .godot at all
+godot --headless --export-release "Windows Desktop" build/CleanTest.exe
+```
+
+Godot's export runs the import pass itself (the log shows `import: end` /
+`reimport: end` before `savepack`). Parsing the resulting `.pck` file table:
+
+| in the pack | count | size |
+| --- | --- | --- |
+| car `.ctex` | 150 | 45.1 MB |
+| car `.scn` | 8 | 77.5 MB |
+| raw `.png` / `.glb` | 0 / 0 | — |
+
+Every model ships textures except `au_falcon`, which has none to ship — the
+reason it is now cut. The 147 PNGs are the importer's intermediate, written
+next to the `.glb` and recompiled to `.ctex`; committing them would add 35 MB
+of machine-generated duplicates that a clean checkout regenerates anyway. So:
+**generated at build time**, which is the third option and the one already in
+place. No LFS, no committed binaries.
+
+## One bug found on the way
+
+`Systems/garage/garage.gd` carried a second copy of the car→glb mapping
+(`MODEL_STEMS`) that disagreed with `CarVisual.MODELS` about two cars, so the
+garage screen labelled a car `GLTF: EVO_V` while a Silvia S15 rendered. The
+duplicate is deleted; `Garage.model_path()` reads `CarVisual.MODELS`. Same
+failure mode as the fit bug — one fact written down twice, and the copies drift.
+
 
 ## Reusable method
 
