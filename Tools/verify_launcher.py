@@ -424,8 +424,12 @@ ENGINE_ONLY = (
 # Reading state is not the same as doing the job. These are the only engine
 # functions the GUI may call in-process, and only because they have no side
 # effects; every action goes through the child process instead.
+# Get-UpdateVerdict belongs here for the same reason as the others: it is a
+# pure comparison of two manifests. The GUI used to inline its own
+# `-eq [string]$Manifest.version` test, which is how a 0.1.1 player ended up
+# being offered 0.1.0 as an update.
 GUI_MAY_CALL = ("Get-Manifest", "Get-ManifestRepo", "Test-ManifestMatchesFile",
-                "Get-RemoteManifest")
+                "Get-RemoteManifest", "Get-UpdateVerdict")
 
 
 def strip_ps_comments(src):
@@ -673,6 +677,22 @@ def check_gui_parse(pwsh):
     check("launcher-gui.ps1 has no syntax errors (%s)" % Path(pwsh).name, ok, detail)
 
 
+def winforms_available(pwsh):
+    """Can this PowerShell load WinForms?
+
+    launcher-gui.ps1 loads System.Windows.Forms before anything that can fail,
+    so on a host without it the script exits before the headless self-check
+    ever runs. Guarding on "is pwsh installed" alone was not enough: a Linux
+    machine with pwsh has a PowerShell and no WinForms, and the check reported
+    that as three failures rather than one honest skip.
+    """
+    r = subprocess.run(
+        [pwsh, "-NoProfile", "-Command",
+         "try { Add-Type -AssemblyName System.Windows.Forms; 'ok' } catch { 'no' }"],
+        capture_output=True, text=True, timeout=120)
+    return "ok" in (r.stdout or "")
+
+
 def check_gui_headless(pwsh, m):
     """Run the GUI's own launcher wiring, with no window and no Windows.
 
@@ -682,8 +702,20 @@ def check_gui_headless(pwsh, m):
     """
     head("launcher-gui.ps1 launcher wiring (headless)")
     if not pwsh:
-        skip("launcher-gui.ps1 loads install.ps1 and reaches Invoke-Install",
-             "no PowerShell on this machine - see the SKIP above")
+        skip("the GUI loads install.ps1 and stops at the self-check",
+             "no PowerShell on this machine - get one from "
+             "https://github.com/PowerShell/PowerShell/releases and set PWSH=")
+        skip("the GUI reads the digest the manifest pins", "no PowerShell on this machine")
+        skip("the self-check reached the real Invoke-Install, under -WhatIf",
+             "no PowerShell on this machine")
+        return
+    if not winforms_available(pwsh):
+        skip("the GUI loads install.ps1 and stops at the self-check",
+             "%s has no System.Windows.Forms (this is not Windows); the GUI "
+             "exits before its self-check" % Path(pwsh).name)
+        skip("the GUI reads the digest the manifest pins", "no WinForms here")
+        skip("the self-check reached the real Invoke-Install, under -WhatIf",
+             "no WinForms here")
         return
     env = dict(os.environ, CAD_GUI_HEADLESS="1")
     with tempfile.TemporaryDirectory() as td:
@@ -823,12 +855,347 @@ def check_godot_pin():
 
 
 # ---------------------------------------------------------------------------
-# 10. The published release is fetchable and is what the manifest pins
+# 10. the update path: private repos, PowerShell 7, and version ordering
+# ---------------------------------------------------------------------------
+#
+# The player-reported bug was "the launcher does not pick up GitHub updates".
+# Measured, from a clean machine, against the real URLs:
+#
+#   https://raw.githubusercontent.com/maxta85/test-game/main/windows/manifest.json
+#     -> HTTP 404, body "404: Not Found" (14 bytes)
+#   https://github.com/maxta85/test-game/releases/download/v0.1.1/CairnsAfterDark.exe
+#     -> HTTP 404
+#   https://api.github.com/repos/maxta85/test-game      -> 404 anonymously
+#   ... with a token                                  -> {"private": true}
+#
+# The release repo is PRIVATE and the launcher sent no credentials, so
+# Get-RemoteManifest returned $null on every call. Two things hid that:
+#   - every failure collapsed into the words "could not reach GitHub", which is
+#     indistinguishable from being offline, so the one real report of it had
+#     nothing actionable in it;
+#   - the old release check here caught the 404 and reported it as
+#     "[SKIP] ... no network (HTTPError)" - a silent green.
+#
+# A second, independent bug fell out of the same measurement: the old fetch
+# called $req.Close() in a finally. HttpWebRequest.Close() exists in .NET
+# Framework, so Windows PowerShell 5.1 was fine, and it does NOT exist in .NET
+# Core, so on PowerShell 7 - a target this repo explicitly supports - every
+# successful fetch threw MethodNotFoundException and became $null even against
+# a public URL. Reproduced on pwsh 7.4.6.
+
+
+def update_path_facts(src_install, src_gui):
+    """The update-path contract as pure booleans over the two sources.
+
+    Pure on purpose: negative_update_path() below points these at deliberately
+    broken copies and asserts they actually reject them, so a check that cannot
+    fail is not counted as coverage.
+    """
+    gui_body = strip_ps_comments(src_gui)
+    # install.ps1 is stripped too, because the file now carries a comment
+    # explaining that $req.Close() is the bug - prose about the pattern must
+    # not be able to satisfy - or trip - the pattern itself.
+    ins_body = strip_ps_comments(src_install)
+    return {
+        "authenticates": (
+            bool(re.search(r"function\s+Get-GitHubToken", ins_body))
+            and bool(re.search(r"GITHUB_TOKEN", ins_body))
+            and bool(re.search(r"GH_TOKEN", ins_body))
+            and bool(re.search(r"Authorization", ins_body))
+        ),
+        "no_request_close": not re.search(r"\$req(?:uest)?\s*\.\s*Close\s*\(", ins_body),
+        "failure_keeps_reason": (
+            "RemoteFail" in ins_body and "404" in ins_body
+            and bool(re.search(r"WebException", ins_body))
+        ),
+        "ordered_verdict": (
+            bool(re.search(r"function\s+Get-UpdateVerdict", ins_body))
+            and gui_body.count("Get-UpdateVerdict") >= 2
+        ),
+        "no_inline_comparison": re.search(
+            r"\$remote\.version\s+-eq\s+\[string\]\$Manifest\.version", gui_body) is None,
+        "no_downgrade_branch": bool(re.search(r"'ahead'", ins_body))
+                                and bool(re.search(r"'ahead'", gui_body)),
+        "token_is_not_stored": not re.search(
+            r"(gh[pousr]_[A-Za-z0-9]{20,})", ins_body + gui_body),
+        "download_still_verified": (
+            ins_body.find("checksum mismatch") != -1
+            and ins_body.find("checksum mismatch")
+            < ins_body.find("Move-Item -LiteralPath $tmp -Destination $GameExe")
+        ),
+    }
+
+
+def check_update_path():
+    head("update path")
+    src_install, src_gui = read(INSTALL_PS1), read(GUI_PS1)
+    f = update_path_facts(src_install, src_gui)
+    notes = {
+        "authenticates":
+            "GITHUB_TOKEN/GH_TOKEN, sent as an Authorization header; the release repo is private",
+        "no_request_close":
+            "$req.Close() is .NET Framework only and made every fetch fail on PowerShell 7",
+        "failure_keeps_reason":
+            "a 404 says 'private repo or wrong path', not 'could not reach GitHub'",
+        "ordered_verdict":
+            "install.ps1 orders the versions; launcher-gui.ps1 calls it instead of comparing strings",
+        "no_inline_comparison":
+            "string inequality offered a 0.1.1 player a 0.1.0 downgrade",
+        "no_downgrade_branch":
+            "a remote older than the install is reported, not offered",
+        "token_is_not_stored":
+            "these files ship inside the release zip, so no token may be written into one",
+        "download_still_verified":
+            "the SHA-256 check still runs before the payload is moved into place",
+    }
+    for key, ok in f.items():
+        check("update path: %s" % key, ok, notes[key])
+
+
+def load_install_ps1_harness(pwsh, body):
+    """Run PowerShell with install.ps1's functions loaded but its entry point cut off.
+
+    Mirrors what launcher-gui.ps1 does: $PSScriptRoot has to be injected into
+    the text, because a [scriptblock]::Create() has no file behind it. APPDATA
+    and USERPROFILE are set because install.ps1 joins onto them at load time.
+
+    Returns the CompletedProcess.
+    """
+    import os as _os
+    win = str(WIN)
+    ps = (
+        "$ErrorActionPreference='Stop'; Set-StrictMode -Version 2.0\n"
+        "$src = Get-Content -LiteralPath '%s/install.ps1' -Raw\n"
+        "$e   = $src.LastIndexOf('# Entry point')\n"
+        "$t=$null; $err=$null\n"
+        "$ast = [System.Management.Automation.Language.Parser]::ParseInput($src,[ref]$t,[ref]$err)\n"
+        "$ins = if ($ast.ParamBlock) { $ast.ParamBlock.Extent.EndOffset } else { 0 }\n"
+        ". ([scriptblock]::Create($src.Substring(0,$ins) + \"`n`$PSScriptRoot = '%s'\" "
+        "+ $src.Substring($ins,$e-$ins)))\n" % (win, win)
+    ) + body
+    with tempfile.TemporaryDirectory() as td:
+        script = Path(td) / "probe.ps1"
+        script.write_text(ps, encoding="utf-8")
+        env = dict(_os.environ, APPDATA=str(Path(td) / "appdata"),
+                   USERPROFILE=str(Path(td) / "home"))
+        return subprocess.run([pwsh, "-NoProfile", "-File", str(script)],
+                              capture_output=True, text=True, timeout=180, env=env)
+
+
+def check_update_verdict(pwsh):
+    """Execute the real Get-UpdateVerdict against the real manifests.
+
+    Reading the source proves the function is shaped correctly. Calling it
+    proves the three cases the player can actually be in come out right:
+    a remote that is newer, one that is the same, and one that is older.
+    """
+    head("update ordering (executed)")
+    if not pwsh:
+        skip("Get-UpdateVerdict orders newer / same / older",
+             "no PowerShell on this machine - the source assertions above still ran")
+        return
+    body = r"""
+function New-Manifest { param($v, $t) [pscustomobject]@{ version = $v; tag = $t } }
+# A real 0.1.1 install. The three things a player can actually be in.
+$cases = @(
+    @('0.2.0', 'v0.2.0', 'remote is newer', 'update'),
+    @('0.1.1', 'v0.1.1', 'remote is the same', 'current'),
+    @('0.1.0', 'v0.1.0', 'remote is older',  'ahead')
+)
+$bad = 0
+foreach ($c in $cases) {
+    $local  = New-Manifest '0.1.1' 'v0.1.1'
+    $remote = New-Manifest $c[0] $c[1]
+    $v = Get-UpdateVerdict -Local $local -Remote $remote
+    if ($v -ne $c[3]) { Write-Host ("  MISMATCH {0}: got {1} want {2}" -f $c[2], $v, $c[3]); $bad++ }
+    else { Write-Host ("  {0} ({1}): {2}" -f $c[2], $c[0], $v) }
+}
+Write-Host "MISMATCHES $bad"
+"""
+    r = load_install_ps1_harness(pwsh, body)
+    out = (r.stdout or "") + (r.stderr or "")
+    n = re.search(r"MISMATCHES (\d+)", out)
+    check("Get-UpdateVerdict orders newer / same / older", bool(n) and n.group(1) == "0",
+          "run under %s; a real 0.1.1 install against 0.2.0 / 0.1.1 / 0.1.0" % Path(pwsh).name)
+    check("Get-UpdateVerdict actually ran", "remote is newer" in out,
+          out.strip().splitlines()[-1][:160] if out.strip() else "no output")
+
+
+def negative_update_path():
+    """Prove the update-path checks above can fail.
+
+    A check that cannot reject a broken file is decoration. Each mutation
+    below reintroduces one of the real bugs, and each must be caught by the
+    named fact - and each must still be caught when the fix is the only thing
+    that changed.
+    """
+    head("update path: negative tests")
+    src_install, src_gui = read(INSTALL_PS1), read(GUI_PS1)
+    good = update_path_facts(src_install, src_gui)
+    check("the real files satisfy every update-path fact", all(good.values()),
+          "%d/%d" % (sum(1 for v in good.values() if v), len(good)))
+
+    def mut_install(old, new):
+        assert old in src_install, old[:60]
+        return src_install.replace(old, new, 1)
+
+    def mut_gui(old, new):
+        assert old in src_gui, old[:60]
+        return src_gui.replace(old, new, 1)
+
+    cases = [
+        # the exact bug: a bare $null with no reason attached
+        ("failure_keeps_reason",
+         lambda: (mut_install("} catch [System.Net.WebException] {", "} catch {"),
+                  src_gui)),
+        # the PowerShell 7 break, put back exactly where it was
+        ("no_request_close",
+         lambda: (src_install + "\nfunction Buggy { param($req) $req.Close() }\n", src_gui)),
+        # string inequality again, inline in the GUI
+        ("no_inline_comparison",
+         lambda: (src_install,
+                  mut_gui("switch (Get-UpdateVerdict -Local $Manifest -Remote $remote) {",
+                          "if ($remote.version -eq [string]$Manifest.version) { } else { }"))),
+        # version comparison dropped entirely
+        ("ordered_verdict",
+         lambda: (src_install.replace("function Get-UpdateVerdict", "function OldVerdict", 1),
+                  src_gui.replace("Get-UpdateVerdict", "OldVerdict"))),
+        # a downgrade offered as an update
+        ("no_downgrade_branch",
+         lambda: (src_install.replace("'ahead'", "'equal'"), src_gui.replace("'ahead'", "'equal'"))),
+        # a hard-coded token, which would ship inside the release zip
+        ("token_is_not_stored",
+         lambda: (mut_install("$DefaultRepo  = 'maxta85/test-game'",
+                              "$DefaultRepo  = 'maxta85/test-game'\n$tok = 'ghp_0123456789abcdefghijklmnopqrstuvwx'"),
+                  src_gui)),
+        # digest verification weakened to make an update "work"
+        ("download_still_verified",
+         lambda: (mut_install("        Write-Step 'verifying SHA-256'",
+                              "        if ($true) { Move-Item -LiteralPath $tmp -Destination $GameExe -Force; return $true }\n        Write-Step 'verifying SHA-256'"),
+                  src_gui)),
+    ]
+    for key, build in cases:
+        i, g = build()
+        f = update_path_facts(i, g)
+        check("rejects a broken install.ps1: %s" % key, not f[key],
+              "mutating the source flips this fact to False")
+
+
+# ---------------------------------------------------------------------------
+# 11. the published release is fetchable and is what the manifest pins
 # ---------------------------------------------------------------------------
 
 
-def fetch(url, want_bytes=None):
-    req = urllib.request.Request(url, headers={"User-Agent": "CairnsAfterDark-verify_launcher"})
+def github_token():
+    """A token for the release repo, if this machine has one.
+
+    The release repo is private, so the digest checks need credentials to get
+    past GitHub's 404. An explicit env var wins; otherwise a logged-in `gh` is
+    used, which is how a maintainer's machine already has access.
+
+    This never changes what the reachability checks report: they always probe
+    anonymously as well, because the anonymous answer is the player's.
+    """
+    for name in ("CAD_VERIFY_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+        v = os.environ.get(name)
+        if v:
+            return v
+    gh = shutil.which("gh")
+    if gh:
+        try:
+            r = subprocess.run([gh, "auth", "token"], capture_output=True,
+                               text=True, timeout=30)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return None
+
+
+def fetch(url, token=None):
+    headers = {"User-Agent": "CairnsAfterDark-verify_launcher"}
+    if token:
+        headers["Authorization"] = "token %s" % token
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=NET_TIMEOUT) as r:
+        return r.read(), r
+
+
+def probe(url, token=None):
+    """Fetch a URL and report what happened, without raising.
+
+    Returns (outcome, detail) where outcome is 'ok', 'http-<code>' or
+    'offline'. The distinction that matters: a 404 is GitHub saying "no such
+    repo, or not one you may see", and is a FAILURE of this project. A socket
+    error is this machine's problem, and is a SKIP. Collapsing both into
+    "no network" is how a private release shipped behind a green tick.
+    """
+    try:
+        body, r = fetch(url, token=token)
+    except urllib.error.HTTPError as e:
+        return "http-%d" % e.code, "HTTP %d %s" % (e.code, e.reason)
+    except urllib.error.URLError as e:
+        return "offline", "%s" % getattr(e, "reason", e)
+    except (OSError, ValueError) as e:
+        return "offline", type(e).__name__
+    return "ok", "%d bytes" % len(body)
+
+
+def check_reachable(name, url, token):
+    """Is this URL reachable, as a player sees it and as a maintainer sees it?
+
+    Both are reported, because they are different questions. An anonymous 404
+    next to a credentialed 200 IS the private-repo state, and printing only
+    the credentialed result hides exactly the thing the player hit.
+
+    Returns 'ok' / 'auth-only' / 'no' / 'offline'.
+    """
+    anon, anon_detail = probe(url, token=None)
+    if anon == "ok":
+        check("%s is reachable anonymously" % name, True,
+              "%s - this is what a player sees" % url)
+        return "ok"
+    if anon == "offline":
+        skip("%s is reachable anonymously" % name, "no network (%s)" % anon_detail)
+        return "offline"
+    if not token:
+        check("%s is reachable anonymously" % name, False,
+              "%s for %s" % (anon_detail, url))
+        return "no"
+    tok, tok_detail = probe(url, token=token)
+    check("%s is reachable anonymously" % name, False,
+          "%s for %s, but it resolves with credentials (%s). The repo is PRIVATE. "
+          "A player with no GITHUB_TOKEN cannot install or update from it - this "
+          "is the reported bug." % (anon_detail, url, tok_detail))
+    return "auth-only" if tok == "ok" else "no"
+
+
+def api_asset(repo, tag, asset, token, want_bytes=None):
+    """Fetch a release asset the way install.ps1 does for a private repo.
+
+    The web /releases/download/ path 404s for a private repo even with a
+    token - measured with Authorization: token, with Bearer, and anonymous - so
+    the digest below would be unverifiable if it went that way. This mirrors
+    install.ps1's Get-ReleaseAssetUrl: the releases API gives the asset id,
+    and the octet-stream route redirects to a signed URL that does serve it.
+    urllib follows that 302 on its own.
+
+    Returns (bytes, response) or raises.
+    """
+    ua = {"User-Agent": "CairnsAfterDark-verify_launcher",
+          "Authorization": "token %s" % token}
+    with urllib.request.urlopen(
+            urllib.request.Request(
+                "https://api.github.com/repos/%s/releases/tags/%s" % (repo, tag),
+                headers=dict(ua, **{"Accept": "application/vnd.github+json"})),
+            timeout=NET_TIMEOUT) as r:
+        rel = json.load(r)
+    aid = next((a["id"] for a in rel.get("assets", []) if a.get("name") == asset), None)
+    if aid is None:
+        raise KeyError("release %s of %s has no asset named %s" % (tag, repo, asset))
+    req = urllib.request.Request(
+        "https://api.github.com/repos/%s/releases/assets/%d" % (repo, aid),
+        headers=dict(ua, **{"Accept": "application/octet-stream"}))
     if want_bytes:
         req.add_header("Range", "bytes=0-%d" % (want_bytes - 1))
     with urllib.request.urlopen(req, timeout=NET_TIMEOUT) as r:
@@ -838,19 +1205,43 @@ def fetch(url, want_bytes=None):
 def check_release(m):
     head("published release (network)")
     if m is None or OFFLINE:
-        skip("release asset exists and matches the pinned digest",
-             "VERIFY_LAUNCHER_OFFLINE=1" if OFFLINE else "manifest unusable")
+        why = "VERIFY_LAUNCHER_OFFLINE=1" if OFFLINE else "manifest unusable"
+        skip("release is reachable anonymously", why)
+        skip("release asset exists and matches the pinned digest", why)
         return
     repo, tag, asset = m["repo"], m["tag"], m["asset"]
-    base = "https://github.com/%s/releases/download/%s" % (repo, tag)
+    token = github_token()
 
-    # The payload is 181 MB. Proving the pin is right does not require moving
-    # it: SHA256SUMS is a 188-byte release asset that has to agree with the
-    # manifest, and the asset's own Content-Length has to be the manifest size.
+    # ---- Can a player download it at all? -------------------------------
+    # Asked first and on its own, because it is the player's actual bug: a
+    # release nobody can download is not a release, whatever the digest says.
+    web = "https://github.com/%s/releases/download/%s" % (repo, tag)
+    outcome, detail = probe("%s/%s" % (web, asset))
+    if outcome == "ok":
+        check("release %s (%s) is reachable anonymously" % (tag, asset), True,
+              "%s/%s" % (web, asset))
+    elif outcome == "offline":
+        skip("release %s (%s) is reachable anonymously" % (tag, asset),
+             "no network (%s)" % detail)
+        skip("release asset exists and matches the pinned digest", "no network")
+        return
+    else:
+        check("release %s (%s) is reachable anonymously" % (tag, asset), False,
+              "%s for %s/%s. A player who has never set GITHUB_TOKEN cannot "
+              "install this or update to it - the reported bug."
+              % (detail, web, asset))
+
+    # ---- Does the pin match what is published? ---------------------------
+    if not token:
+        skip("release asset exists and matches the pinned digest",
+             "the release repo is private and no token is available; set "
+             "CAD_VERIFY_TOKEN to run this")
+        return
     try:
-        sums, _ = fetch(base + "/SHA256SUMS")
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        skip("release asset exists and matches the pinned digest", "no network (%s)" % type(e).__name__)
+        sums, _ = api_asset(repo, tag, "SHA256SUMS", token)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError, KeyError) as e:
+        check("the pinned digest can be read back from the release", False,
+              "%s: %s" % (type(e).__name__, e))
         return
 
     published = {}
@@ -864,17 +1255,73 @@ def check_release(m):
           published.get(asset) == m["sha256"],
           "%s... / %s..." % (str(published.get(asset))[:16], m["sha256"][:16]))
 
+    # The payload is 181 MB. A 1-byte range is enough to prove the API route
+    # serves it and that the total length is the size the manifest pins.
     try:
-        req = urllib.request.Request(base + "/" + asset, method="HEAD",
-                                     headers={"User-Agent": "CairnsAfterDark-verify_launcher"})
-        with urllib.request.urlopen(req, timeout=NET_TIMEOUT) as r:
-            length = int(r.headers.get("Content-Length") or 0)
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        skip("published asset size matches the manifest", "%s" % type(e).__name__)
+        _, r = api_asset(repo, tag, asset, token, want_bytes=1)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError, KeyError) as e:
+        check("published asset is downloadable", False, "%s: %s" % (type(e).__name__, e))
         return
-    check("published asset is downloadable", length > 0)
-    check("published asset size == manifest size", length == m["size"],
-          "%d / %d bytes" % (length, m["size"]))
+    cr = r.headers.get("Content-Range") or ""
+    check("published asset is downloadable", r.status == 206, cr or str(r.status))
+    total = int(cr.rsplit("/", 1)[1]) if "/" in cr else 0
+    check("published asset size == manifest size", total == m["size"],
+          "%d / %d bytes" % (total, m["size"]))
+
+
+def launcher_manifest_url(repo):
+    """The manifest URL taken out of install.ps1 itself.
+
+    Hardcoding the URL here would let the check keep passing while the launcher
+    pointed somewhere else, which is the same class of bug this whole section
+    exists for. So the template is read out of the file and substituted.
+    """
+    src = read(INSTALL_PS1)
+    mm = re.search(r'raw\.githubusercontent\.com/\$\w+/([^"]*manifest\.json)', src)
+    if not mm:
+        return None
+    return "https://raw.githubusercontent.com/%s/%s" % (repo, mm.group(1))
+
+
+def check_remote_manifest_url(m):
+    """The exact URL install.ps1 builds must be the one that answers.
+
+    check_release asks about the RELEASE. The player's report was about the
+    manifest, which is a different host (raw.githubusercontent.com) and a
+    different failure mode: that path 404s for a private repo, and for a repo
+    where the file moved off main.
+    """
+    head("the manifest URL the launcher checks")
+    if m is None or OFFLINE:
+        skip("the manifest URL install.ps1 fetches is reachable",
+             "VERIFY_LAUNCHER_OFFLINE=1" if OFFLINE else "manifest unusable")
+        return
+    url = launcher_manifest_url(m["repo"])
+    if not url:
+        check("install.ps1 still builds a raw.githubusercontent manifest URL", False,
+              "no such URL found in install.ps1; this check cannot probe it")
+        return
+    check("install.ps1 still builds a raw.githubusercontent manifest URL", True, url)
+    token = github_token()
+
+    if check_reachable("the manifest URL install.ps1 fetches", url, token) != "ok":
+        return
+
+    # And the body has to be the manifest the local file compares against.
+    body, _ = fetch(url, token=token)
+    try:
+        remote = json.loads(body.decode("utf-8"))
+    except ValueError as e:
+        check("the remote manifest is JSON", False,
+              "%s answered 200 with something unparseable: %s" % (url, e))
+        return
+    check("the remote manifest is JSON", True)
+    check("remote manifest repo matches windows/manifest.json",
+          remote.get("repo") == m.get("repo"),
+          "%s / %s" % (remote.get("repo"), m.get("repo")))
+    check("remote manifest asset is the one install.ps1 downloads",
+          remote.get("asset") == m.get("asset"),
+          "%s / %s" % (remote.get("asset"), m.get("asset")))
 
 
 # ---------------------------------------------------------------------------
@@ -910,6 +1357,10 @@ def main():
     check_presets()
     check_readme()
     check_godot_pin()
+    check_update_path()
+    check_update_verdict(pwsh)
+    negative_update_path()
+    check_remote_manifest_url(m)
     check_release(m)
 
     print("\n" + "=" * 70)

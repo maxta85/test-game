@@ -109,28 +109,166 @@ function Get-ManifestRepo {
     return $repo.Trim('/')
 }
 
+# GitHub credentials. Optional, and read from the environment only - there is
+# no token in any file in this folder, because these files are published in the
+# release zip.
+#
+# Needed ONLY while the release lives in a PRIVATE repo. raw.githubusercontent
+# answers an unauthenticated request for a private repo with 404, so without a
+# token this launcher's update check can never succeed. Set GITHUB_TOKEN (or
+# GH_TOKEN) in the environment to fix that; see windows/README.md, and note
+# that a player with no token still needs the release published somewhere
+# public, which is the actual fix for them.
+function Get-GitHubToken {
+    foreach ($v in 'GITHUB_TOKEN', 'GH_TOKEN') {
+        $t = [Environment]::GetEnvironmentVariable($v)
+        if ($t) { return $t.Trim() }
+    }
+    return $null
+}
+
+function Get-ManifestUrl ([string]$Repo) {
+    return "https://raw.githubusercontent.com/$Repo/main/windows/manifest.json"
+}
+
+# Set by Get-RemoteManifest when it cannot produce a manifest, so the caller
+# can say what actually happened instead of guessing.
+$script:RemoteFail = ''
+
 # Update checks are a nicety and must never be able to break an install or a
-# launch, so this returns $null on any failure rather than throwing.
+# launch, so this returns $null on any failure rather than throwing. What it
+# must NOT do is collapse every failure into "could not reach GitHub": that is
+# exactly what a private repo looks like, and it sends the whole diagnosis in
+# the wrong direction. A real player's report of "updates are not detected" sat
+# unread for a release because this one line threw the reason away.
 function Get-RemoteManifest {
     param([string]$Repo, [int]$TimeoutMs = 8000)
+    $script:RemoteFail = ''
     $body = $null
+    $url  = Get-ManifestUrl $Repo
+    $req  = $null
     try {
-        $url = "https://raw.githubusercontent.com/$Repo/main/windows/manifest.json"
         $req = [System.Net.HttpWebRequest]::Create($url)
+        $req.Timeout           = $TimeoutMs
+        $req.ReadWriteTimeout  = $TimeoutMs
+        $req.UserAgent         = $UserAgent
+        $token = Get-GitHubToken
+        if ($token) { $req.Headers['Authorization'] = "token $token" }
+        $resp = $req.GetResponse()
         try {
-            $req.Timeout           = $TimeoutMs
-            $req.ReadWriteTimeout  = $TimeoutMs
-            $req.UserAgent         = $UserAgent
-            $resp = $req.GetResponse()
-            try {
-                $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
-                try { $body = $sr.ReadToEnd() } finally { $sr.Dispose() }
-            } finally { $resp.Dispose() }
-        } finally { $req.Close() }
+            $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+            try { $body = $sr.ReadToEnd() } finally { $sr.Dispose() }
+        } finally { $resp.Dispose() }
+        # NOTE: no $req.Close(). HttpWebRequest.Close() exists in .NET
+        # Framework, so the old code was fine on Windows PowerShell 5.1 and
+        # threw MethodNotFoundException on PowerShell 7 (.NET Core), where the
+        # finally turned every successful fetch into $null. Measured on pwsh
+        # 7.4.6 against a public raw.githubusercontent URL. Disposing the
+        # response is what returns the connection.
         return ($body | ConvertFrom-Json)
+    } catch [System.Net.WebException] {
+        $code = 0
+        if ($null -ne $_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+        if ($code -eq 404) {
+            # 404 is GitHub's answer for "no such repo OR file", and for a
+            # private repo it is the answer for "you are not logged in" as
+            # well - it will not say 403, because that would confirm the repo
+            # exists. This distinction is the entire bug: the old code threw
+            # the status away and the player was told they were offline.
+            $script:RemoteFail = "GitHub returned 404 for $Url. Either the repo is private (and no usable GITHUB_TOKEN is set), or that path does not exist on main. GitHub answers 404 rather than 403 for a private repo so it does not confirm the repo exists."
+        } elseif ($code -gt 0) {
+            $script:RemoteFail = "GitHub returned HTTP $code for $url."
+        } else {
+            $script:RemoteFail = "could not reach raw.githubusercontent.com: $($_.Exception.Message)"
+        }
+        return $null
     } catch {
+        # A 200 that is not a manifest: rate limiting, a captive portal, a
+        # proxy error page. Say that, instead of blaming the network.
+        $script:RemoteFail = "the response from $url was not a manifest: $($_.Exception.Message)"
         return $null
     }
+}
+
+# 'current' | 'update' | 'ahead'.
+#
+# The old test was string inequality - "any difference means an update exists".
+# Measured against the real manifests, that offered a 0.1.1 player a 0.1.0
+# "update" and a 0.1.9 player 0.1.1. Comparing the numbers is the whole fix.
+function Get-UpdateVerdict {
+    param($Local, $Remote)
+    if (([string]$Local.version -eq [string]$Remote.version) -and
+        ([string]$Local.tag    -eq [string]$Remote.tag)) { return 'current' }
+    $lv = $null; $rv = $null
+    try {
+        $lv = [version]([string]$Local.version)
+        $rv = [version]([string]$Remote.version)
+    } catch { }
+    if ($null -ne $lv -and $null -ne $rv) {
+        if ($rv -gt $lv) { return 'update' }
+        if ($lv -gt $rv) { return 'ahead'  }
+    }
+    # Not dotted-numeric, or equal numbers under different tags: the order
+    # cannot be established, so offer it. A prompted update the player can
+    # decline is better than a real update the launcher never mentions, and the
+    # digest is verified before anything is installed either way.
+    return 'update'
+}
+
+# Where the release payload actually is.
+#
+# Public repo: the plain /releases/download/ URL, which needs nothing.
+# Private repo: that URL 404s for an authenticated request too - measured, with
+# Authorization: token, with Bearer, and anonymous. GitHub's API
+# octet-stream route does serve it, but it is addressed by asset id and answers
+# a 302 to a signed release-assets URL. Resolve the id and the signature here,
+# then hand the plain signed URL to the normal download code, which then needs
+# no credentials of its own.
+function Get-ReleaseAssetUrl {
+    param([string]$Repo, [string]$Tag, [string]$Asset)
+    $token = Get-GitHubToken
+    if (-not $token) {
+        return "https://github.com/$Repo/releases/download/$Tag/$Asset"
+    }
+    $api  = "https://api.github.com/repos/$Repo/releases/tags/$Tag"
+    $id   = Get-ReleaseAssetId -Repo $Repo -Tag $Tag -Asset $Asset
+    if ($null -eq $id) {
+        throw "cannot resolve release asset '$Asset' in $Repo tag $Tag (looked it up at $api)."
+    }
+    $req = [System.Net.HttpWebRequest]::Create("https://api.github.com/repos/$Repo/releases/assets/$id")
+    $req.Method               = 'GET'
+    $req.UserAgent            = $UserAgent
+    $req.AllowAutoRedirect    = $false
+    $req.Timeout              = 30000
+    $req.Headers['Authorization']    = "token $token"
+    $req.Headers['Accept']           = 'application/octet-stream'
+    $resp = $req.GetResponse()
+    try {
+        $loc = $resp.Headers['Location']
+        if (-not $loc) {
+            throw "GitHub did not return a download location for asset id $id."
+        }
+        return $loc
+    } finally { $resp.Close() }
+}
+
+function Get-ReleaseAssetId {
+    param([string]$Repo, [string]$Tag, [string]$Asset)
+    $url = "https://api.github.com/repos/$Repo/releases/tags/$Tag"
+    $req = [System.Net.HttpWebRequest]::Create($url)
+    $req.Timeout  = 30000
+    $req.UserAgent = $UserAgent
+    $req.Headers['Authorization'] = "token " + (Get-GitHubToken)
+    $req.Accept   = 'application/vnd.github+json'
+    $resp = $req.GetResponse()
+    try {
+        $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        try { $json = $sr.ReadToEnd() | ConvertFrom-Json } finally { $sr.Dispose() }
+    } finally { $resp.Close() }
+    foreach ($a in $json.assets) {
+        if ([string]$a.name -eq $Asset) { return [int]$a.id }
+    }
+    return $null
 }
 
 function Get-Sha256 ([string]$Path) {
@@ -168,15 +306,18 @@ function New-Shortcut {
 function Install-RemoteBuild {
     param($Manifest, [string]$Repo, [string]$Label)
 
-    $url = "https://github.com/$Repo/releases/download/$($Manifest.tag)/$($Manifest.asset)"
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('cad-' + [System.IO.Path]::GetRandomFileName() + '.part')
     try {
         Write-Step "$Label downloading $($Manifest.asset)"
-        Write-Ok $url
         Write-Ok ("$([math]::Round(([double]$Manifest.size) / 1MB, 1)) MB")
 
         if ($WhatIfOnly) { Write-Note '-WhatIf: download skipped.'; return $false }
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+
+        # Resolved after -WhatIf on purpose: with a token set this costs two API
+        # round trips, and the headless self-check runs this path.
+        $url = Get-ReleaseAssetUrl -Repo $Repo -Tag ([string]$Manifest.tag) -Asset ([string]$Manifest.asset)
+        Write-Ok $url
 
         $haveBits = $null -ne (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue)
         if ($haveBits) {
@@ -332,13 +473,21 @@ function Invoke-Update {
 
     $remote = Get-RemoteManifest -Repo $repo
     if ($null -eq $remote) {
-        if (-not $Quiet) { Write-Note 'could not reach GitHub - staying on the installed build.' }
+        if (-not $Quiet) { Write-Note $script:RemoteFail }
         return
     }
 
-    $same = ([string]$local.version -eq [string]$remote.version) -and ([string]$local.tag -eq [string]$remote.tag)
-    if ($same) {
+    $verdict = Get-UpdateVerdict -Local $local -Remote $remote
+    if ($verdict -eq 'current') {
         if (-not $Quiet) { Write-Step "up to date ($($local.version))" }
+        return
+    }
+    if ($verdict -eq 'ahead') {
+        # main is behind this install. Offering it would be a downgrade.
+        if (-not $Quiet) {
+            Write-Step "installed $($local.version) is newer than main ($($remote.version))"
+            Write-Note 'nothing to do - main is behind this install.'
+        }
         return
     }
 
@@ -363,6 +512,12 @@ function Invoke-Update {
     if (-not $ok) { return }
 
     Set-Content -LiteralPath $VersionFile -Value "$($remote.version) ($($remote.tag))" -Encoding UTF8
+    # Re-pin the local manifest to the build now installed. Without this the
+    # state check compares the new exe against the OLD pin forever: the GUI
+    # reports "NOT the pinned build", the update check offers the same version
+    # again on every launch, and Install / Repair re-downloads the superseded
+    # build back over the newer one.
+    ($remote | ConvertTo-Json) | Set-Content -LiteralPath $ManifestFile -Encoding UTF8
     Write-InstallState -Manifest $remote -Repo $repo
     Write-Ok "updated to $($remote.version) - your saves were not touched"
 }

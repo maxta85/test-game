@@ -36,7 +36,14 @@ static func noise_tex(size: int, freq: float, octaves: int, seed_v: int,
 
 ## Wet asphalt. The star of the show: low roughness, strong normal detail for
 ## the aggregate, and a slight sheen so sodium lights smear along it.
-static func wet_asphalt(uv_scale: float = 0.06) -> StandardMaterial3D:
+##
+## `seed` exists because the tarmac is triplanar: the grain is sampled from world
+## position, so every square metre of road shows the same 16.7 m tile of it and the
+## repeat is a grid across the whole map. Per-mesh UV offsets cannot break that -
+## the shader never reads them - so the only lever is a different material, and
+## `seed` moves the noise without moving the mean: variants differ in grain, not
+## in brightness, which is what stops the road looking blotchy instead of tiled.
+static func wet_asphalt(uv_scale: float = 0.06, seed: int = 0) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	# Wet asphalt is a near-mirror, so almost all the light it returns is
 	# specular reflection of the sky - and this sky is nearly black. Physically
@@ -47,7 +54,7 @@ static func wet_asphalt(uv_scale: float = 0.06) -> StandardMaterial3D:
 	# driven by a noise texture so the reflection breaks up instead of reading
 	# as a uniform sheet of plastic.
 	m.roughness = 0.14
-	m.roughness_texture = noise_tex(256, 0.55, 4, 37)
+	m.roughness_texture = noise_tex(256, 0.55, 4, 37 + seed * 7)
 	m.metallic = 0.0
 	m.metallic_specular = 1.0
 	m.uv1_scale = Vector3(uv_scale, uv_scale, uv_scale)
@@ -56,14 +63,14 @@ static func wet_asphalt(uv_scale: float = 0.06) -> StandardMaterial3D:
 	# raw, FastNoiseLite averages ~0.5 and silently halves every value written
 	# above, which is how the road stayed invisible no matter how bright the
 	# lamps got. A ramp of 0.72-1.0 keeps the speckle and loses ~14%.
-	m.albedo_texture = noise_tex(256, 0.9, 4, 11)
+	m.albedo_texture = noise_tex(256, 0.9, 4, 11 + seed * 13)
 	var albedo_ramp := Gradient.new()
 	albedo_ramp.set_color(0, Color(0.72, 0.72, 0.72))
 	albedo_ramp.set_color(1, Color(1.0, 1.0, 1.0))
 	var albedo_tex := m.albedo_texture as NoiseTexture2D
 	albedo_tex.color_ramp = albedo_ramp
 	m.normal_enabled = true
-	m.normal_texture = noise_tex(256, 1.6, 5, 23, true)
+	m.normal_texture = noise_tex(256, 1.6, 5, 23 + seed * 17, true)
 	m.normal_scale = 0.28
 	# No flat emission. An emissive floor lifts the whole surface evenly and
 	# kills the specular contrast that actually makes a road look wet.
@@ -143,10 +150,80 @@ static func wall(tint: Color) -> StandardMaterial3D:
 	m.roughness = 0.85
 	m.uv1_scale = Vector3(0.1, 0.1, 0.1)
 	m.uv1_triplanar = true
+	# Albedo speckle as well as a normal map. Flat albedo under a sodium lamp is
+	# cardboard: one value across a whole wall, so the only thing giving the
+	# surface any variation is the normal map, and a normal map alone reads as
+	# relief on a sheet of card. Painted render is patchy - a roller leaves the
+	# wall lighter where it was laid down and darker where the weather got it -
+	# and that mottle is what stops the flat side of a building reading as a
+	# rectangle of colour.
+	#
+	# Ramped like the tarmac's, for the same reason: fed raw, FastNoiseLite
+	# averages ~0.5 and silently halves the tint, which reads as every wall being
+	# grubby rather than mottled. 0.74-1.0 keeps the mottle and loses ~13%.
+	m.albedo_texture = noise_tex(128, 1.6, 4, 907)
+	var wall_ramp := Gradient.new()
+	wall_ramp.set_color(0, Color(0.74, 0.74, 0.74))
+	wall_ramp.set_color(1, Color(1.0, 1.0, 1.0))
+	(m.albedo_texture as NoiseTexture2D).color_ramp = wall_ramp
 	m.normal_enabled = true
 	m.normal_texture = noise_tex(128, 2.5, 3, 131, true)
 	m.normal_scale = 0.15
 	return m
+
+
+## Coconut bark. Its own material rather than `wall()` because the trunks were
+## the worst-looking thing in the frame and `wall()` is why: a 0.30 albedo with no
+## albedo texture at all is three times the tarmac's 0.105, so under a sodium lamp
+## a trunk returns more light than the road it is planted in and renders as a flat
+## orange slab - 1621 of them, and the "everything is orange" complaint is mostly
+## this. Bark is grey-brown, not orange: the sodium in the frame is supposed to be
+## the lamp's, not the material's.
+static func palm_bark() -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	# A palm trunk is vertical, so it takes the lamp square-on while the road
+	# under the same lamp takes it at 25 degrees - and the old wall() albedo of
+	# 0.30 returned more light than the tarmac it is planted in, so every trunk
+	# rendered as a flat orange slab. Grey-brown and dark enough to lose to the
+	# road: under sodium that still reads warm, but as a tree, not a terracotta pole.
+	m.albedo_color = Color(0.13, 0.125, 0.112)
+	m.roughness = 0.92
+	# Triplanar is off deliberately. It projects the texture from world space in
+	# three axes, which is the wrong basis for a cylinder - and WorldBuilder now
+	# supplies trunk UVs where `u` runs once around the shaft and `v` is already
+	# scaled by PALM_RING_BANDS, so the leaf-scar rings land as horizontal bands.
+	# Triplanar would have thrown those away and smeared the rings diagonally.
+	m.uv1_scale = Vector3.ONE
+	m.albedo_texture = _palm_ring_tex()
+	return m
+
+
+## Leaf-scar rings for a palm shaft: a narrow dark band per scar, with the
+## weathered panel above it.
+##
+## A GradientTexture2D rather than a per-pixel Image loop, because a vertical
+## gradient is exactly this shape - a ramp along one axis - and Godot already
+## draws one. The gradient only varies vertically, so it wraps seamlessly left
+## to right, which matters because the trunk UVs tile once per side: any
+## horizontal variation would show as a stripe down every seam.
+static func _palm_ring_tex() -> GradientTexture2D:
+	# Light smooth panel easing down into the dark scar, then a hard edge back
+	# out. Offset 1.0 repeats the panel top so the last ring meets the first.
+	# Set through `offsets`/`colors` rather than `set_offset`/`set_color`: those
+	# only edit points the gradient already has, and a fresh Gradient has two.
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.55, 0.80, 0.90, 0.97, 1.0])
+	var cols := PackedColorArray()
+	for v in [0.92, 0.80, 0.72, 0.30, 0.26, 0.92]:
+		cols.append(Color(v, v, v * 0.92))
+	g.colors = cols
+	var tex := GradientTexture2D.new()
+	tex.gradient = g
+	tex.width = 8
+	tex.height = 128
+	tex.fill_from = Vector2(0.0, 0.0)
+	tex.fill_to = Vector2(0.0, 1.0)
+	return tex
 
 
 ## Foliage. Two-sided and slightly translucent so streetlights bleed through.

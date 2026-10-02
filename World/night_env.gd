@@ -47,7 +47,7 @@ func _ready() -> void:
 	# that is actually settable.
 	_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	_env.ambient_light_sky_contribution = 0.0
-	_env.ambient_light_energy = 0.55
+	_env.ambient_light_energy = Look.AMBIENT_ENERGY
 	_env.ambient_light_color = Color(0.34, 0.42, 0.62)
 
 	# --- fog --------------------------------------------------------------
@@ -67,11 +67,11 @@ func _ready() -> void:
 	# Sodium lamps and neon should bleed. Without this a night scene looks like
 	# a day scene with the brightness turned down.
 	_env.glow_enabled = true
-	_env.glow_intensity = 0.55
+	_env.glow_intensity = Look.GLOW_INTENSITY
 	_env.glow_strength = 1.0
 	_env.glow_bloom = 0.08
 	_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
-	_env.glow_hdr_threshold = 0.95
+	_env.glow_hdr_threshold = Look.GLOW_THRESHOLD
 	_env.glow_hdr_scale = 2.0
 
 	# --- reflections / SSR ------------------------------------------------
@@ -92,9 +92,27 @@ func _ready() -> void:
 
 	_env.adjustment_enabled = true
 	_env.adjustment_brightness = 1.03
-	_env.adjustment_contrast = 1.10
+	_env.adjustment_contrast = Look.ADJUSTMENT_CONTRAST
 	_env.adjustment_saturation = 1.12
 
+	# Tonemap. ACES at 1.45, and both numbers were swept against a blown-out
+	# white car and KEPT, so that nobody spends the day again on the two knobs
+	# that are not the problem. Measured on `carhero`, paint = % of roof/boot/
+	# bumper at 255, detail = local contrast in those panels (a panel line IS
+	# this), sky/road = the two things that were already right:
+	#
+	#     exposure 1.45 (kept)  paint 35.99%  detail 2.96  sky 36.5  road 1.99
+	#     exposure 1.15         paint 11.96%  detail 3.73  sky 29.5  road 1.51
+	#     exposure 0.95         paint  5.37%  detail 4.39  sky 24.6  road 1.19
+	#     filmic     1.00       paint  6.63%  detail 3.18  sky 50.2  road 7.11
+	#     reinhardt  0.80       paint  4.69%  detail 3.32  sky 55.0  road 8.89
+	#
+	# Exposure does buy paint detail and it pays for it out of the sky and the
+	# wet road, which is the flattening this scene can least afford. Filmic and
+	# Reinhardt fix the highlights but lift the whole frame - the sky measures
+	# 50-55 against ACES's 36.5, and a night scene whose sky is brighter than its
+	# streetlights has stopped being a night scene. The white car was fixed at
+	# the source instead: see the HeroFill in `Systems/vehicle/car_visual.gd`.
 	_env.tonemap_mode = Environment.TONE_MAPPER_ACES
 	_env.tonemap_exposure = 1.45
 	_env.tonemap_white = 1.2
@@ -118,6 +136,8 @@ func _ready() -> void:
 	_apply_rain()
 
 
+
+
 ## Rain: heavier rain means you see less far, a darker sky, and *thicker
 ## volumetrics* - which is the good part, because a headlight beam in heavy rain
 ## is the single most convincing thing a night street can do.
@@ -129,7 +149,7 @@ func _apply_rain() -> void:
 	_env.fog_depth_end = lerpf(620.0, 260.0, r)
 	_env.fog_depth_begin = lerpf(40.0, 10.0, r)
 	_env.volumetric_fog_density = lerpf(0.012, 0.030, r)
-	_env.glow_intensity = lerpf(0.55, 0.66, r)
+	_env.glow_intensity = Look.GLOW_INTENSITY * lerpf(1.0, 1.2, r)
 	_sky_mat.sky_horizon_color = Color(0.085, 0.105, 0.155).lerp(Color(0.040, 0.050, 0.070), r)
 
 

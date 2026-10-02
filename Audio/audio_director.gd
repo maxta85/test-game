@@ -42,6 +42,9 @@ func _ready() -> void:
 	for i in VOICE_POOL:
 		var p := AudioStreamPlayer.new()
 		p.name = "Cue%d" % i
+		# On the SFX bus, which is the only reason the bus exists: a mixer that
+		# can duck the effects cannot duck cues that went to Master.
+		p.bus = AudioBuses.SFX
 		add_child(p)
 		_pool.append(p)
 
@@ -53,7 +56,13 @@ func _exit_tree() -> void:
 
 ## Plays a synthesised cue by name. False for a name that is not in the bank,
 ## so a typo is visible to the caller instead of being silently nothing.
-func play_cue(name: String) -> bool:
+##
+## `gain_db` is for the cues that are not the same size as each other - an
+## impact's loudness is the speed the car arrived at, and a thud at 20 kph heard
+## at the same level as one at 90 is a lie about the crash. It is written on
+## every play because the pool is reused: a level left on a recycled player
+## would come back with the next cue.
+func play_cue(name: String, gain_db: float = 0.0) -> bool:
 	var s := AudioCues.stream(name)
 	if s == null:
 		return false
@@ -61,6 +70,8 @@ func play_cue(name: String) -> bool:
 	if p == null:
 		return false
 	p.stream = s
+	if is_finite(gain_db):
+		p.volume_db = clampf(gain_db, AudioBuses.SILENCE_DB, 6.0)
 	p.play()
 	last_cue = name
 	cues_played += 1
@@ -70,17 +81,23 @@ func play_cue(name: String) -> bool:
 ## rpm in revolutions per minute, load as 0..1. Called every frame with
 ## whatever the car happens to have, so it never throws on the first frame's
 ## zeroed rpm and never has to be guarded by the caller.
+##
+## Also what starts the voice, and it is the *only* thing that does: a director
+## nobody has fed has no engine, and one that plays on its own is an idling
+## engine in a menu with no car in it.
 func set_engine(rpm: float, load: float) -> void:
 	if _voice != null:
-		_voice.synth.running = true
+		_voice.set_sounding(true)
 		_voice.synth.set_engine(rpm, load)
 
 
-## Fades the engine out rather than cutting it, and leaves the voice running
-## silent so the fade can finish on its own.
+## Fades the engine out and then takes the voice down. The fade is the
+## anti-click half; the stop is what makes the Engine bus empty, because a
+## generator ring nobody is emptying keeps being played back after the thing
+## that fed it has gone.
 func stop_engine() -> void:
 	if _voice != null:
-		_voice.synth.set_running(false)
+		_voice.set_sounding(false)
 
 
 ## The countdown hook. `RaceDirector.lights` is 3, 2, 1 through the countdown

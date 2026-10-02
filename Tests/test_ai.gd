@@ -43,6 +43,15 @@ const MAIN_TARGET := 700.0
 ## whole lap of the long one.
 const SHORT_TARGET := 400.0
 const TIME_SCALE := 3.0
+## What one iteration of a case actually advances the world by. Engine.time_scale
+## is TIME_SCALE, so the delta the engine hands every `_physics_process` is DT
+## scaled up: one physics frame is PHYS seconds of simulated time, not DT.
+## Ticking the director by DT alone left the race clock running a factor of
+## TIME_SCALE behind the car. Measured on a 1578 m lap: the car drove it in
+## 145.8 s and the director filed it as 45.6 s, so every "t=Ns" in a failure
+## under-reported by that factor and the spin-recovery budget below was three
+## times more lenient than it read.
+const PHYS := DT * TIME_SCALE
 
 var g: RoadGraph
 
@@ -117,6 +126,12 @@ func _setup_race(t: TestHarness, world: Node3D, laps: int = 2, target: float = S
 	return {"def": def, "director": dr, "car": body, "ai": ai, "world": world}
 
 
+## One simulated step: the physics frame, and the same amount of race clock.
+func _step(t: TestHarness, dr: RaceDirector) -> void:
+	await t.ticks(1)
+	dr.tick(PHYS)
+
+
 ## Runs the simulation, driving the race forward alongside the physics.
 ## Everything the assertions need is measured on the way past.
 func _run(t: TestHarness, setup: Dictionary, seconds: float) -> Dictionary:
@@ -134,8 +149,7 @@ func _run(t: TestHarness, setup: Dictionary, seconds: float) -> Dictionary:
 	var last_speed := 0.0
 	var worst_at := ""
 	for i in steps:
-		await t.ticks(1)
-		dr.tick(DT)
+		await _step(t, dr)
 		if car.global_position.y < -5.0:
 			went_off = true
 			break
@@ -252,8 +266,7 @@ func _overtakes(t: TestHarness) -> void:
 	var got_past := false
 	var min_gap := 99.0
 	for i in int(35.0 / DT):
-		await t.ticks(1)
-		dr.tick(DT)
+		await _step(t, dr)
 		# Held still on the road ahead. A blocker that drives itself off into a
 		# block within a few corners stops being a test of overtaking.
 		blocker.throttle = 0.0
@@ -298,8 +311,7 @@ func _no_gap_no_pass(t: TestHarness) -> void:
 	var min_gap := 99.0
 	var reached := false
 	for i in int(25.0 / DT):
-		await t.ticks(1)
-		dr.tick(DT)
+		await _step(t, dr)
 		for c in [left, right]:
 			c.throttle = 0.0
 			c.brake = 1.0
@@ -338,9 +350,8 @@ func _recovers_from_a_spin(t: TestHarness) -> void:
 	var elapsed := 0.0
 	var give_up := 25.0
 	for i in int(give_up / DT):
-		await t.ticks(1)
-		dr.tick(DT)
-		elapsed += DT
+		await _step(t, dr)
+		elapsed += PHYS
 		var line: RacingLine = ai.line()
 		var here: Dictionary = line.project(Vector2(car.global_position.x, car.global_position.z), ai.line_index())
 		var lat: float = absf(float(here["lateral"]))
@@ -383,8 +394,7 @@ func _pace_over(t: TestHarness, at_skill: float) -> float:
 	var start_i: int = _index_of(setup, car)
 	var furthest := start_i
 	for i in int(35.0 / DT):
-		await t.ticks(1)
-		dr.tick(DT)
+		await _step(t, dr)
 		if car.global_position.y < -5.0:
 			break
 		furthest = maxi(furthest, _index_of(setup, car))

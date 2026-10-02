@@ -578,8 +578,11 @@ func _update_tyres(delta: float) -> void:
 			continue
 
 		var load: float = w["load"]
-		var mu: float = spec.tyre_peak_mu * float(w["surface_mu"])
 		var radius: float = w["radius"]
+		var mu: float = spec.tyre_peak_mu * float(w["surface_mu"])
+		# Per-axle tyre curve: what decides whether this car drifts.
+		mu *= spec.front_grip_scale if w["front"] else spec.rear_grip_scale
+		var slide_tail: float = spec.front_slide_tail if w["front"] else spec.rear_slide_tail
 
 		var sr := TyreModel.slip_ratio(w["omega"] * radius, v_forward)
 		var sat := TyreModel.slip_angle_tan(v_forward, v_side)
@@ -598,7 +601,7 @@ func _update_tyres(delta: float) -> void:
 
 		var fx := TyreModel.longitudinal(sr_smooth, load, mu)
 		# lateral() already returns force opposing the slip, so no sign flip here.
-		var fy := TyreModel.lateral(sat, load, mu)
+		var fy := TyreModel.lateral(sat, load, mu, TyreModel.PEAK_SLIP, slide_tail)
 
 		# Friction circle: combined demand cannot exceed peak grip. Without this a
 		# car can brake and corner at full grip at once, which is the classic tell
@@ -625,6 +628,8 @@ func _update_tyres(delta: float) -> void:
 		_integrate_wheel(w, drive_torque, brake_torque, fx, delta)
 
 		w["spin_vis"] = fposmod(w["spin_vis"] + w["omega"] * delta, TAU)
+
+	_apply_diff_lock()
 
 
 ## Integrates one wheel's spin. `tyre_fx` is the longitudinal force the tyre is
@@ -675,3 +680,46 @@ func _apply_aero() -> void:
 
 func power_to_weight() -> float:
 	return spec.peak_power_kw() / (spec.mass / 1000.0)
+
+
+## Limited-slip coupling between the two driven wheels on each axle.
+##
+## An open diff sends the same torque to both driven wheels whatever load they
+## carry, so the moment the car goes sideways the unloaded inside rear spins up
+## and dumps the drive torque into nothing, while the loaded outside rear - the
+## one actually making the force that holds the slide - gets no more than it
+## would have got anyway. Measured on the kairo_s13 mid-slide: inside rear at
+## 291% slip, outside rear at 5%, and the whole axle making less thrust than one
+## wheel should. The slide cannot be held on throttle because there is no thrust
+## to hold it with, which is exactly why every real drift car runs a locked or
+## clutch-pack diff.
+##
+## Modelled as the constraint it actually is: a locked diff does not generate
+## torque, it forces the two wheels to the same speed. So this transfers angular
+## momentum between the two driven wheels until they agree, scaled by how much
+## of that the pack can take. At `diff_lock` 1.0 that is a hard constraint
+## applied in one step; because it conserves angular momentum and moves the
+## wheels onto their common speed rather than past it, it cannot oscillate the
+## way a stiffness-based coupling does. 0 is an open diff.
+func _apply_diff_lock() -> void:
+	if spec.diff_lock <= 0.0:
+		return
+	for front in [true, false]:
+		var a: Dictionary = {}
+		var b: Dictionary = {}
+		for w in _wheels:
+			if bool(w["front"]) != front or not is_driving_wheel(w):
+				continue
+			if a.is_empty():
+				a = w
+			else:
+				b = w
+		if a.is_empty() or b.is_empty():
+			continue
+		var i_a: float = spec.wheel_inertia + float(a["load"]) * 0.0006
+		var i_b: float = spec.wheel_inertia + float(b["load"]) * 0.0006
+		var common: float = (i_a * float(a["omega"]) + i_b * float(b["omega"])) / (i_a + i_b)
+		var move_a: float = (float(a["omega"]) - common) * spec.diff_lock
+		var move_b: float = (common - float(b["omega"])) * spec.diff_lock
+		a["omega"] = float(a["omega"]) - move_a
+		b["omega"] = float(b["omega"]) + move_b

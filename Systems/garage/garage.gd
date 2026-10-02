@@ -13,21 +13,9 @@ extends RefCounted
 # Deliberately not stored here. `roster()` reads CarDB.ALL_IDS, so a car added
 # to the roster shows up in the garage without anyone editing this file.
 
-## car id -> the glb stem in assets/cars that is the same archetype.
-##
-## Measured against what is in the repo rather than wished for: seven cars, seven
-## glb files, and CarFit flags six of the seven fits usable (au_falcon is 1,026,571
-## verts with zero textures and is marked UNUSABLE). Five of the seven cars have
-## an archetype match. kairo_mx90 and kaze_type_r are both front-drive hatchbacks
-## and there is no front-drive car in the library at all; vt_commodore is left
-## unassigned rather than bolted onto a car it is not.
-const MODEL_STEMS := {
-	"kairo_s13": "silvia_s13",      # 1993 rear-drive coupe
-	"shinobi_rs": "wrx_gc8",        # mid-90s all-wheel-drive turbo hatch
-	"akuma_gt": "evo_v",            # mid-90s all-wheel-drive, quietly brutal
-	"tatsuya_gt": "supra_mk4",      # twin-turbo coupe. The body is rear-drive.
-	"hayate_turbo": "silvia_s15",   # late-90s rear-drive turbo coupe
-}
+## Measured against what is in the repo rather than wished for: five cars, five
+## glb files, all five fits usable. kairo_mx90 and kaze_type_r are both
+## front-drive hatchbacks and there is no front-drive car in the library at all.
 
 ## Bar reference maxima, for the stat bars on the card.
 ##
@@ -255,10 +243,15 @@ func _bars(s: CarSpec, kw: float) -> Dictionary:
 
 ## res:// path of the glb for a car, or "" when it has none.
 ##
+## The mapping is CarVisual.MODELS, not a copy of it. There used to be a second
+## table in this file and the two disagreed about akuma_gt and hayate_turbo, so
+## the garage labelled one car "GLTF: EVO_V" while a Silvia S15 rendered. One
+## source of truth, in the one place that actually draws the mesh.
+##
 ## Measured, not assumed: a mapping is only believed if CarFit says the fit is
 ## usable and the file is actually on disk.
 static func model_path(car_id: String) -> String:
-	var stem: String = MODEL_STEMS.get(car_id, "")
+	var stem: String = CarVisual.MODELS.get(car_id, "")
 	if stem.is_empty() or not bool(CarFit.ALL.get(stem, {}).get("usable", false)):
 		return ""
 	var path := "res://assets/cars/%s.glb" % stem

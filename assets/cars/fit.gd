@@ -10,9 +10,9 @@ extends RefCounted
 
 const ALL := {
 	"supra_mk4": {
-		"scale": 0.010076,
-		"rot_deg": Vector3(-90.0, -0.0, 0.0),
-		"offset": Vector3(-0.0000, 0.4033, -0.0448),
+		"scale": 0.992817,
+		"rot_deg": Vector3(-0.0, -180.0, 0.0),
+		"offset": Vector3(-0.0000, 0.1352, 0.0109),
 		"note": "MK4 A80",
 		"verts": 183723,
 		"textured": 14,
@@ -20,8 +20,8 @@ const ALL := {
 	},
 	"silvia_s13": {
 		"scale": 1.012533,
-		"rot_deg": Vector3(-0.0, 0.0, 0.0),
-		"offset": Vector3(-0.0000, 0.3132, 0.0605),
+		"rot_deg": Vector3(-0.0, -180.0, 0.0),
+		"offset": Vector3(0.0016, 0.0053, -0.0605),
 		"note": "S13",
 		"verts": 41729,
 		"textured": 11,
@@ -29,8 +29,8 @@ const ALL := {
 	},
 	"silvia_s15": {
 		"scale": 0.005908,
-		"rot_deg": Vector3(-0.0, 0.0, 0.0),
-		"offset": Vector3(-1.0222, -0.0079, -0.8300),
+		"rot_deg": Vector3(-0.0, -180.0, 0.0),
+		"offset": Vector3(1.0222, -0.0079, 0.8300),
 		"note": "S15",
 		"verts": 282093,
 		"textured": 114,
@@ -38,7 +38,7 @@ const ALL := {
 	},
 	"wrx_gc8": {
 		"scale": 0.251578,
-		"rot_deg": Vector3(-90.0, -0.0, 0.0),
+		"rot_deg": Vector3(-0.0, 0.0, 0.0),
 		"offset": Vector3(3.8391, 0.0192, 3.1263),
 		"note": "GC8 blobeye",
 		"verts": 137150,
@@ -46,31 +46,13 @@ const ALL := {
 		"usable": true,
 	},
 	"evo_v": {
-		"scale": 0.995393,
-		"rot_deg": Vector3(-0.0, 0.0, 0.0),
-		"offset": Vector3(-0.0000, 0.2970, 0.0069),
+		"scale": 99.539343,
+		"rot_deg": Vector3(-0.0, -180.0, 0.0),
+		"offset": Vector3(-0.0000, 0.0225, -0.0069),
 		"note": "CP9A, Evo6 body",
 		"verts": 72460,
 		"textured": 85,
 		"usable": true,
-	},
-	"vt_commodore": {
-		"scale": 0.989728,
-		"rot_deg": Vector3(-90.0, -0.0, 0.0),
-		"offset": Vector3(-0.0000, 0.0772, 0.1998),
-		"note": "VT",
-		"verts": 39541,
-		"textured": 14,
-		"usable": true,
-	},
-	"au_falcon": {
-		"scale": 0.010025,
-		"rot_deg": Vector3(-90.0, -0.0, 0.0),
-		"offset": Vector3(-0.0000, 2.3860, 0.6920),
-		"note": "UNUSABLE",
-		"verts": 1026571,
-		"textured": 0,
-		"usable": false,
 	},
 }
 

@@ -22,6 +22,11 @@ extends Node
 ## `_physics_process`.
 var lost: bool = false
 
+## Set when another bridge got here first and this one stopped polling. Not the
+## same thing as `lost`: nothing it was driving has gone away, this one simply
+## has nothing to say.
+var standing_down: bool = false
+
 ## The race being scored. Null is the ordinary state before a race is entered.
 var race: RaceDirector = null
 ## The player's car. Its `engine_rpm` and `throttle` are the whole of what the
@@ -53,6 +58,22 @@ func _ready() -> void:
 		director.name = "AudioDirector"
 		add_child(director)
 	director.set_master_volume(master_volume)
+	_stand_down_duplicate()
+
+
+## A second bridge in the same tree would be a second engine voice and a second
+## poll of the same car, so whoever is second stops. This is not defensive
+## coding: the game wires audio from an autoload, and a host that also builds a
+## bridge in its own `_ready` is making a reasonable choice that must not
+## double the engine.
+func _stand_down_duplicate() -> void:
+	var other := get_tree().root.find_children("*", "AudioBridge", true, false)
+	for n in other:
+		if n != self and n is AudioBridge and not (n as AudioBridge).lost and is_instance_valid((n as AudioBridge).director):
+			push_warning("AudioBridge: a second bridge is already in the tree - this one is standing down.")
+			set_physics_process(false)
+			standing_down = true
+			return
 
 
 ## Physics rate, not the render rate: rpm is drivetrain state and the lights are
@@ -68,16 +89,25 @@ func _physics_process(_delta: float) -> void:
 	# Null is not a fault. The bridge is in the tree for the whole session and
 	# there is no race on screen until one is entered and no car until one is
 	# spawned, so a frame with nothing to read is most frames of a normal game.
-	if lost or race == null or car == null:
+	# A `lost` slot is the other thing: something that was here is gone, and that
+	# is a fault, and everything downstream stays quiet until it is handed a
+	# replacement.
+	if lost:
 		return
-	director.set_lights(race.lights)
-	# `throttle` is the engine's load: the demand the driver is putting through
-	# the drivetrain, already a 0..1 fraction, and the number the tyre model
-	# turns into torque. Nothing is smoothed on the way in - the synth puts
-	# every parameter it is handed through a one-pole, which is what the noise
-	# on rpm arriving at 60 Hz needs, and a second filter in here would only
-	# delay the pitch by the same amount it was meant to remove the noise from.
-	director.set_engine(car.engine_rpm, car.throttle)
+	# Each half needs only its own half of the world. The lights are race state
+	# and the engine is car state, and gating them on each other mutes an engine
+	# that is running: a car on the grid before a race director exists idles,
+	# and a countdown with a car and no director still counts down.
+	if race != null:
+		director.set_lights(race.lights)
+	if car != null:
+		# `throttle` is the engine's load: the demand the driver is putting through
+		# the drivetrain, already a 0..1 fraction, and the number the tyre model
+		# turns into torque. Nothing is smoothed on the way in - the synth puts
+		# every parameter it is handed through a one-pole, which is what the noise
+		# on rpm arriving at 60 Hz needs, and a second filter in here would only
+		# delay the pitch by the same amount it was meant to remove the noise from.
+		director.set_engine(car.engine_rpm, car.throttle)
 
 
 ## A slot that was filled and is now invalid. A slot that was never filled is not

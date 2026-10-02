@@ -35,6 +35,7 @@ func _initialize() -> void:
 	_check_engine_signal()
 	_check_engine_guards()
 	_check_cues()
+	await _check_wired()
 	await _check_api()
 	_report()
 
@@ -44,7 +45,7 @@ func _initialize() -> void:
 func _check_buses() -> void:
 	AudioBuses.ensure()
 	_ok(AudioBuses.index_of(AudioBuses.MASTER) == 0, "the layout has a Master bus")
-	for bus in [AudioBuses.MUSIC, AudioBuses.SFX, AudioBuses.ENGINE]:
+	for bus in [AudioBuses.MUSIC, AudioBuses.SFX, AudioBuses.ENGINE, AudioBuses.AMBIENCE]:
 		_ok(AudioBuses.has_bus(bus), "%s bus exists" % bus)
 		_ok(AudioServer.get_bus_send(AudioBuses.index_of(bus)) == AudioBuses.MASTER,
 				"%s routes to Master" % bus)
@@ -83,6 +84,12 @@ func _check_buses() -> void:
 func _check_engine_signal() -> void:
 	var idle := EngineSynth.new()
 	var hot := EngineSynth.new()
+	# The synth does not run until something starts it - `EngineVoice` is what
+	# does that, and it is what the director asks. A bare `new()` renders
+	# silence, which is the point of the default, and would make everything below
+	# a test of nothing at all.
+	idle.set_running(true)
+	hot.set_running(true)
 	idle.set_engine(EngineSynth.IDLE_RPM, 0.0)
 	hot.set_engine(EngineSynth.REDLINE, 1.0)
 	var a := _settled(idle, 0.35, 0.25)
@@ -115,13 +122,18 @@ func _check_engine_signal() -> void:
 
 	# Same inputs, same samples: the noise is a fixture, so a check can compare
 	# two renders exactly instead of fuzzily.
-	var twin_a := _settled(EngineSynth.new(), 0.05, 0.05)
-	var twin_b := _settled(EngineSynth.new(), 0.05, 0.05)
+	# Running synths, not silent ones - determinism of nothing is trivial - and
+	# two separate instances, because what is being claimed is that the synth
+	# generates the same signal from the same state, not that it can be reset
+	# back to that state.
+	var twin_a := _running_synth(0.05, 0.05)
+	var twin_b := _running_synth(0.05, 0.05)
 	_eq(twin_a, twin_b, "the synth is deterministic")
 
 
 func _check_engine_guards() -> void:
 	var s := EngineSynth.new()
+	s.set_running(true)
 	# What a car actually hands over on the first frame of a race, and what a
 	# divide-by-zero in the driving code hands over a moment later.
 	s.set_engine(0.0, 0.0)
@@ -143,6 +155,7 @@ func _check_engine_guards() -> void:
 	# The no-pop guarantee, stated as a test: an engine that jumps from idle to
 	# redline in one frame is a car changing gear at 9000, not a click.
 	var ramp := EngineSynth.new()
+	ramp.set_running(true)
 	ramp.set_engine(EngineSynth.IDLE_RPM, 0.1)
 	_settled(ramp, 0.3, 0.0)
 	ramp.set_engine(EngineSynth.REDLINE, 1.0)
@@ -186,6 +199,237 @@ func _check_cues() -> void:
 	_ok(AudioCues.stream("go").data != AudioCues.stream("count_1").data, "GO is a different sound from the lights")
 
 	_ok(AudioCues.stream("go") == go, "a stream is cached rather than rebuilt on every cue")
+
+
+# --------------------------------------------------------------------- wired
+
+## The service as the game runs it: one autoload, started before the first frame,
+## with nothing handed to it. Everything above is synthesis in a vacuum; this is
+## the part that decides whether anyone hears it.
+##
+## Runs after a frame, because an autoload\'s `_ready` is not called until the
+## tree starts iterating: inside `_initialize` the node is in the tree and not
+## ready yet, which is the same trap as any callback that fires too early.
+func _check_wired() -> void:
+	# One frame, to let the tree start: see the note above.
+	await process_frame
+	var service := AudioService.instance
+	_ok(service != null, "the service is registered, so nothing has to find it")
+	if service == null:
+		return
+	_ok(root.get_node_or_null("Audio") == service,
+			"as an autoload called Audio, so it exists before the main scene does")
+	_ok(service.bridge != null, "with a bridge to hand the race and the car over")
+
+	var director := service._director()
+	_ok(director != null, "and a director of its own to play cues through")
+	if director == null:
+		return
+
+	# The mix it asks for, with the buses up.
+	for bus in AudioService.MIX:
+		var name := String(bus)
+		_ok(AudioBuses.has_bus(name), "the mix bus %s is in the layout" % name)
+		_ok(not AudioBuses.is_muted(name), "%s is not muted" % name)
+		_ok(absf(AudioBuses.volume(name) - float(AudioService.MIX[bus])) < 0.01,
+				"%s sits where the mix puts it  (%.2f, want %.2f)" % [
+					name, AudioBuses.volume(name), float(AudioService.MIX[bus])])
+
+	# Two beds playing from the first frame, and a tyre voice that is playing and
+	# silent: a loop that starts when the player wants to hear it is a loop that
+	# clicks on the way in.
+	var expected := {"Bed_Music": AudioBuses.MUSIC, "Bed_Night": AudioBuses.AMBIENCE,
+			"Bed_Tyre": AudioBuses.SFX}
+	for node_name in expected:
+		var bed := service.get_node_or_null(node_name) as AudioStreamPlayer
+		_ok(bed != null, "%s exists" % node_name)
+		if bed == null:
+			continue
+		_ok(bed.playing, "%s is playing  (%s)" % [node_name, str(bed.playing)])
+		_ok(bed.bus == String(expected[node_name]), "%s is on its own bus  (%s)" % [node_name, bed.bus])
+		var wav := bed.stream as AudioStreamWAV
+		_ok(wav != null, "%s carries a WAV" % node_name)
+		if wav == null:
+			continue
+		_ok(wav.loop_mode != AudioStreamWAV.LOOP_DISABLED, "%s loops" % node_name)
+		_ok(wav.loop_begin == 0 and wav.loop_end == wav.data.size() / 2,
+				"%s loops over the whole buffer  (%d..%d of %d)" % [
+					node_name, wav.loop_begin, wav.loop_end, wav.data.size() / 2])
+		# The loop point is the one splice in a looped stream between two samples
+		# that never met, so it is the one that clicks.
+		var v := _decode(wav)
+		_ok(v.size() > 2, "%s has samples to splice" % node_name)
+		_ok(_peak(v) > AUDIBLE, "%s is not silence  (peak %.3f)" % [node_name, _peak(v)])
+		_ok(absf(v[v.size() - 1] - v[0]) < MAX_STEP,
+				"%s joins its tail to its head without a click  (%.4f, want < %.2f)" % [
+					node_name, absf(v[v.size() - 1] - v[0]), MAX_STEP])
+			# Player level plus bus level, in dB. The point is the sum: a bed playing
+		# at -3 dB on a muted bus is silence. The tyre bed is deliberately not in
+		# here - it is meant to be silent until the tyres are abused.
+		if node_name != "Bed_Tyre":
+			var chain := bed.volume_db + AudioBuses.volume_db(bed.bus)
+			_ok(chain > -40.0, "%s arrives above the noise floor  (%.1f dB)" % [node_name, chain])
+	_fails(AudioBeds.stream("music").data == AudioBeds.stream("night").data,
+			"the music and the night are not the same loop")
+
+	var tyre := service.get_node_or_null("Bed_Tyre") as AudioStreamPlayer
+	_ok(tyre != null and tyre.volume_db <= AudioBuses.SILENCE_DB + 0.001,
+			"and the tyre voice stays silent until a tyre is abused  (%.1f dB)" % [
+				0.0 if tyre == null else tyre.volume_db])
+
+	# The engine voice follows the car, and the cylinders are what the sound is
+	# made of: a six and a four idle 13 Hz apart and you hear which one it is.
+	for id in CarDB.ALL_IDS:
+		_ok(AudioService.CYLINDERS.has(id), "%s has a cylinder count" % id)
+	var four: CarBody = await _car("kairo_s13")
+	var six: CarBody = await _car("shinobi_rs")
+	_ok(four != null and six != null, "two cars to change between")
+	var synth := director.engine_synth() as EngineSynth
+	_ok(synth != null, "the engine voice lives on the director, which the car drives")
+	var voice := director.find_child("EngineVoice", true, false) as EngineVoice
+	_ok(voice != null and voice.bus == AudioBuses.ENGINE, "and it plays onto the Engine bus")
+	_ok(service.bridge.director == director, "the bridge is driving this same one")
+	if four != null:
+		service.set_car(four)
+		_ok(synth != null and synth.cylinders == int(AudioService.CYLINDERS["kairo_s13"]),
+				"a four is four cylinders  (%d)" % [0 if synth == null else synth.cylinders])
+		_ok(four.contact_monitor, "and a contact monitor, without which no impact is reported")
+		_ok(four.max_contacts_reported > 0, "reporting contacts  (%d)" % four.max_contacts_reported)
+		_ok(four.body_entered.is_connected(service._on_impact), "and an impact listener")
+	if six != null:
+		service.set_car(six)
+		_ok(synth != null and synth.cylinders == int(AudioService.CYLINDERS["shinobi_rs"]),
+				"so swapping to a six is six cylinders  (%d)" % [0 if synth == null else synth.cylinders])
+
+	# Slip is read from the contact patches and not from the body\'s attitude: a
+	# big slide with the rears barely moving is a drift, and a drift is not a squeal.
+	var car: CarBody = six if six != null else four
+	if car != null:
+		var resting := service._slip(car)
+		_slide(car, 1.0)
+		var sliding := service._slip(car)
+		_reset(car)
+		_ok(resting <= 0.01, "a car on its wheels is quiet  (slip %.3f)" % resting)
+		_ok(sliding > 0.9, "and a fully sliding one squeals  (slip %.3f)" % sliding)
+		_fails(sliding == resting, "so slip is not a constant")
+		_ok(service._tyre_db(sliding) > service._tyre_db(resting) + 10.0,
+				"and the squeal is the louder of the two  (%.1f dB vs %.1f dB)" % [
+					service._tyre_db(sliding), service._tyre_db(resting)])
+		# Measured, not assumed: a floor under the tyre voice meant a parked car
+		# squealed continuously at -40 dB, which is a noise nobody asked for and
+		# nobody can turn off. The gap between "silent" and "a squeal" is a slew
+		# rate rather than a level, and that is what keeps the onset from being a
+		# click on the one frame a tyre noise is allowed to be heard.
+		_ok(service._tyre_db(resting) == AudioBuses.SILENCE_DB,
+				"and silent at rest  (%.1f dB)" % service._tyre_db(resting))
+		_ok(service._tyre_db(0.0) == AudioBuses.SILENCE_DB,
+				"including at no slip at all  (%.1f dB)" % service._tyre_db(0.0))
+		_ok(service._tyre_db(0.5) > AudioBuses.SILENCE_DB + 20.0,
+				"while half a slide is still a squeal  (%.1f dB)" % service._tyre_db(0.5))
+		_ok(AudioService.TYRE_SLEW_DB > 0.0 and AudioService.TYRE_SLEW_DB <= 12.0,
+				"and the slew rate is the one a tyre noise can open with  (%.1f dB a frame)" % [
+						AudioService.TYRE_SLEW_DB])
+
+		# An impact is a crash at speed and a bump at walking pace, and a scrape is
+		# one thump rather than a stream of them.
+		var played := director.cues_played
+		car.speed_kph = 4.0
+		service._on_impact(null)
+		_eq(director.cues_played, played, "a nudge is not an impact")
+		car.speed_kph = 60.0
+		service._on_impact(null)
+		_eq(director.last_cue, "hit", "a contact at 60 kph is a hit")
+		_eq(director.cues_played, played + 1, "and it is heard once")
+		service._on_impact(null)
+		_eq(director.cues_played, played + 1, "a scrape is one hit, not a stream of them")
+		_ok(service._impact_db() < 0.0, "louder the faster it was  (%.1f dB)" % service._impact_db())
+		service._impact_lock = 0.0
+		car.speed_kph = 90.0
+		_ok(service._impact_db() > -0.01, "up to a flat wall  (%.1f dB)" % service._impact_db())
+
+		# A gear change is the one cue that happens on a car\'s own, so it is
+		# stepped through the same per-frame call the game uses. The first call is
+		# the one that picks the car up and notes the gear it is already in.
+		car.current_gear = 1
+		service._physics_process(1.0 / 60.0)
+		var before_shift := director.cues_played
+		car.current_gear = 2
+		car.engine_rpm = 3000.0
+		service._physics_process(1.0 / 60.0)
+		_eq(director.last_cue, "shift", "a gear change shifts")
+		service._physics_process(1.0 / 60.0)
+		_eq(director.cues_played, before_shift + 1, "and once for a gear held")
+
+	# A UI click needs nothing but the service.
+	var ui_played := director.cues_played
+	service._on_ui()
+	_eq(director.last_cue, "ui_ok", "a UI press clicks")
+	_eq(director.cues_played, ui_played + 1, "and it is one cue")
+
+	# The click wiring attaches by name, and the menus are built by the host's
+	# `_ready` long after this one, so a signal that gets renamed leaves three
+	# silent no-ops rather than an error. Asked of the script rather than of an
+	# instance: standing up a real MenuFlow to check its signal list is a whole
+	# screen stack for a reflection.
+	var flow_script := load("res://UI/menu_flow.gd") as GDScript
+	var has_signal := {}
+	for sig in flow_script.get_script_signal_list():
+		has_signal[sig["name"]] = true
+	for host_signal in AudioService.HOST_CLICKS:
+		_ok(has_signal.has(host_signal), "%s is a signal MenuFlow has" % host_signal)
+	var has_method := {}
+	for method in flow_script.get_script_method_list():
+		has_method[method["name"]] = true
+	_ok(has_method.has("screen_name"),
+			"and screen_name is how the service notices the screen changed")
+
+	# Every car builds a director for its own engine and each registers itself as
+	# the static. Drive the car through that static and the engine is played by
+	# whichever car was built last, which is inaudible until there are two.
+	var rogue := AudioDirector.new()
+	rogue.name = "AudioRogue"
+	root.add_child(rogue)
+	await process_frame
+	await process_frame
+	_ok(AudioDirector.instance == rogue, "so a second director does register itself")
+	_ok(director != rogue, "and the service does not hand its car to it")
+	for child in rogue.get_children():
+		if child is AudioStreamPlayer:
+			child.stop()
+	rogue.queue_free()
+	await create_timer(0.25).timeout
+
+	for node in [four, six]:
+		if node != null and is_instance_valid(node):
+			node.queue_free()
+	await create_timer(0.25).timeout
+
+
+## A car with nothing under it: the voice and the wheels are what is under test,
+## and a body with no world to hit still reports its wheels.
+func _car(id: String) -> CarBody:
+	var car := CarBody.new()
+	car.name = "AudioCheck_" + id
+	car.spec = CarDB.get_spec(id)
+	car.build_visual = false
+	root.add_child(car)
+	await process_frame
+	return car
+
+
+## Puts every wheel into a slide without moving the car, so the mapping can be
+## measured on a body that is parked on a world with no tarmac.
+func _slide(car: CarBody, amount: float) -> void:
+	for w in car.wheels():
+		w["load"] = 400.0
+		w["sr_smooth"] = amount
+
+
+func _reset(car: CarBody) -> void:
+	for w in car.wheels():
+		w["load"] = 0.0
+		w["sr_smooth"] = 0.0
+		w["slip_angle"] = 0.0
 
 
 # ------------------------------------------------------------------- the API
@@ -236,7 +480,6 @@ func _check_api() -> void:
 	d.set_bus_volume("no_such_bus", 0.25)
 	d.set_bus_muted(AudioBuses.MUSIC, true)
 	d.set_bus_muted(AudioBuses.MUSIC, false)
-	d.stop_engine()
 	await process_frame
 	await process_frame
 
@@ -249,6 +492,13 @@ func _check_api() -> void:
 	_ok(voice != null and voice.bus == AudioBuses.ENGINE, "on the Engine bus")
 	_ok(AudioBuses.is_muted(AudioBuses.MUSIC) == false, "and the bus layout is still intact after all of that")
 	_ok(AudioBuses.index_of(AudioBuses.ENGINE) >= 0, "including the Engine bus")
+
+	# The stop, last, because it is now a real one: the voice is put down rather
+	# than faded, so anything that wants a running engine has to have asked
+	# while it was still running.
+	d.stop_engine()
+	await process_frame
+	_fails(voice != null and voice.sounding(), "and stopping the engine puts the voice down, not just quiet")
 
 	# The countdown hook, on a director that has not seen a light yet: a race
 	# director sits at 0 on the grid, and that must not be a GO.
@@ -300,6 +550,15 @@ func _settled(s: EngineSynth, settle: float, secs: float) -> PackedFloat32Array:
 	out.resize(int(secs * s.mix_rate))
 	s.render(out)
 	return out
+
+
+## A settled render from a synth that is actually running. A bare `EngineSynth`
+## does not run until something starts it, which is what `EngineVoice` does for
+## the one in the game - so a check that wants signal has to ask for it.
+func _running_synth(settle: float, secs: float) -> PackedFloat32Array:
+	var s := EngineSynth.new()
+	s.set_running(true)
+	return _settled(s, settle, secs)
 
 
 func _rms(buf: PackedFloat32Array) -> float:

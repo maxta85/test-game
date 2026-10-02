@@ -13,8 +13,8 @@ extends RefCounted
 ## the live tree. Nothing here is satisfied by a `class_name` sitting in
 ## `.godot/global_script_class_cache.cfg` - every merged subsystem has one and
 ## not one of them runs, which is exactly the trap that hid the UI problem.
-## A subsystem counts as shipped only when a node carrying its script is really
-## in the tree, having really had `_ready` run.
+## A subsystem counts as shipped only when a node carrying its script, or a node
+## the subsystem named, is really in the tree, having really had `_ready` run.
 ##
 ## NOT_SHIPPED is a to-do list, not an amnesty. Each entry prints a named
 ## decision, and if the subsystem ever does get wired the entry fails until
@@ -30,10 +30,11 @@ extends RefCounted
 ## The digit sorts ahead of every letter and `./test.sh reachability` still
 ## finds it, so the name carries the constraint without costing ergonomics.
 
-## Subsystems the game ships. Every one is wired in `Game/main.gd`; delete the
-## line that constructs it and this suite goes red while that subsystem's own
-## unit tests carry on passing, because those tests build their own copies.
-## `script` must be attached to a live node in the booted scene.
+## Subsystems the game ships, witnessed by the script attached to a live node.
+## Every one is wired in `Game/main.gd`; delete the line that constructs it and this
+## suite goes red while that subsystem's own unit tests carry on passing, because those
+## tests build their own copies. `script` must be attached to a live node in the booted
+## scene. The geometry-returning entry points are in SHIPPED_GEOMETRY below.
 const SHIPPED := [
 	{"id": "world builder", "script": "res://World/world_builder.gd"},
 	{"id": "night environment", "script": "res://World/night_env.gd"},
@@ -54,32 +55,41 @@ const SHIPPED_ON_DEMAND := [
 	{"id": "garage screen", "script": "res://Systems/garage/garage_screen.gd"},
 ]
 
+## Shipped subsystems whose entry point is a static function returning geometry
+## rather than a node of its own, so no script is ever attached to a live node.
+##
+## `nodes` are the node names the subsystem leaves in the tree. `ArtKitScatter.attach()`
+## names its own root `ArtKitScatter` before populating, and `OSMBuildings.build()`
+## parents one mesh per material tint into WorldBuilder - so in both cases the emitted
+## node names are the only honest witness, and a `class_name` in the global class cache
+## is not.
+const SHIPPED_GEOMETRY := [
+	{
+		"id": "artkit",
+		"module": "res://artkit/scatter.gd",
+		"nodes": ["ArtKitScatter"],
+		"why": "ArtKitScatter.attach() from WorldBuilder._buildings() fills the frontages OSM left unmapped",
+	},
+	{
+		"id": "osm buildings",
+		"module": "res://World/osm_buildings.gd",
+		"nodes": ["WindowWarm", "WindowCool"],
+		"why": "OSMBuildings.build() from WorldBuilder._buildings() replaces the invented boxes",
+	},
+]
+
 ## Merged, tested, and deliberately not reachable from the entry point.
 ##
 ## `module` is the file that has to still exist - it catches an entry left
 ## behind by a deletion. `scripts` are the scripts that would appear on a live
 ## node once wired. `nodes` are node names, for the subsystems whose entry point
-## is a static function that returns geometry rather than a node of its own:
-## `OSMBuildings.build()` parents named meshes into WorldBuilder and never
-## instantiates itself, so the emitted node names are the only honest witness.
+## is a static function that returns geometry rather than a node of its own.
 const NOT_SHIPPED := [
-	{
-		"id": "osm buildings",
-		"module": "res://World/osm_buildings.gd",
-		"nodes": ["WindowWarm", "WindowCool"],
-		"why": "95e3fa2 extracted 2198 real footprints; WorldBuilder._buildings() still invents its own boxes",
-	},
 	{
 		"id": "osm water",
 		"module": "res://World/osm_water.gd",
 		"scripts": ["res://Systems/water/water_surface.gd"],
 		"why": "fc491b2 water is not one of WorldBuilder.build()'s 14 steps; OSMWater.surface() returns a WaterSurface",
-	},
-	{
-		"id": "audio",
-		"module": "res://Audio/audio_director.gd",
-		"scripts": ["res://Audio/audio_director.gd", "res://Audio/audio_bridge.gd"],
-		"why": "AudioDirector is a Node but no autoload and no main.gd line constructs one",
 	},
 	{
 		"id": "traffic",
@@ -221,6 +231,12 @@ func _interrogate(entry: Node, t: TestHarness) -> void:
 		t.ok(_live.has(s["script"]),
 			"shipped: %s is instantiated by the entry point (%s)" % [s["id"], s["script"]])
 
+	for g in SHIPPED_GEOMETRY:
+		_assert_shipped_geometry(g, t)
+
+	for n in NOT_SHIPPED:
+		_assert_not_shipped(n, t)
+
 
 ## The second pass, once the garage has been asked for. NOT_SHIPPED is only an
 ## honest list at a point where every route into the game has been walked, so it
@@ -232,6 +248,18 @@ func _interrogate_late(_entry: Node, t: TestHarness) -> void:
 
 	for n in NOT_SHIPPED:
 		_assert_not_shipped(n, t)
+
+
+## Same honesty as the SHIPPED table, witnessed by node names because the subsystem
+## is a static function and never becomes a node itself.
+func _assert_shipped_geometry(entry: Dictionary, t: TestHarness) -> void:
+	var id: String = entry["id"]
+	t.ok(ResourceLoader.exists(entry["module"]),
+		"shipped module on disk: %s (%s)" % [id, entry["module"]])
+	var present := _witnesses_present(entry)
+	t.ok(not present.is_empty(),
+		"shipped: %s is built by the entry point (%s) - %s"
+		% [id, ", ".join(entry["nodes"]), entry["why"]])
 
 
 func _assert_not_shipped(entry: Dictionary, t: TestHarness) -> void:
