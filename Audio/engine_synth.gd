@@ -119,6 +119,14 @@ func load() -> float:
 	return _load
 
 
+## Smoothed rpm, revs per minute. The other half of `load`, and the reason a
+## caller holding a voice can read the engine without reaching past it: `load`
+## was already here and rpm was not, which made every check that wanted "what is
+## it turning over" reach into the private field instead.
+func rpm() -> float:
+	return _rpm
+
+
 func reset() -> void:
 	_target_rpm = IDLE_RPM
 	_target_load = 0.0

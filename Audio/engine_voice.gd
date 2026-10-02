@@ -131,3 +131,22 @@ func queued_frames() -> int:
 	# `_playback` is nulled when the player is put down, so this is zero from the
 	# moment the voice stops holding a ring - no separate `_sounding` test needed.
 	return 0 if _playback == null else _playback.get_frames_available()
+
+
+## The revs the voice is sounding, after the synth's own smoothing. Read-only
+## and additive: the fade, the tail budget and `_sounding` above are t37's and
+## nothing here touches them.
+##
+## It exists because the voice is what the rest of the game holds. `AudioService`
+## finds this class by name to stop it at teardown, and a bridge check asks
+## whether a throttle change arrived by asking the voice - so both have to get
+## the answer without reaching through to `synth` themselves.
+func sounding_rpm() -> float:
+	return synth.rpm()
+
+
+## The load the voice is sounding, 0..1, and the other half of the throttle: a
+## car can be at the same revs on the throttle and off it, and those are two
+## different sounds.
+func sounding_load() -> float:
+	return synth.load()

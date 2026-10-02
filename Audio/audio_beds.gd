@@ -94,6 +94,37 @@ static func _gate(phase: float) -> float:
 static var _cache: Dictionary = {}
 
 
+## A silent stand-in for a bed: the same shape as the bed it stands in for -
+## same length, same rate, same loop points, every sample zero - and nothing
+## else. What the music channel measures while a check runs, so a check on the
+## music bus is measuring the channel rather than the owner's soundtrack.
+##
+## Deliberately not a `RECIPES` entry. `Tests/test_sound.gd:350` walks the bank
+## and demands a `Bed_<name>` player running every recipe in it, and
+## `audio_check.gd:262` demands every bed be non-silent: a placeholder in the
+## bank would be a recipe that is silent, played by a bed, which is the exact
+## contradiction both of those checks exist to prevent. So the placeholder is
+## available to ask for and never something the bank promises.
+static func placeholder(name: String) -> AudioStreamWAV:
+	if not RECIPES.has(name):
+		return null
+	var recipe: Dictionary = RECIPES[name]
+	var n := int(float(recipe["dur"]) * float(MIX_HZ))
+	var wav := AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = MIX_HZ
+	wav.stereo = false
+	# `resize` zero-fills, which is the whole point: this is silence by
+	# construction rather than a very quiet noise.
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	wav.data = data
+	wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	wav.loop_begin = 0
+	wav.loop_end = n
+	return wav
+
+
 ## The synthesised, looped stream, or null for a name that is not in the bank.
 static func stream(name: String) -> AudioStreamWAV:
 	if _cache.has(name):
