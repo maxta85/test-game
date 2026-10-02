@@ -84,6 +84,12 @@ func _check_buses() -> void:
 func _check_engine_signal() -> void:
 	var idle := EngineSynth.new()
 	var hot := EngineSynth.new()
+	# The synth does not run until something starts it - `EngineVoice` is what
+	# does that, and it is what the director asks. A bare `new()` renders
+	# silence, which is the point of the default, and would make everything below
+	# a test of nothing at all.
+	idle.set_running(true)
+	hot.set_running(true)
 	idle.set_engine(EngineSynth.IDLE_RPM, 0.0)
 	hot.set_engine(EngineSynth.REDLINE, 1.0)
 	var a := _settled(idle, 0.35, 0.25)
@@ -116,13 +122,18 @@ func _check_engine_signal() -> void:
 
 	# Same inputs, same samples: the noise is a fixture, so a check can compare
 	# two renders exactly instead of fuzzily.
-	var twin_a := _settled(EngineSynth.new(), 0.05, 0.05)
-	var twin_b := _settled(EngineSynth.new(), 0.05, 0.05)
+	# Running synths, not silent ones - determinism of nothing is trivial - and
+	# two separate instances, because what is being claimed is that the synth
+	# generates the same signal from the same state, not that it can be reset
+	# back to that state.
+	var twin_a := _running_synth(0.05, 0.05)
+	var twin_b := _running_synth(0.05, 0.05)
 	_eq(twin_a, twin_b, "the synth is deterministic")
 
 
 func _check_engine_guards() -> void:
 	var s := EngineSynth.new()
+	s.set_running(true)
 	# What a car actually hands over on the first frame of a race, and what a
 	# divide-by-zero in the driving code hands over a moment later.
 	s.set_engine(0.0, 0.0)
@@ -144,6 +155,7 @@ func _check_engine_guards() -> void:
 	# The no-pop guarantee, stated as a test: an engine that jumps from idle to
 	# redline in one frame is a car changing gear at 9000, not a click.
 	var ramp := EngineSynth.new()
+	ramp.set_running(true)
 	ramp.set_engine(EngineSynth.IDLE_RPM, 0.1)
 	_settled(ramp, 0.3, 0.0)
 	ramp.set_engine(EngineSynth.REDLINE, 1.0)
@@ -468,7 +480,6 @@ func _check_api() -> void:
 	d.set_bus_volume("no_such_bus", 0.25)
 	d.set_bus_muted(AudioBuses.MUSIC, true)
 	d.set_bus_muted(AudioBuses.MUSIC, false)
-	d.stop_engine()
 	await process_frame
 	await process_frame
 
@@ -481,6 +492,13 @@ func _check_api() -> void:
 	_ok(voice != null and voice.bus == AudioBuses.ENGINE, "on the Engine bus")
 	_ok(AudioBuses.is_muted(AudioBuses.MUSIC) == false, "and the bus layout is still intact after all of that")
 	_ok(AudioBuses.index_of(AudioBuses.ENGINE) >= 0, "including the Engine bus")
+
+	# The stop, last, because it is now a real one: the voice is put down rather
+	# than faded, so anything that wants a running engine has to have asked
+	# while it was still running.
+	d.stop_engine()
+	await process_frame
+	_fails(voice != null and voice.sounding(), "and stopping the engine puts the voice down, not just quiet")
 
 	# The countdown hook, on a director that has not seen a light yet: a race
 	# director sits at 0 on the grid, and that must not be a GO.
@@ -532,6 +550,15 @@ func _settled(s: EngineSynth, settle: float, secs: float) -> PackedFloat32Array:
 	out.resize(int(secs * s.mix_rate))
 	s.render(out)
 	return out
+
+
+## A settled render from a synth that is actually running. A bare `EngineSynth`
+## does not run until something starts it, which is what `EngineVoice` does for
+## the one in the game - so a check that wants signal has to ask for it.
+func _running_synth(settle: float, secs: float) -> PackedFloat32Array:
+	var s := EngineSynth.new()
+	s.set_running(true)
+	return _settled(s, settle, secs)
 
 
 func _rms(buf: PackedFloat32Array) -> float:

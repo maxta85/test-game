@@ -136,6 +136,9 @@ func _exit_tree() -> void:
 		_owned.stop_engine()
 		var voice := _owned.find_child("EngineVoice", true, false) as EngineVoice
 		if voice != null:
+			# A hard stop, not the voice's own: at teardown there is no next
+			# frame for a fade-out to finish in, and a ring that outlives the
+			# process is a warning rather than a sound.
 			voice.stop()
 			voice.stream = null
 	for bed in [_music, _night, _tyre]:
@@ -180,8 +183,11 @@ func _physics_process(delta: float) -> void:
 		# Nothing to drive means nothing to hear. A voice left on is an engine
 		# holding the revs the car had when it was freed and a tyre squealing at
 		# full level forever, which is the same dead sound as one that never
-		# starts: measured at -20 dB on the engine bus with no car in the world,
-		# and the squeal stayed at -40 dB after the car went.
+		# starts. Both of those are `EngineVoice.set_sounding` and `_slip_to`'s
+		# problem rather than this branch's: the engine's fade used to be asked
+		# for here and then left to a generator ring nobody was emptying, so the
+		# Engine bus measured -20 dB with no car in the world and was still
+		# there 4000 frames after one was freed.
 		_director().stop_engine()
 		_slip_to(0.0)
 		return
