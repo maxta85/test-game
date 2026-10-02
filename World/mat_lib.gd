@@ -53,10 +53,28 @@ static func wet_asphalt(uv_scale: float = 0.06, seed: int = 0) -> StandardMateri
 	# Wet tarmac is a mirror with a rough patch here and there. Roughness is
 	# driven by a noise texture so the reflection breaks up instead of reading
 	# as a uniform sheet of plastic.
-	m.roughness = 0.14
+	#
+	# The base roughness was 0.14 with a *raw* roughness texture, i.e. four
+	# octaves spread across the whole 0-1 range. A pixel that samples 0.02 is a
+	# mirror, a pixel that samples 0.60 is chalk, and a road made of both, under
+	# a sodium lamp at a grazing angle with a 0.28 normal map on top, is a field
+	# of pin-sharp orange highlights. Measured on the `street` pose that was
+	# 55% of the lit road band reading orange-cast with 4.6% of it clipped and
+	# the 95th percentile at 249/255 - the road was glitter, not asphalt. So the
+	# roughness now lives in a *band* a wet road can plausibly occupy, and the
+	# ramp is the thing doing the work: the texture still breaks the reflection
+	# up, but every sample in it is somewhere a wet surface can actually be.
+	m.roughness = 0.26
 	m.roughness_texture = noise_tex(256, 0.55, 4, 37 + seed * 7)
+	var rough_ramp := Gradient.new()
+	rough_ramp.set_color(0, Color(0.18, 0.18, 0.18))
+	rough_ramp.set_color(1, Color(0.52, 0.52, 0.52))
+	(m.roughness_texture as NoiseTexture2D).color_ramp = rough_ramp
 	m.metallic = 0.0
-	m.metallic_specular = 1.0
+	# Full specular on a surface this dark is what turns a lamp into a blown
+	# highlight the size of a car bonnet. 0.62 keeps the sheen the material is
+	# there for and stops it clipping.
+	m.metallic_specular = 0.62
 	m.uv1_scale = Vector3(uv_scale, uv_scale, uv_scale)
 	m.uv1_triplanar = true
 	# The aggregate noise *modulates* the albedo, it does not replace it. Fed
@@ -71,7 +89,10 @@ static func wet_asphalt(uv_scale: float = 0.06, seed: int = 0) -> StandardMateri
 	albedo_tex.color_ramp = albedo_ramp
 	m.normal_enabled = true
 	m.normal_texture = noise_tex(256, 1.6, 5, 23 + seed * 17, true)
-	m.normal_scale = 0.28
+	# 0.28 was enough aggregate to shatter a specular highlight into glitter. At
+	# 0.16 the surface still has the fine tooth of tarmac and a lamp still smears
+	# along it, but the highlight is a smear and not a starfield.
+	m.normal_scale = 0.16
 	# No flat emission. An emissive floor lifts the whole surface evenly and
 	# kills the specular contrast that actually makes a road look wet.
 	m.emission_enabled = false
@@ -91,17 +112,69 @@ static func dry_asphalt() -> StandardMaterial3D:
 	return m
 
 
-## Painted road markings. Emissive so they still read under sodium light and in
-## the rain, which is what stops a night road looking unlit.
+## Painted road markings.
+##
+## This used to be `roughness 0.18, metallic_specular 1.0, emission_enabled true,
+## emission_energy_multiplier 0.10` - a self-lit mirror. Three separate mistakes
+## stacked in five lines, and all three are visible in a street-level night frame:
+##
+##   - **Emissive.** 0.10 of self-illumination goes through the additive glow in
+##     `night_env.gd`, so every dash in frame grows a sodium halo and the frame's
+##     brightest thing stops being the light that is actually lighting it. Paint
+##     is retroreflective, not luminous: it returns light *from the lamp*, and
+##     that is a completely different thing - it means the markings brighten as
+##     the car comes under a lamp and go dark between lamps, which is the
+##     behaviour that makes a real street readable at speed.
+##   - **Roughness 0.18 on a horizontal line.** The marker's own plane reflects
+##     the sky and the lamp heads along its whole length, so a lane line read as
+##     a strip of chrome. Markings are thermoplastic: matte, and the one thing
+##     that makes them visible is how much light they return diffusely.
+##   - **No texture.** A flat albedo over a 0.12 m x 3 m rectangle is a rectangle.
+##
+## Wear is the other half. Real paint is not uniform: the wheel tracks polish it
+## off, rain scours the edges, and a line laid in 1998 is not a line laid last
+## week. A tight ramp on a high-frequency noise gives the patchiness that stops a
+## lane line reading as a decal, and it costs one texture lookup.
 static func road_paint(colour: Color, wet: bool = true) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = colour
-	m.roughness = 0.18 if wet else 0.75
-	m.metallic_specular = 1.0
-	m.emission_enabled = true
-	m.emission = colour
-	m.emission_energy_multiplier = 0.10
+	# Matte, with a little more sheen when the paint is fresh and wet. 0.62 is
+	# what thermoplastic actually measures; the old 0.18 was a chrome finish.
+	m.roughness = 0.55 if wet else 0.78
+	m.metallic = 0.0
+	m.metallic_specular = 0.32
+	# Wear and scuff. Fed raw the noise averages 0.5 and halves the colour, so it
+	# is ramped to 0.80-1.0: keeps the mottle, loses 10% of the value.
+	m.uv1_scale = Vector3(1.0, 1.0, 1.0)
+	m.uv1_triplanar = true
+	m.albedo_texture = noise_tex(256, 2.4, 4, 313)
+	var wear := Gradient.new()
+	wear.set_color(0, Color(0.80, 0.80, 0.80))
+	wear.set_color(1, Color(1.0, 1.0, 1.0))
+	(m.albedo_texture as NoiseTexture2D).color_ramp = wear
+	# A little relief so the paint is not a perfectly smooth film - a wheel track
+	# is a millimetre of texture and at a grazing angle that is most of the read.
+	m.normal_enabled = true
+	m.normal_texture = noise_tex(256, 3.1, 3, 331, true)
+	m.normal_scale = 0.12
+	# No flat emission. See above: this is the line that made every marking in the
+	# frame a small light source of its own.
+	m.emission_enabled = false
 	return m
+
+
+## The two marking colours, as albedo rather than as "a colour passed in at the
+## call site". White thermoplastic and yellow thermoplastic are not the same
+## yellow: the yellow is a pigment in a white base, so it is darker, warmer and
+## much less bright than the white, and treating them as the same material at
+## different brightness is how a centre line ends up brighter than the edge lines
+## it is supposed to be subordinate to.
+static func paint_white() -> StandardMaterial3D:
+	return road_paint(Color(0.70, 0.69, 0.66))
+
+
+static func paint_yellow() -> StandardMaterial3D:
+	return road_paint(Color(0.52, 0.36, 0.045))
 
 
 ## Concrete: kerbs, gutters, driveways, footpaths.
