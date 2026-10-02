@@ -115,6 +115,32 @@ func _open_menus() -> void:
 	hud.name = "RaceHUD"
 	add_child(hud)
 	hud.visible = false
+	_wire_audio()
+
+
+## Hand this session's director and car to the audio system, explicitly.
+##
+## The bridge is not built here. `AudioService` is an autoload and makes the
+## bridge in its own `_ready` - before this file's `_ready` runs - because the
+## beds want to be playing from the first frame and the main menu is a night
+## street too. Building a second one from the host would double the engine and
+## the poll of the same car, and the second bridge stands itself down
+## (`AudioBridge._stand_down_duplicate`). So the host's job is the other
+## direction: say what the bridge should be driving.
+##
+## Which is a real improvement over leaving it to discovery. Without this the
+## service finds the director by reflecting `current_scene.get("race")` every
+## physics frame (`AudioService._race`), which is a lookup that silently stops
+## working the moment the host is not `current_scene` - a reparented scene, a
+## test harness, a shot preset - and it fails by having no engine, not by
+## erroring.
+func _wire_audio() -> void:
+	var audio := AudioService.instance
+	if audio == null:
+		return
+	if not audio.has_bridge():
+		push_warning("Audio: no bridge in the tree - this session will be silent.")
+	audio.set_race(race)
 
 
 ## The route the board is holding under `race_id`, as the definition the director
@@ -331,6 +357,12 @@ func _spawn_player_car(spec: CarSpec) -> void:
 		camera.set_car(player_car)
 	if player_controller != null:
 		player_controller.car = player_car
+	# The audio side of the body, handed over here rather than found: this is the
+	# one place the player's body is built, so it is the one place the audio system
+	# is told about it - boot and every garage swap alike, with no second code
+	# path that can be updated and not the first.
+	if AudioService.instance != null:
+		AudioService.instance.set_car(player_car)
 
 
 ## The camera preset name, given as the second value after --shot.
