@@ -206,10 +206,20 @@ func _car_models(t: TestHarness) -> void:
 		return
 	t.ok(model.get_child_count() > 0, "the model is instanced, not an empty node")
 
-	# The scans have their wheels baked in. Leaving the procedural wheels on as
-	# well would draw two sets, one inside the other.
-	t.eq(vis.wheel_nodes().size(), 0,
-		"a modelled car drops its procedural wheels rather than doubling them up")
+	# A modelled car's wheels are lifted back out of the scan and put on the
+	# steer/spin rig - see CarVisual._rig_scanned_wheels - so this used to be
+	# zero, and it being zero was the bug: the wheels were baked into the body
+	# and never turned. Four rigs, and none of them a pair of cylinders sitting
+	# inside the ones the scan already drew.
+	t.eq(vis.wheel_nodes().size(), 4,
+		"a modelled car rigs four wheels instead of leaving them baked in")
+	for w in vis.wheel_nodes():
+		var spin := w["spin"] as Node3D
+		var cylinders := 0
+		for child in spin.get_children():
+			if child is MeshInstance3D and (child as MeshInstance3D).mesh is CylinderMesh:
+				cylinders += 1
+		t.eq(cylinders, 0, "%s %s uses scanned wheel geometry, not a cylinder" % [vis.spec.id, String(w["name"])])
 
 	# The car's origin sits at hub height, so a model fitted to stand on y=0 has
 	# to be lifted by a tyre radius or it sinks into the road.
