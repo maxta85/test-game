@@ -573,7 +573,7 @@ func _case_rear_grip(t: TestHarness, world: Node3D) -> void:
 			spec.rear_grip_scale = gs
 			spec.max_steer = ms
 			# hold the FRONT STEER ANGLE fixed so lock is the only variable
-			var k := 0.64 / ms
+			var k: float = 0.64 / ms
 			var c := CarBody.new()
 			c.build_visual = false
 			c.spec = spec
