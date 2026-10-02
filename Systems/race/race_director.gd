@@ -43,6 +43,22 @@ var race_time: float = 0.0
 ## Cfg autoload, so the game does not have to wire it up. Tests inject a stub.
 var wallet: Object = null
 
+## The rounds this director has run, oldest first, capped at
+## `RoundResult.HISTORY_LIMIT`. Deliberately *not* cleared by `reset()`: a reset is
+## the next entry on the grid, not a new career. `results` below is the race
+## currently on the road and is thrown away; this is what the player has done.
+var _history: Array = []
+var _round_no: int = 0
+## The round being written, so `last_round()` is answerable during the frame
+## `_conclude` runs in without every caller reaching into `results`.
+var _round: RoundResult = null
+## The wallet as it stood when this race's lights went out, i.e. after the entry
+## fee. Read at `start()` rather than at `try_enter()` because `reset()` keeps an
+## entry paid for: a retry goes straight through `start()` with no second charge,
+## and a balance snapshotted at entry would then credit the retry's payout to the
+## first race's fee.
+var _money_before: int = 0
+
 # --- route, rebuilt on every start() -----------------------------------------
 var _pts: Array = []          # Vector2, the route through the junctions
 var _cp: Array = []           # Vector2, the junctions that must be taken in order
@@ -93,6 +109,10 @@ func start(d: RaceDef, graph: RoadGraph, cars: Array) -> bool:
 			"lap": 0,
 			"lap_start": 0.0,
 			"best_lap": 0.0,
+			# Every completed lap, in the order they were banked. `best_lap` alone
+			# cannot tell a driver what they did on the other laps, and a lap timer
+			# that only ever shows the minimum is not a lap timer.
+			"splits": [],
 			"finished": false,
 			"finish_time": -1.0,
 			"pos": 0,
@@ -109,10 +129,14 @@ func start(d: RaceDef, graph: RoadGraph, cars: Array) -> bool:
 	countdown_left = COUNTDOWN_TIME
 	lights = 3
 	state = State.COUNTDOWN
+	_money_before = _balance()
 	return true
 
 
-## Back to the grid for the next race. Keeps the entry paid for.
+## Back to the grid for the next race. Keeps the entry paid for - and keeps the
+## rounds already run. A reset is the next heat, not a new career: clearing the
+## history here is exactly how a player ends a session with a lap time and no
+## record of ever having driven it. `clear_history()` is the deliberate way out.
 func reset() -> void:
 	state = State.IDLE
 	entrants.clear()
@@ -167,6 +191,12 @@ func laps(i: int) -> int:
 
 func best_lap(i: int) -> float:
 	return float(_st[i]["best_lap"])
+
+
+## Every lap entrant `i` has banked this race, in order, in seconds. Empty before
+## the first line crossing, and one short of the lap count for anyone still out.
+func splits(i: int) -> Array:
+	return _st[i]["splits"].duplicate() if i >= 0 and i < _st.size() else []
 
 
 func is_wrong_way(i: int) -> bool:
@@ -224,6 +254,7 @@ func _update_car(i: int) -> void:
 				var lt: float = race_time - float(s["lap_start"])
 				s["lap"] = int(s["lap"]) + 1
 				s["lap_start"] = race_time
+				s["splits"].append(lt)
 				if lt > 0.0 and (float(s["best_lap"]) <= 0.0 or lt < float(s["best_lap"])):
 					s["best_lap"] = lt
 			# A fresh set of checkpoints either way: a crossed line that was not
@@ -336,7 +367,13 @@ func _all_finished() -> bool:
 	return true
 
 
-## Classifies the field and pays the player out.
+## Classifies the field, pays the player out, and writes the round down.
+##
+## The classification itself is unchanged - finishers by time, anyone still out
+## behind them on how far they got. What is new is that the outcome *survives*:
+## `results` is cleared by the next `reset()`, so on its own it is a lap counter.
+## A `RoundResult` is written here and kept, because a race that pays out and
+## leaves no trace is a demo rather than a loop.
 func _conclude() -> void:
 	var order: Array = range(entrants.size())
 	# Finishers by time; anyone still out is behind them on how far they got.
@@ -364,10 +401,126 @@ func _conclude() -> void:
 		})
 
 	var w := _money()
-	if w != null and bool(_st[0]["finished"]):
-		w.add_money(payout_for_position(int(_st[0]["pos"])))
+	# The payout is the player's, and only the player's: the sliding scale exists
+	# to rank a field, and paying a stub rival would be paying a car that does not
+	# exist. The winner's share is stored on every row regardless, because the board
+	# shows the whole scale and a row that reads $0 for a podium finish is a lie.
+	var player_pos: int = int(_st[0]["pos"])
+	var won: bool = bool(_st[0]["finished"])
+	var credit: int = payout_for_position(player_pos) if won else 0
+	if w != null and won:
+		w.add_money(credit)
 		w.record_race(def.id, float(_st[0]["finish_time"]), float(_st[0]["best_lap"]))
+
+	# Read the balance *after* the credit, not before it and not adjusted for it:
+	# the round ends on what the bank actually holds, which is the one figure a
+	# player can check against their own.
+	_write_round(credit, _balance())
 	state = State.FINISHED
+
+
+## Files the round just decided. Every figure is read from the classification that
+## was just built, so the record cannot disagree with `results` about who came in
+## where - the two are written from one pass, not derived from each other after the
+## fact.
+func _write_round(credit: int, money_after: int) -> void:
+	var r := RoundResult.new()
+	r.round_index = _round_no + 1
+	r.race_id = def.id if def != null else ""
+	r.race_name = def.display_name if def != null else ""
+	r.laps_required = def.laps if def != null else 1
+	r.field_size = entrants.size()
+	r.positions = _round_positions()
+	r.splits = _st[0]["splits"].duplicate()
+	r.best_lap = float(_st[0]["best_lap"])
+	r.finished = bool(_st[0]["finished"])
+	r.fee = def.entry_fee if def != null else 0
+	r.paid = credit
+	r.money_before = _money_before
+	r.money_after = money_after
+	_round_no = r.round_index
+	_round = r
+	_history.append(r)
+	# Oldest out first, so the HUD reads recent form without having to reverse.
+	while _history.size() > RoundResult.HISTORY_LIMIT:
+		_history.pop_front()
+
+
+## The classification as the round records it: one row per car, position 1 first,
+## carrying what that position was worth so the board and the wallet cannot drift.
+func _round_positions() -> Array:
+	var out: Array = []
+	for r in results:
+		var row: Dictionary = r
+		var pos: int = int(row["pos"])
+		var index: int = entrants.find(row["car"])
+		var s: Dictionary = _st[index] if index >= 0 else {}
+		out.append({
+			"pos": pos,
+			"index": index,
+			"car": row["car"],
+			"time": float(row["time"]),
+			"best_lap": float(row["best_lap"]),
+			"laps": int(row["laps"]),
+			"finished": bool(row["finished"]),
+			"progress": float(s.get("progress", 0.0)),
+			"paid": def.payout_for_position(pos, entrants.size()) if def != null else 0,
+		})
+	return out
+
+
+## The rounds run so far, oldest first. A copy: history that a caller can sort in
+## place is history that can be silently reordered.
+func round_history() -> Array:
+	return _history.duplicate()
+
+
+## The round just finished, or null if none has.
+func last_round() -> RoundResult:
+	return _round
+
+
+## How many rounds this director has concluded. Counts from the first race of the
+## session, so a player on their first night is told ROUND 1 and not ROUND 0.
+func round_count() -> int:
+	return _round_no
+
+
+## The best lap any round on this route has produced by the player, or 0.0. Read
+## out of the history rather than off `Cfg`, so it is answerable on a director that
+## was handed a stub wallet - and so "personal best" means something within a
+## session even when nothing is being written to disk.
+func career_best_lap(race_id: String = "") -> float:
+	var best := 0.0
+	for r in _history:
+		var round: RoundResult = r
+		if race_id != "" and round.race_id != race_id:
+			continue
+		if round.best_lap > 0.0 and (best <= 0.0 or round.best_lap < best):
+			best = round.best_lap
+	return best
+
+
+## The balance a race was entered on, after the fee. What the HUD calls the
+## round's starting bank, and what `RoundResult.money_before` was read from.
+func money_before() -> int:
+	return _money_before
+
+
+## The player's finish in the round just concluded, or 0. Reading it off the round
+## rather than off `_st` means a caller cannot get a live position and mistake it
+## for a classified one.
+func last_paid() -> int:
+	return _round.paid if _round != null else 0
+
+
+## Drops the kept rounds. Only a host that means to end the career - a new save, a
+## quit - has any business calling it; `reset()` deliberately does not, because the
+## next race on the grid is the same night.
+func clear_history() -> void:
+	_history.clear()
+	_round = null
+	_round_no = 0
 
 
 ## The wallet defaults to the Cfg autoload, looked up through the scene tree
@@ -382,3 +535,14 @@ func _money() -> Object:
 		return wallet
 	var loop := Engine.get_main_loop()
 	return loop.root.get_node_or_null("Cfg") if loop is SceneTree else null
+
+
+## The wallet's balance, or 0 when there is no wallet at all. `money` rather than
+## `get`: a stub that answers `add_money` and `spend_money` but not `money` is a
+## wallet this director still has to be able to run a race for, so it reads 0
+## rather than throwing in the middle of `_conclude`.
+func _balance() -> int:
+	var w := _money()
+	if w == null or not ("money" in w):
+		return 0
+	return int(w.money)
