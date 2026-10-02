@@ -1,13 +1,18 @@
 # Render performance - BEFORE baseline, and the cost artkit will add
 
-All numbers measured on the render box (RTX 3060, 12 GB, `apiserver`), Vulkan
-forward+, **1280x720**, against `main` at `443010b`. 3 agents share that machine,
-which is the single most important caveat below.
+All numbers measured on the render box (RTX 3060, 12 GB, named by WFOL_SSH_HOST),
+Vulkan forward+, **1280x720**, against `main` at `443010b`. 3 agents share that
+machine, which is the single most important caveat below.
 
 ## How to reproduce
 
+The bench scripts take the box's connection details as required environment
+variables (WFOL_SSH_HOST, WFOL_SSH_USER, WFOL_SSH_PORT, WFOL_SSH_KEY) so that
+nothing about the machine is written down here. Each writes only to its own
+WFOL_REMOTE_DIR, never to a directory another agent shares.
+
 ```bash
-Tools/w3push.sh                       # sync this project to ~/game-w3 (never ~/game)
+Tools/w3push.sh                       # sync this project to $WFOL_REMOTE_DIR
 Tools/bench_run.sh street aerial carhero carfront
 OFF=lights Tools/bench_run.sh aerial   # ablations
 Tools/bench_artkit_run.sh street      # artkit cost, one boot
@@ -30,7 +35,7 @@ time, and its header already says so.
 
 ## Read this before reading any number: the box is shared
 
-w1, w8 and w10 run on `apiserver` at the same time. Between two measurement
+Several agents run on the render box at the same time. Between two measurement
 sessions an hour apart, with the same project and the same preset, the `street`
 preset measured **9.7 ms** and then **8.3 ms**. Nothing changed. p95 frame times
 swing by 10 ms between repeats on their own.
