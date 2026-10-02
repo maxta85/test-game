@@ -26,12 +26,31 @@ extends RefCounted
 const DATA_PATH := "res://assets/maps/cairns_buildings.json"
 
 ## How far a wall has to stay back from a road centreline. WorldBuilder puts the
-## kerb at half_width + 0.5 and the footpath out to half_width + 2.1, so 2.4
+## kerb at half_width + 0.5 and the footpath out to half_width + 2.1, so 2.5
 ## leaves a driveway's width of yard in front of the wall.
+##
+## It is 2.5 and not 2.4 because 2.5 m is the clearance the rest of the world is
+## held to: Tests/test_world.gd asserts that no building collider comes within
+## 2.5 m of a carriageway edge, and a builder that clipped to 2.4 would leave the
+## two disagreeing by 100 mm with nothing to notice. It was 2.4 before collision
+## existed, when "clear of the tarmac" was a rendering concern and 100 mm of yard
+## was invisible.
 ##
 ## Deliberately not read from WorldBuilder: that file is being edited next door,
 ## and a renamed constant there would take this class down with it.
-const CLEARANCE := 2.4
+const CLEARANCE := 2.5
+
+## How far below y=0 a solid collider reaches. The terrain flattens toward zero
+## near roads but not exactly to it, so a wall that starts at 0 leaves a seam the
+## width of the terrain's local height where a car's ray can find no wall.
+const SOLID_FLOOR := -0.30
+## Widest corridor half-width in the map (HIGHWAY, 18 m). Bounding the search
+## rings below needs it: a corridor can never pull the answer in by more than
+## its own half-width.
+const MAX_HALF_W := 9.0
+## Ring cap for `nearest_corridor()`. 64 * 48 m is 3 km of road, so the cap only
+## matters on an empty map.
+const MAX_RINGS := 64
 
 ## Uniform grid over the road edges, so the carriageway test is local work.
 const CELL := 48.0
@@ -120,7 +139,7 @@ static func footprints() -> Array:
 ## shape decided. No geometry, so the test and the world agree on which buildings
 ## exist without either of them having to build anything.
 static func plan(graph: RoadGraph) -> Dictionary:
-	var roads := _road_index(graph)
+	var roads := road_index(graph)
 	var rng := RandomNumberGenerator.new()
 	var kept: Array = []
 	var clipped := 0
@@ -253,6 +272,35 @@ static func build(parent: Node3D, graph: RoadGraph) -> Dictionary:
 	return out
 
 
+# ----------------------------------------------------------------- collision
+
+## Collision for one planned footprint, appended to a shared SurfaceTool.
+##
+## Deliberately the same `_band`/`_cap`/`_pitched` calls `build()` makes, at the
+## same coordinates, with one change: the wall starts at SOLID_FLOOR instead of
+## `lift`. A stilt house's visual wall begins at the floor, with daylight under
+## it, and a collider that began there would be a metre-tall hole you drive
+## through. Everything else is left matching the render on purpose - a collider
+## that does not agree with the thing you can see teaches the player the wrong
+## thing, which is worse than having no collider at all.
+##
+## No node, no material, no ownership: the caller decides which StaticBody3D the
+## triangles end up in, because `Tests/test_osm_buildings.gd::_geometry()`
+## requires every direct child of the build parent to be a Mesh or MultiMesh and
+## a collision node under it would fail that.
+static func solid_geometry(st: SurfaceTool, e: Dictionary) -> void:
+	var ring: PackedVector2Array = e["ring"]
+	var lift: float = e["lift"]
+	var top: float = lift + float(e["wall"])
+	_band(st, ring, SOLID_FLOOR, top)
+	if bool(e["flat"]):
+		_cap(st, ring, top, true)
+	else:
+		_pitched(st, ring, top, float(e["rise"]))
+		# The underside, so a raised house is a closed box rather than a lid.
+		_cap(st, ring, lift, false)
+
+
 # ----------------------------------------------------------------- decisions
 
 static func _is_flat(b: Dictionary) -> bool:
@@ -320,7 +368,12 @@ static func _street_faces(ring: PackedVector2Array, cand: Array, roads: Dictiona
 ## the footprint (see QUERY_PAD), which is what makes the test local work.
 ## `RoadGraph.nearest_road()` is still what settles the footprints that had to be
 ## clipped: see Tests/test_osm_buildings.gd.
-static func _road_index(graph: RoadGraph) -> Dictionary:
+##
+## Public, and `nearest_corridor()` with it, because WorldBuilder has the same
+## question to ask about a thousand ArtKitScatter placements that OSMBuildings
+## asks about 2198 footprints, and it must not be answered by scanning 401 edges
+## a thousand times over.
+static func road_index(graph: RoadGraph) -> Dictionary:
 	var segs: Array = []
 	var grid: Dictionary = {}
 	for e in graph.edges:
@@ -451,6 +504,59 @@ static func _nearest(p: Vector2, cand: Array, roads: Dictionary) -> Dictionary:
 		var d: float = p.distance_to(q)
 		if d < float(best["d"]):
 			best = {"d": d, "point": q, "hw": float(s["hw"]), "seg": j}
+	return best
+
+
+## Nearest corridor anywhere on the map, without being handed a candidate list:
+## `{ d, point, hw, cls, seg }`, where `d` is the distance to that corridor's
+## *centreline*.
+##
+## The winner is the corridor with the smallest `d - hw`, not the smallest `d`.
+## Those are different answers and the difference is a 6 m lane beside an 18 m
+## highway: a point 9.1 m from the lane's centreline is 4.6 m clear of its
+## tarmac and 0.1 m inside the highway's. Picking by `d` reports the first as
+## clear and the car is on the wrong side of the centre line - measured, on a
+## Cairns frontage, as a house the clearance test had passed and the
+## independent check in Tests/test_world.gd had failed by 2.3 m. Every caller
+## here wants "how far inside the tarmac am I", and that is `d - hw`.
+##
+## The search widens outward until the next ring cannot beat what it already
+## has, so the answer is exact rather than "exact for anything within one cell":
+## a cell `ring` cells out is at least `ring * CELL` from the query point, so a
+## corridor in it cannot have a smaller `d - hw` once `ring * CELL - MAX_HALF_W`
+## is already beaten. The first ring alone would be right for narrow roads and
+## wrong exactly where the roads are widest.
+static func nearest_corridor(p: Vector2, roads: Dictionary) -> Dictionary:
+	var segs: Array = roads["segs"]
+	var grid: Dictionary = roads["grid"]
+	var cx := floori(p.x / CELL)
+	var cy := floori(p.y / CELL)
+	var best := {"d": INF, "point": Vector2.ZERO, "hw": 0.0,
+		"cls": RoadGraph.RoadClass.LANE, "seg": -1}
+	var best_gap := INF
+	var ring := 1
+	while ring <= MAX_RINGS:
+		for gx in range(cx - ring, cx + ring + 1):
+			for gy in range(cy - ring, cy + ring + 1):
+				# Only the new boundary; the interior was read by the last ring.
+				if ring > 1 and absi(gx - cx) != ring and absi(gy - cy) != ring:
+					continue
+				for j in grid.get(Vector2i(gx, gy), []):
+					var s: Dictionary = segs[j]
+					var a: Vector2 = s["a"]
+					var b: Vector2 = s["b"]
+					var u := b - a
+					var l2: float = u.length_squared()
+					var t: float = 0.0 if l2 < 1e-9 else clampf((p - a).dot(u) / l2, 0.0, 1.0)
+					var q := a + u * t
+					var d: float = p.distance_to(q)
+					if d - float(s["hw"]) < best_gap:
+						best_gap = d - float(s["hw"])
+						best = {"d": d, "point": q, "hw": float(s["hw"]),
+							"cls": int(s["cls"]), "seg": j}
+		if float(ring) * CELL - MAX_HALF_W >= best_gap:
+			break
+		ring += 1
 	return best
 
 

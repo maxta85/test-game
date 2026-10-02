@@ -21,6 +21,40 @@ const FRONTAGE_OFFSET := 3.0
 ## suburban lot spacing for the block sizes this map actually has.
 const PLOT_PITCH := 22.0
 
+## Side of a solid-geometry bucket, in metres. One trimesh per bucket per family,
+## so the physics broadphase can throw away a quarter of the city without
+## looking at its triangles. Larger than the 160 m road chunk on purpose: the
+## road surface is one flat sheet you drive on and never approach from the side,
+## while a bucket of buildings is approached from every direction and is only
+## worth subdividing until the cells stop beating in the same walk.
+const SOLID_CELL := 240.0
+## How far below y=0 a wall's collider reaches. Mirrors
+## `OSMBuildings.SOLID_FLOOR` and is not read from it, for the same reason that
+## file does not read CLEARANCE from here: two files being edited at once should
+## not be able to take each other down.
+const SOLID_FLOOR := -0.30
+## The clearance every wall in this world is held to, measured from the edge of a
+## carriageway. Matches `OSMBuildings.CLEARANCE`, which the mapped footprints are
+## clipped to, so a car cannot be stopped by a wall on one frontage and pass
+## through the wall on the next. Tests/test_world.gd asserts the invariant from
+## the geometry, not from these two agreeing.
+const BUILDING_CLEARANCE := 2.5
+## The looser clearance a prop is held to. A car stops for a light pole in the
+## footpath and drives through a garden tree, so the two cannot share a number -
+## but neither can be zero, because a bin in the middle of a lane is a car that
+## stops for no visible reason.
+const PROP_CLEARANCE := 1.0
+## Plants a car is meant to drive through. Matched by name, because the geometry
+## cannot tell them apart: a rain tree's canopy is a 6 m sphere and a car's is a
+## 2 m box, and the only thing that says which of the two this one is comes from
+## the placement list.
+const SOLID_FREE_PROPS := ["bush_scrub"]
+## A prop part wider than this, standing on the ground, is a canopy rather than a
+## trunk or a post, and is left out of the collider. Measured across the union of
+## the parts that reach the ground, per kind: palm trunks and steel posts are
+## well under a metre, every canopy is well over three.
+const PROP_SOLID_WIDTH := 3.0
+
 ## Artkit planting for the blocks the kit fills. Registered names only - anything
 ## else is skipped by `ArtKitScatter` and reported, not silently dropped.
 ##
@@ -36,6 +70,17 @@ var rng := RandomNumberGenerator.new()
 # Collected batches, flushed into MultiMeshes at the end.
 var _batches: Dictionary = {}
 var _materials: Dictionary = {}
+
+# Solid collision geometry, bucketed per SOLID_CELL and flushed into one
+# StaticBody3D each. Two families rather than one so a wall can never be mistaken
+# for a garden bin - the contact test asserts on which one it hit, and a single
+# merged bucket would make that assertion unanswerable.
+var _solid_build: Dictionary = {}     ## Vector2i -> SurfaceTool
+var _solid_prop: Dictionary = {}      ## Vector2i -> SurfaceTool
+var _solid: Dictionary = {}           ## what the pass built, for the tests
+var _roads: Dictionary = {}           ## OSMBuildings.road_index(graph), built once
+var _kit_extents: Dictionary = {}     ## building kind -> measured box extents
+var _prop_extents: Dictionary = {}    ## prop name -> measured box extents
 
 # Named nodes the game needs to find.
 var car_meet: Node3D
@@ -746,22 +791,14 @@ static func _box_mesh(size: Vector3, offset: Vector3) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var h := size * 0.5
-	var corners := [
-		Vector3(-h.x, -h.y, -h.z), Vector3(h.x, -h.y, -h.z),
-		Vector3(h.x, h.y, -h.z), Vector3(-h.x, h.y, -h.z),
-		Vector3(-h.x, -h.y, h.z), Vector3(h.x, -h.y, h.z),
-		Vector3(h.x, h.y, h.z), Vector3(-h.x, h.y, h.z),
-	]
-	var faces := [
-		[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4],
-		[3, 7, 6, 2], [0, 4, 7, 3], [1, 2, 6, 5],
-	]
-	for f in faces:
-		var a: Vector3 = corners[int(f[0])] + offset
-		var b: Vector3 = corners[int(f[1])] + offset
-		var c: Vector3 = corners[int(f[2])] + offset
-		var d: Vector3 = corners[int(f[3])] + offset
-		_quad(st, a, b, c, d)
+	# BOX_CORNERS/BOX_FACES, the same tables `_solid_box()` builds colliders from.
+	# A collider sized off a different box than the mesh it wraps is a collider
+	# that does not fit.
+	var corners: Array[Vector3] = []
+	for c in BOX_CORNERS:
+		corners.append(c * h + offset)
+	for f in BOX_FACES:
+		_quad(st, corners[int(f[0])], corners[int(f[1])], corners[int(f[2])], corners[int(f[3])])
 	var mesh := st.commit()
 	return mesh
 
@@ -801,6 +838,8 @@ func _bake_collision() -> void:
 	body.add_child(cs)
 	add_child(body)
 	print("[World] road collider: %d triangles" % int(cs.shape.get_faces().size() / 3))
+	# After the road, so the walls and posts read in build order in the log.
+	_bake_solid()
 
 
 static func _trimesh(mesh: ArrayMesh) -> ConcavePolygonShape3D:
@@ -812,20 +851,379 @@ static func _trimesh(mesh: ArrayMesh) -> ConcavePolygonShape3D:
 	# SurfaceTool.commit() leaves ARRAY_INDEX null when no index buffer was built,
 	# so this cannot be a typed PackedInt32Array assignment.
 	var indices: Variant = arrays[Mesh.ARRAY_INDEX]
-	var faces: Array = []
 	if indices == null or (indices as PackedInt32Array).is_empty():
-		for i in range(0, verts.size() - 2, 3):
-			faces.append(verts[i])
-			faces.append(verts[i + 1])
-			faces.append(verts[i + 2])
-	else:
-		var idx: PackedInt32Array = indices
-		for i in range(0, idx.size() - 2, 3):
-			faces.append(verts[idx[i]])
-			faces.append(verts[idx[i + 1]])
-			faces.append(verts[idx[i + 2]])
+		# Already a triangle soup: three vertices per face, in order. Handing it
+		# over as it stands is not a shortcut, it is the same array - walking it a
+		# face at a time would rebuild a byte-identical PackedVector3Array, and
+		# there are six figures of faces in the solid pass to do that for.
+		var whole: int = verts.size() - verts.size() % 3
+		shape.set_faces(verts if whole == verts.size() else verts.slice(0, whole))
+		return shape
+	var faces: Array = []
+	var idx: PackedInt32Array = indices
+	for i in range(0, idx.size() - 2, 3):
+		faces.append(verts[idx[i]])
+		faces.append(verts[idx[i + 1]])
+		faces.append(verts[idx[i + 2]])
 	shape.set_faces(faces)
 	return shape
+
+
+# =============================================================================
+# Solid geometry. Everything above this line is drawn; everything in this
+# section is the same world again, as triangles a car cannot pass through.
+# =============================================================================
+
+## The two families, in one list, so the flush and the report cannot disagree
+## about what exists.
+const SOLID_FAMILIES := [["build", "BuildingCollision"], ["prop", "PropCollision"]]
+
+## The eight corners and six faces of a box, shared by `_box_mesh()` and
+## `_solid_box()`. One table, because a collider built from a different one than
+## the mesh it wraps is a collider that does not fit.
+const BOX_CORNERS := [
+	Vector3(-1, -1, -1), Vector3(1, -1, -1), Vector3(1, 1, -1), Vector3(-1, 1, -1),
+	Vector3(-1, -1, 1), Vector3(1, -1, 1), Vector3(1, 1, 1), Vector3(-1, 1, 1),
+]
+const BOX_FACES := [
+	[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4],
+	[3, 7, 6, 2], [0, 4, 7, 3], [1, 2, 6, 5],
+]
+
+
+## What the solid pass built. Faces and bodies per family, how many footprints
+## and props went into them, and what the road screen had to do about the rest.
+## Read by Tests/test_world.gd, which is the only thing that should have to look
+## at a triangle count to decide whether the world is solid.
+func solid_stats() -> Dictionary:
+	return _solid.duplicate()
+
+
+func _solid_at(fam: Dictionary, p: Vector2) -> SurfaceTool:
+	var key := Vector2i(floori(p.x / SOLID_CELL), floori(p.y / SOLID_CELL))
+	var st: SurfaceTool = fam.get(key, null)
+	if st == null:
+		st = SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		fam[key] = st
+	return st
+
+
+## Twelve triangles, axis-aligned or not.
+##
+## No normals and no UVs: a collision shape is a triangle list and reads nothing
+## else, so `set_normal` per vertex would be six figures of calls storing six
+## figures of values nobody will look at. Winding is `BOX_FACES`, the same table
+## the visible mesh uses; a trimesh collides from either side once
+## `backface_collision` is on, so it is not load-bearing here.
+static func _solid_box(st: SurfaceTool, centre: Vector3, size: Vector3, basis: Basis) -> void:
+	if st == null or size.x <= 0.0 or size.y <= 0.0 or size.z <= 0.0:
+		return
+	var h := size * 0.5
+	var corners: Array[Vector3] = []
+	for c in BOX_CORNERS:
+		corners.append(centre + basis * (c * h))
+	for f in BOX_FACES:
+		st.add_vertex(corners[int(f[0])])
+		st.add_vertex(corners[int(f[1])])
+		st.add_vertex(corners[int(f[2])])
+		st.add_vertex(corners[int(f[0])])
+		st.add_vertex(corners[int(f[2])])
+		st.add_vertex(corners[int(f[3])])
+
+
+## A vertical solid from the ground up to `top`: a trunk, a pole, a post. From
+## `SOLID_FLOOR` rather than 0, for the reason `OSMBuildings.solid_geometry()`
+## gives.
+func _solid_post(fam: Dictionary, p: Vector2, radius: float, top: float) -> void:
+	if top <= SOLID_FLOOR:
+		return
+	_solid_box(_solid_at(fam, p),
+		Vector3(p.x, (SOLID_FLOOR + top) * 0.5, p.y),
+		Vector3(radius * 2.0, top - SOLID_FLOOR, radius * 2.0), Basis.IDENTITY)
+
+
+## Every mapped footprint, as its own walls and roof.
+##
+## The buckets are chosen by centroid, so a footprint that straddles a cell
+## boundary lands wholly in one of them and that cell's body is wider than
+## `SOLID_CELL`. That is the price of not clipping rings to cell edges, and it is
+## cheap: a ConcavePolygonShape3D is one broadphase box whatever you put in it, so
+## the subdivision only pays off where the contents are small, and the largest
+## thing that can inflate a bucket is a stadium.
+func _solid_osm(entries: Array) -> void:
+	var n := 0
+	for e in entries:
+		var ring: PackedVector2Array = e["ring"]
+		if ring.size() < 3:
+			continue
+		var mid := Vector2.ZERO
+		for p in ring:
+			mid += p
+		OSMBuildings.solid_geometry(_solid_at(_solid_build, mid / float(ring.size())), e)
+		n += 1
+	_solid["osm_buildings"] = n
+
+
+## The kit's buildings and props, each wrapped in a box measured off the mesh it
+## is standing in for.
+##
+## One box per placement rather than the mesh itself. A kit building is six to
+## nine parts - wall panels, a roof, a veranda, a carport, a window - and taking
+## its trimesh would mean re-baking 661 unique meshes a second time for no gain
+## at this count: the box is twelve triangles against several hundred, and the
+## thing a car has to not pass through is the wall, which the box is.
+func _solid_kit(placements: Array) -> void:
+	var buildings := 0
+	var props := 0
+	var free_props := 0
+	for d in placements:
+		var pos: Vector3 = d["pos"]
+		var yaw := float(d.get("yaw", 0.0))
+		var scale := float(d.get("scale", 1.0))
+		# Rotation only. `ArtKitBatch.place()` folds the instance scale into the
+		# basis, and handing that to `_solid_box()` would scale the box twice -
+		# once through the half-extents and once through the basis.
+		var rot := Basis.from_euler(Vector3(0.0, yaw, 0.0))
+		if d.has("building"):
+			var ext: Dictionary = _kit_extent(String(d["building"]))
+			_solid_box(_solid_at(_solid_build, Vector2(pos.x, pos.z)),
+				pos + rot * (Vector3(0.0, (float(ext["y0"]) + float(ext["y1"])) * 0.5,
+					(float(ext["back"]) - float(ext["front"])) * 0.5) * scale),
+				Vector3(float(ext["half"]) * 2.0, float(ext["y1"]) - float(ext["y0"]),
+					float(ext["front"]) + float(ext["back"])) * scale, rot)
+			buildings += 1
+		elif d.has("prop"):
+			var pe: Dictionary = _prop_extent(String(d["prop"]))
+			if not bool(pe["solid"]):
+				# A scrub bush: drawn, not solid. Counted, because "how many props
+				# the screen left out" and "how many it left in" are the same
+				# question and one of the two answers has to be visible.
+				free_props += 1
+				continue
+			_solid_box(_solid_at(_solid_prop, Vector2(pos.x, pos.z)),
+				pos + rot * ((pe["centre"] as Vector3) * scale),
+				(pe["size"] as Vector3) * scale, rot)
+			props += 1
+	_solid["kit_buildings"] = buildings
+	_solid["kit_props"] = props
+	_solid["kit_props_free"] = free_props
+
+
+## A building kind's own measured box, in its own local frame: `front` toward
+## local -Z, `back` toward +Z, `half` across X, `y0`/`y1` bottom to top.
+##
+## Maxed over all sixteen designs rather than read off one. A collider sized to
+## the design it was measured from leaves the fifteen others sticking out into
+## the road, and a per-placement box would give the frontage a ragged 1.5 m line
+## of colliding edges down a straight street - which reads from the driver's
+## seat as a fence. Over-covering costs nothing here: the extra volume is inside
+## the yard the setback already reserved.
+func _kit_extent(kind: String) -> Dictionary:
+	if _kit_extents.has(kind):
+		return _kit_extents[kind]
+	var front := 0.0
+	var back := 0.0
+	var half := 0.0
+	var y0 := INF
+	var y1 := -INF
+	for v in ArtKitBuildings.HOUSE_VARIANTS:
+		for part in ArtKitBuildings.variant(kind, v):
+			var aabb: AABB = (part as ArtKitPart).mesh.get_aabb()
+			front = maxf(front, -aabb.position.z)
+			back = maxf(back, aabb.end.z)
+			half = maxf(half, maxf(absf(aabb.position.x), aabb.end.x))
+			y0 = minf(y0, aabb.position.y)
+			y1 = maxf(y1, aabb.end.y)
+	var out := {"front": front, "back": back, "half": half,
+		"y0": minf(y0, 0.0), "y1": maxf(y1, 1.0)}
+	_kit_extents[kind] = out
+	return out
+
+
+## A prop's solid base: the union box of the parts that stand on the ground and
+## are narrower than PROP_SOLID_WIDTH, or `solid: false` for a plant a car is
+## meant to drive through.
+##
+## The two tests are the whole trick and neither one works alone. A palm's parts
+## are a trunk and nine fronds: union all of them and the collider is a 7 m
+## sphere nobody can drive under or past. Take only what reaches the ground and
+## you get the trunk, which is the part a car actually meets. A bin's parts are
+## all one mesh and it is narrow, so it survives both tests; scrub is excluded by
+## name, because the mesh says "irregular bush" and the world says "you drive
+## through those".
+func _prop_extent(name: String) -> Dictionary:
+	if _prop_extents.has(name):
+		return _prop_extents[name]
+	var out := {"size": Vector3.ZERO, "centre": Vector3.ZERO, "solid": false}
+	if ArtKitProps.has(name) and not SOLID_FREE_PROPS.has(name):
+		var lo := Vector3(INF, INF, INF)
+		var hi := Vector3(-INF, -INF, -INF)
+		var any := false
+		for v in ArtKitProps.VARIANTS:
+			for part in ArtKitProps.variant(name, v):
+				var aabb: AABB = (part as ArtKitPart).mesh.get_aabb()
+				if aabb.position.y > 0.05:
+					continue
+				if maxf(aabb.size.x, aabb.size.z) >= PROP_SOLID_WIDTH:
+					continue
+				lo = Vector3(minf(lo.x, aabb.position.x), minf(lo.y, aabb.position.y),
+					minf(lo.z, aabb.position.z))
+				hi = Vector3(maxf(hi.x, aabb.end.x), maxf(hi.y, aabb.end.y),
+					maxf(hi.z, aabb.end.z))
+				any = true
+		if any:
+			out = {"size": hi - lo, "centre": (lo + hi) * 0.5, "solid": true}
+	_prop_extents[name] = out
+	return out
+
+
+## Holds every prop placement off the carriageway, or takes it out.
+##
+## The check is on the placement's own box, not on its position, because a
+## 6 m-wide palm centred in a lane is a thing you hit and a point test calls it
+## clear. Four rotated corners, the worst of them decides.
+##
+## Where it fails, the placement is pushed straight out along the line from the
+## nearest corridor rather than dropped, because a bin half a metre into a lane
+## is a bin that belongs in the yard it was aimed at - and the push is re-tested,
+## so the output is verified clear rather than assumed clear. Only a prop that
+## will not come clear, which means one whose escape line runs along the road,
+## is removed, and those are counted with a reason.
+func _screen_placements(placements: Array) -> Dictionary:
+	var roads := _road_grid()
+	var out: Array = []
+	var moved := 0
+	var dropped := 0
+	var reasons: Array[String] = []
+
+	for d in placements:
+		if not d.has("prop"):
+			out.append(d)
+			continue
+		var pe: Dictionary = _prop_extent(String(d["prop"]))
+		var pos: Vector3 = d["pos"]
+		var yaw := float(d.get("yaw", 0.0))
+		var scale := float(d.get("scale", 1.0))
+		var here := Vector2(pos.x, pos.z)
+		var worst := _prop_clear(here, pe, yaw, scale, roads)
+		if not bool(pe["solid"]) or worst >= 0.0:
+			out.append(d)
+			continue
+
+		# Push out along the way out of the nearest carriageway.
+		var near := OSMBuildings.nearest_corridor(here, roads)
+		var away := here - (near["point"] as Vector2)
+		if away.length() < 0.05:
+			dropped += 1
+			reasons.append("%s sits on a centreline with no way out" % String(d["prop"]))
+			continue
+		away = away.normalized()
+		var fixed: Dictionary = d.duplicate()
+		# Enough to put the whole box on the clearance line, not just its origin:
+		# the deficit `worst` is measured from the *worst corner*, so it already
+		# includes everything the box overhangs by, and the reach and the margin
+		# are what land it on the far side instead of exactly on it. Pushing by a
+		# fixed 2 m - which is what this was - leaves a wide palm a corner in the
+		# lane and drops it every time.
+		var reach := _prop_reach(pe, yaw, scale)
+		var to := here + away * (-worst + reach + PROP_CLEARANCE)
+		fixed["pos"] = Vector3(to.x, pos.y, to.y)
+		if _prop_clear(to, pe, yaw, scale, roads) < 0.0:
+			dropped += 1
+			reasons.append("%s at %.0f,%.0f could not be moved clear of the carriageway"
+				% [String(d["prop"]), pos.x, pos.z])
+			continue
+		moved += 1
+		out.append(fixed)
+
+	_solid["props_moved"] = moved
+	_solid["props_dropped"] = dropped
+	_solid["props_dropped_reasons"] = reasons
+	return {"out": out, "moved": moved, "dropped": dropped, "reasons": reasons}
+
+
+## How far a placement's box reaches from its origin in the ground plane, at its
+## own yaw. The rotated half-diagonal, which is the same number whichever corner
+## is worst.
+func _prop_reach(pe: Dictionary, yaw: float, scale: float) -> float:
+	var size: Vector3 = pe["size"]
+	var hx := absf(size.x) * 0.5 * scale
+	var hz := absf(size.z) * 0.5 * scale
+	var c := absf(cos(yaw))
+	var s := absf(sin(yaw))
+	return sqrt(hx * hx + hz * hz)
+
+
+## The worst (distance to a carriageway edge - PROP_CLEARANCE) over the four
+## rotated corners of a placement's box.
+func _prop_clear(p: Vector2, pe: Dictionary, yaw: float, scale: float, roads: Dictionary) -> float:
+	var size: Vector3 = pe["size"]
+	var centre: Vector3 = pe["centre"]
+	var c := cos(yaw)
+	var s := sin(yaw)
+	var worst := INF
+	for sx in [-1.0, 1.0]:
+		for sz in [-1.0, 1.0]:
+			# The box centre in the ground plane first, then the corner, both
+			# rotated - the centre is not at the placement's origin for a prop
+			# whose mesh does not sit on it.
+			var local := Vector3(size.x * 0.5 * sx, 0.0, size.z * 0.5 * sz)
+			local.x += centre.x
+			local.z += centre.z
+			var off := Vector2(local.x * c + local.z * s, -local.x * s + local.z * c) * scale
+			var near := OSMBuildings.nearest_corridor(p + off, roads)
+			if int(near["seg"]) < 0:
+				continue
+			worst = minf(worst, float(near["d"]) - float(near["hw"]) - PROP_CLEARANCE)
+	return worst if worst < INF else INF
+
+
+## The road index, built once. `RoadGraph.nearest_road()` scans all 401 edges,
+## and this pass asks the same question about ~1000 placements x 4 corners.
+func _road_grid() -> Dictionary:
+	if _roads.is_empty() and graph != null:
+		_roads = OSMBuildings.road_index(graph)
+	return _roads
+
+
+## Commits every bucket into a StaticBody3D per cell, then reports.
+##
+## Called from `_bake_collision()` after the road surface, so the bodies land in
+## the tree in the order they were built and the log reads in build order.
+func _bake_solid() -> void:
+	for family in SOLID_FAMILIES:
+		var key := String(family[0])
+		var prefix := String(family[1])
+		var fam: Dictionary = _solid_build if key == "build" else _solid_prop
+		var faces := 0
+		var bodies := 0
+		for cell in fam:
+			var mesh: ArrayMesh = (fam[cell] as SurfaceTool).commit()
+			if mesh.get_surface_count() == 0:
+				continue
+			var shape := _trimesh(mesh)
+			if shape.get_faces().is_empty():
+				continue
+			faces += shape.get_faces().size() / 3
+
+			var body := StaticBody3D.new()
+			body.name = "%s_x%d_z%d" % [prefix, cell.x, cell.y]
+			body.collision_layer = 1
+			body.collision_mask = 0
+			var cs := CollisionShape3D.new()
+			cs.shape = shape
+			# Seen from both sides, for the reason the road collider gives: a
+			# trimesh wound one way is invisible from the other, and a wall you
+			# cannot hit from the far side is a wall you are already inside.
+			shape.backface_collision = true
+			body.add_child(cs)
+			add_child(body)
+			bodies += 1
+		fam.clear()
+		_solid["%s_bodies" % key] = bodies
+		_solid["%s_faces" % key] = faces
+		print("[World] %s: %d bodies, %d triangles" % [prefix, bodies, faces])
 
 
 # =============================================================================
@@ -847,11 +1245,20 @@ static func _trimesh(mesh: ArrayMesh) -> ConcavePolygonShape3D:
 ## arrives as ~2200 draw calls instead of ~20.
 func _buildings() -> void:
 	var osm := OSMBuildings.build(self, graph)
-	var scatter := ArtKitScatter.attach(self, _artkit_fill(osm))
+	_solid_osm(osm.get("buildings", []))
+	var fill := _artkit_fill(osm)
+	# Screen before the kit ever sees the list: a placement that is moved after
+	# `ArtKitScatter.populate()` has already baked it into a merged mesh would
+	# move the collider and leave the tree where it was.
+	var screened := _screen_placements(fill)
+	fill = screened["out"]
+	var scatter := ArtKitScatter.attach(self, fill)
+	_solid_kit(fill)
 	print("[World] artkit filled the gaps OSM left: %d buildings, %d props, %d draw calls, %d instances, %.0fk triangles"
 		% [int(scatter.stats.get("buildings", 0)), int(scatter.stats.get("props", 0)),
 			int(scatter.stats.get("nodes", 0)), int(scatter.stats.get("instances", 0)),
 			float(scatter.stats.get("triangles", 0)) / 1000.0])
+	_solid["kit_skipped"] = (scatter.stats.get("skipped", []) as Array).size()
 
 
 ## The kit's placement list: buildings and yard planting along the frontages OSM
@@ -867,6 +1274,17 @@ func _buildings() -> void:
 ## The cells are the other half of the decision. OSM covers western Cairns unevenly,
 ## and without a coverage test the fill either doubles up on mapped houses or leaves
 ## a hole where the map ran out; both read as a bug from the driver's seat.
+##
+## The setback is the kind's own measured depth, not a constant, and the yaw is
+## turned around. `ArtKitBuildings` lays every wall out with *the outside face at
+## local -Z* (see `_wall()` in artkit/buildings.gd) - doors, shopfronts, verandas
+## and balconies all live on that side - while `ArtKitBatch.facing()` aims local
+## +Z at whatever it is given. Aimed straight at the road, every one of the 661
+## fill buildings stood with its back to the street and its blank gable over the
+## footpath. So the placement adds half a turn, and the setback is measured from
+## the face that is now the front: a house's carport reaches 7.7 m, a walk-up's
+## balcony 9.8, and a constant would either hang the carport over the verge or
+## leave the balcony inside it.
 func _artkit_fill(osm: Dictionary) -> Array:
 	var cells := _osm_cells(osm.get("buildings", []))
 	var out: Array = []
@@ -882,31 +1300,37 @@ func _artkit_fill(osm: Dictionary) -> Array:
 		var nrm := Vector2(-dir.y, dir.x)
 		var plots := maxi(1, int(length / PLOT_PITCH))
 		var step: float = length / float(plots)
-		# Back of footpath, then a front yard, off this edge's own width, so a
-		# highway frontage stands further back than a lane's.
-		var off: float = _frontage_offset(float(e["width"]))
 		var kind := _kind_for(int(e["class"]))
+		var ext: Dictionary = _kit_extent(kind)
+		# Back of footpath, then a front yard, off this edge's own width, so a
+		# highway frontage stands further back than a lane's - and then the
+		# building's own depth, so its front face lands on that line instead of
+		# its origin.
+		var off: float = _frontage_offset(float(e["width"])) + float(ext["front"])
 
 		for side in [-1.0, 1.0]:
 			for i in plots:
 				var p: Vector2 = a.lerp(b, (float(i) + 0.5) / float(plots)) + nrm * (off * side)
-				if _skip_frontage(p, cells):
-					continue
 				var pos := Vector3(p.x, 0.0, p.y)
+				# Front to the road. `facing()` aims +Z, the kit builds its
+				# frontage at -Z, so the half turn is not a fudge factor - it is
+				# the difference between a street of houses and a street of back
+				# walls.
+				var yaw := ArtKitBatch.facing(pos,
+					Vector3(p.x - nrm.x * off * side, 0.0, p.y - nrm.y * off * side)) + PI
+				if _skip_building(p, yaw, ext, cells):
+					continue
 				out.append({
 					"building": kind,
 					"pos": pos,
-					# Front to the road. `facing()` is the kit's own answer to which
-					# way its geometry looks, so the guess stays in one place.
-					"yaw": ArtKitBatch.facing(pos,
-						Vector3(p.x - nrm.x * off * side, 0.0, p.y - nrm.y * off * side)),
+					"yaw": yaw,
 					"seed": n,
 				})
 				n += 1
 
 				# Yard planting in the half pitch to the next plot.
 				var q: Vector2 = p + dir * (step * 0.5)
-				if not _skip_frontage(q, cells):
+				if not _skip_frontage(q, cells, off):
 					var q3 := Vector3(q.x, 0.0, q.y)
 					out.append({
 						"prop": YARD_PROPS[posmod(n, YARD_PROPS.size())],
@@ -928,10 +1352,57 @@ func _kind_for(cls: int) -> String:
 		_: return "qld_house"
 
 
-## Nothing to build here: too near a carriageway, in a junction mouth, or on a cell
-## OSM has already put a real house on.
-func _skip_frontage(p: Vector2, cells: Dictionary) -> bool:
-	if _too_close_to_road(p):
+## Nothing to build a *building* on.
+##
+## The clearance test is on the box, not on the position, and that is the whole
+## reason this is separate from `_skip_frontage`. A Queenslander measures 17.9 m
+## across at the widest of its sixteen designs, so a plot placed legally by its
+## own front face has side corners a further 8.9 m down the street - and at the
+## end of a block one of those corners lands in the crossing carriageway. The
+## origin test passed; a house was standing in the road with its back corner in
+## it. The box test is what `Tests/test_world.gd` asserts against, and it is
+## checked before the placement is emitted rather than after, because after is a
+## second pass over a list the kit has already baked.
+func _skip_building(p: Vector2, yaw: float, ext: Dictionary, cells: Dictionary) -> bool:
+	if cells.has(Vector2i(int(floor(p.x / OSM_CELL)), int(floor(p.y / OSM_CELL)))):
+		return true
+	if _blocked_by_junction(Vector3(p.x, 0.0, p.y)):
+		return true
+	return not _kit_box_clear(p, yaw, ext)
+
+
+## Whether all four rotated corners of a kit building's box are BUILDING_CLEARANCE
+## clear of every carriageway, measured against the road grid rather than
+## `RoadGraph.nearest_road()` - four corners times a few thousand placements is
+## tens of millions of edge tests the other way.
+func _kit_box_clear(p: Vector2, yaw: float, ext: Dictionary) -> bool:
+	var roads := _road_grid()
+	if roads.is_empty():
+		return true
+	var half := float(ext["half"])
+	var front := float(ext["front"])
+	var back := float(ext["back"])
+	var c := cos(yaw)
+	var s := sin(yaw)
+	for sx in [-1.0, 1.0]:
+		for sz in [-1.0, 1.0]:
+			var local := Vector2(sx * half, -front if sz > 0.0 else back)
+			var corner := p + Vector2(local.x * c + local.y * s, -local.x * s + local.y * c)
+			var near := OSMBuildings.nearest_corridor(corner, roads)
+			if int(near["seg"]) < 0:
+				continue
+			if float(near["d"]) - float(near["hw"]) < BUILDING_CLEARANCE:
+				return false
+	return true
+
+
+## Nothing to put a *prop* on: too near a carriageway, in a junction mouth, or on
+## a cell OSM has already put a real house on.
+##
+## `min_offset` is the setback the neighbouring building is standing at, so a yard
+## plant lands in the same line rather than a couple of metres out in the lane.
+func _skip_frontage(p: Vector2, cells: Dictionary, min_offset: float = -1.0) -> bool:
+	if _too_close_to_road(p, min_offset):
 		return true
 	if _blocked_by_junction(Vector3(p.x, 0.0, p.y)):
 		return true
@@ -984,12 +1455,13 @@ func _frontage_offset(width: float) -> float:
 ## 9 m street is inside its own kerb, so it rejected every residential frontage in
 ## the city and left only the arterials standing. Measured: 413 buildings, all of
 ## them `qld_shop`, zero houses, on a network that is 270 streets and 131 arterials.
-func _too_close_to_road(p: Vector2) -> bool:
+func _too_close_to_road(p: Vector2, min_offset: float = -1.0) -> bool:
 	var near: Dictionary = graph.nearest_road(Vector3(p.x, 0.0, p.y))
 	var eid := int(near["edge"])
 	if eid < 0 or eid >= graph.edges.size():
 		return true
-	return float(near["lateral"]) < _frontage_offset(float(graph.edges[eid]["width"]))
+	var want: float = min_offset if min_offset >= 0.0 else _frontage_offset(float(graph.edges[eid]["width"]))
+	return float(near["lateral"]) < want
 
 ## Coconut palms. The single most identifiable thing about a north Queensland
 ## street, and they break up the roofline so the suburb is not a row of boxes.
@@ -1025,6 +1497,11 @@ func _vegetation() -> void:
 			var lean := rng.randf_range(-0.09, 0.09)
 			var xf := Transform3D(Basis.from_euler(Vector3(lean, rng.randf() * TAU, 0)), Vector3(p.x, 0, p.y))
 			_add("palms", trunk_mesh, xf.scaled_local(Vector3(1.0, h, 1.0)), "palm_trunk")
+			# The shaft only, not the crown: a car passes under a frond, and a
+			# frond collider is a 7 m sphere over the footpath. The shaft mesh is
+			# unit height centred on its own origin, so `h * 0.5` is where the
+			# drawn trunk actually stops, which is the same place.
+			_solid_post(_solid_prop, p, 0.36, h * 0.5)
 			var frond_count := 9
 			for f in frond_count:
 				var ang := TAU * float(f) / frond_count + rng.randf() * 0.2
@@ -1083,6 +1560,10 @@ func _streetlights() -> void:
 			var h := 7.0
 			var base := Vector3(p.x, KERB_HEIGHT, p.y)
 			_add("poles", pole, Transform3D(Basis(), base).scaled_local(Vector3(1.0, h, 1.0)), "pole")
+			# A light pole is in the footpath, so it is a wall. `width * 0.5 + 1.2`
+			# puts its face 1.2 m clear of the kerb, which is more than half a car,
+			# so it is something you clip a mirror on rather than drive through.
+			_solid_post(_solid_prop, p, 0.15, KERB_HEIGHT + h * 0.5)
 			var tip: Vector3 = base + Vector3(nrm.x * -1.4 * side, h, nrm.y * -1.4 * side)
 			_add("poles", arm, Transform3D(Basis.from_euler(Vector3(0, atan2(-dir.x, -dir.y), 0)), tip + Vector3(0, -0.2, 0)).scaled_local(Vector3(0.12, 0.12, 1.5)), "pole")
 			_add("lamps", lamp, Transform3D(Basis(), tip).scaled_local(Vector3(0.42, 0.16, 0.75)), "lamp_glow")
@@ -1131,6 +1612,7 @@ func _power_lines() -> void:
 			var h := 9.5
 			_add("poles_wood", pole, Transform3D(Basis(), Vector3(p.x, 0, p.y)).scaled_local(Vector3(1.0, h, 1.0)), "pole_wood")
 			pole_positions.append(Vector3(p.x, h - 0.8, p.y))
+			_solid_post(_solid_prop, p, 0.2, h * 0.5)
 	_connect_wires(pole_positions)
 
 
