@@ -168,8 +168,18 @@ func _mat(key: String) -> StandardMaterial3D:
 			"asphalt1": _materials[key] = MatLib.wet_asphalt(0.06, 1)
 			"asphalt2": _materials[key] = MatLib.wet_asphalt(0.06, 2)
 			"asphalt3": _materials[key] = MatLib.wet_asphalt(0.06, 3)
-			"paint_white": _materials[key] = MatLib.road_paint(Color(0.62, 0.60, 0.55))
-			"paint_yellow": _materials[key] = MatLib.road_paint(Color(0.55, 0.40, 0.06))
+			"paint_white": _materials[key] = MatLib.paint_white()
+			"paint_yellow": _materials[key] = MatLib.paint_yellow()
+			# The road edge is four surfaces, not one. See `LookDev` for the
+			# material and the reason: a kerb face and a footpath are 1.5 m apart
+			# and a metre apart in height, and drawing both in the same grey is
+			# what made every street read as one continuous pale ledge.
+			"kerb_face": _materials[key] = LookDev.kerb_face_mat()
+			"kerb_top": _materials[key] = LookDev.kerb_top_mat()
+			"channel": _materials[key] = LookDev.channel_mat()
+			"footpath": _materials[key] = LookDev.footpath_mat()
+			# Still the default and still the drainage. It is no longer the road
+			# edge, which is the point.
 			"concrete": _materials[key] = MatLib.concrete()
 			"ground": _materials[key] = MatLib.ground()
 			_: _materials[key] = MatLib.concrete()
@@ -426,7 +436,7 @@ func _road_surface() -> void:
 		mi.name = "RoadSurface_%d_%d" % [key.x, key.y]
 		mi.mesh = (cells[key] as SurfaceTool).commit()
 		mi.material_override = _mat(_asphalt_key(key))
-		mi.position.y = 0.015
+		mi.position.y = LookDev.TARMAC_Y
 		add_child(mi)
 
 
@@ -458,8 +468,34 @@ static func _road_quad(st: SurfaceTool, a0: Vector3, a1: Vector3, b1: Vector3, b
 		st.add_vertex(verts[i])
 
 
+## The road edge: a dished channel, a kerb on the channel's back lip, and a
+## footpath behind that. Three surfaces, three materials, and one transform per
+## side of the street.
+##
+## What this replaced, and why it was wrong: one `Vector3(1.0, KERB_HEIGHT, 1.0)`
+## box per 4.2 m, centred 0.5 m outside the carriageway edge, in the same
+## `concrete` material as the footpath. Three consequences, all of them visible
+## in the before frame:
+##   - a **1.0 m wide** top. A kerb is 0.30 m. At 1.0 m it is not a kerb, it is a
+##     plinth, and it is what gives every street in the map its "low concrete wall
+##     with a ledge along it" read.
+##   - the footpath started at carriageway-edge + 0.5 while the plinth ran to
+##     +1.0, so **half the kerb was under the footpath** and the other half stuck
+##     out as a bench. Two surfaces fighting over 0.5 m of ground.
+##   - the kerb butted straight onto the tarmac, with **no channel at all**, so
+##     there was nothing between the carriageway and the kerb for a streetlight to
+##     reflect in and no line to read the edge of the road by.
+##
+## The transverse budget, outboard from the carriageway edge:
+##
+##     channel 0.00 .. 0.45 | kerb 0.45 .. 0.75 | footpath 0.75 .. 2.35 | drain
+##
+## and it all comes from `LookDev`, so moving one section cannot silently eat the
+## next one's ground.
 func _kerbs_and_footpaths() -> void:
-	var kerb_mesh := _box_mesh(Vector3(1.0, KERB_HEIGHT, 1.0), Vector3(0, 0.5, 0))
+	var kerb_face_mesh := LookDev.kerb_face_mesh()
+	var kerb_top_mesh := LookDev.kerb_top_mesh()
+	var channel_mesh := LookDev.channel_mesh()
 	var walk_mesh := _box_mesh(Vector3(1.0, 0.02, 1.0), Vector3(0, 0, 0))
 	for e in graph.edges:
 		var a: Vector2 = graph.node_pos(int(e["a"]))
@@ -477,17 +513,41 @@ func _kerbs_and_footpaths() -> void:
 			var t1 := float(i + 1) / float(maxi(pieces, 1))
 			var mid: Vector2 = a.lerp(b, (t0 + t1) * 0.5)
 			var ang := atan2(dir.x, dir.y)
+			# One piece long enough to meet its neighbours, as before.
+			var run := length / float(maxi(pieces, 1)) + 0.12
 			for side in [-1.0, 1.0]:
-				var p: Vector2 = mid + nrm * (hw + 0.5) * side
+				var p: Vector2 = mid + nrm * hw * side
 				# Skip kerbs where a side street joins, so junctions do not get walls.
 				if _blocked_by_junction(Vector3(p.x, 0, p.y)):
 					continue
-				var xf := Transform3D(Basis.from_euler(Vector3(0, ang, 0)),
+				# `Basis.from_euler(0, ang, 0)` sends local +X to -nrm (see the
+				# drainage note for the same derivation), and every profile in
+				# `LookDev` is authored with local +X pointing *away* from the
+				# carriageway. So the +1 side is yawed by a further PI and both
+				# sides then place from the carriageway edge outwards. Getting
+				# this backwards does not look wrong - it looks like the kerb is
+				# facing the wrong way, which at night is invisible - so it is
+				# asserted in `World/look_dev_test.gd` instead.
+				var yaw := ang if side < 0.0 else ang + PI
+				var edge_xf := Transform3D(Basis.from_euler(Vector3(0, yaw, 0)),
 					Vector3(p.x, 0, p.y))
-				_add("kerbs", kerb_mesh, xf.scaled_local(Vector3(1.0, 1.0, 4.2)), "concrete")
-				var wp: Vector2 = mid + nrm * (hw + 0.5 + FOOTPATH_WIDTH * 0.5) * side
-				var wxf := Transform3D(Basis.from_euler(Vector3(0, ang, 0)), Vector3(wp.x, KERB_HEIGHT, wp.y))
-				_add("footpaths", walk_mesh, wxf.scaled_local(Vector3(FOOTPATH_WIDTH, 1.0, 4.2)), "concrete")
+				# Two meshes, two materials, one transform: the face is dark and
+				# the top is not, and that difference is the whole reason the
+				# kerb has an edge you can see at night.
+				_add("kerbs", kerb_face_mesh, edge_xf.scaled_local(Vector3(1.0, 1.0, run)),
+					"kerb_face")
+				_add("kerbs", kerb_top_mesh, edge_xf.scaled_local(Vector3(1.0, 1.0, run)),
+					"kerb_top")
+				# The channel sits on the carriageway side of the kerb, in the
+				# profile's own local +X, so it needs no separate placement: same
+				# origin, and its mesh is authored from x=0.
+				_add("channels", channel_mesh,
+					edge_xf.scaled_local(Vector3(1.0, 1.0, run)), "channel")
+				var wp: Vector2 = mid + nrm * (hw + LookDev.KERB_TOP_W + FOOTPATH_WIDTH * 0.5) * side
+				var wxf := Transform3D(Basis.from_euler(Vector3(0, ang, 0)),
+					Vector3(wp.x, KERB_HEIGHT, wp.y))
+				_add("footpaths", walk_mesh, wxf.scaled_local(Vector3(FOOTPATH_WIDTH, 1.0, run)),
+					"footpath")
 
 
 func _blocked_by_junction(p: Vector3) -> bool:
@@ -509,9 +569,13 @@ func _blocked_by_junction(p: Vector3) -> bool:
 ## boundary sits at width * i / lanes, which is where the real marking is. The
 ## centre boundary (on an even lane count) is the only one that changes colour
 ## or rhythm, because that is the only one that means something.
-const MARK_Y := 0.028
-const LINE_W := 0.12
-const LINE_T := 0.012
+##
+## Every marking is now a **flat quad** (`LookDev.paint_quad`) rather than a
+## 0.012 m box. That is not a rounding change: a 12 mm slab has a vertical side,
+## and at the 1.05 m "kerb" camera a vertical side facing the camera is a bright
+## specular line running the length of every dash in frame - which is what the
+## before shot shows down both edge lines. The height and the width now live in
+## `LookDev`, beside the road-edge section they have to agree with.
 const EDGE_LINE_INSET := 0.35
 const SOLID_PITCH := 4.0
 const DASH_PITCH := 7.0
@@ -519,11 +583,10 @@ const DASH_RUN := 3.0
 
 
 func _lane_markings() -> void:
-	# One unit box for every marking. `_add` keys a batch's meshes by material
-	# key alone, so a second mesh under a key already in use would silently
-	# rescale the first one's instances; scale per instance instead, the way the
-	# kerbs do.
-	var box := _box_mesh(Vector3.ONE, Vector3.ZERO)
+	# One quad for every marking. `_add` keys a batch's meshes by material key
+	# alone, so a second mesh under a key already in use would silently rescale
+	# the first one's instances; scale per instance instead, the way the kerbs do.
+	var box := LookDev.paint_quad()
 	for e in graph.edges:
 		var a: Vector2 = graph.node_pos(int(e["a"]))
 		var b: Vector2 = graph.node_pos(int(e["b"]))
@@ -597,7 +660,11 @@ func _stripe_span(mesh: ArrayMesh, basis: Basis, a: Vector2, dir: Vector2, nrm: 
 func _mark_xf(basis: Basis, a: Vector2, dir: Vector2, nrm: Vector2, along: float,
 		offset: float, len: float) -> Transform3D:
 	var p := a + dir * along + nrm * offset
-	return Transform3D(basis, Vector3(p.x, MARK_Y, p.y)).scaled_local(Vector3(LINE_W, LINE_T, len))
+	# Y scale is 1.0, not a thickness: the quad is already flat. Scaling it would
+	# scale a zero-height plane, which is the sort of thing that looks like a
+	# working number and does nothing.
+	return Transform3D(basis, Vector3(p.x, LookDev.PAINT_Y, p.y)).scaled_local(
+			Vector3(LookDev.LINE_W, 1.0, len))
 
 
 ## Stop bars and give-way rows, on the mouth of each approach.
@@ -611,8 +678,14 @@ func _mark_xf(basis: Basis, a: Vector2, dir: Vector2, nrm: Vector2, along: float
 ## Rows and bars sit just outside the junction patch, at the radius
 ## `_intersections` draws tarmac to, so they land on the edge of the patch rather
 ## than under it.
+##
+## The bar is `BAR_W` along the road and the **approach's own width minus the two
+## edge-line insets** across it. The old code scaled it to the full `w` of the
+## edge, which is what put a stop bar *underneath* the edge lines it is supposed
+## to stop in front of: two parallel white bands 0.4 m deep, 0.23 m apart, on
+## every junction mouth in the map. That is the seam.
 func _junction_control() -> void:
-	var box := _box_mesh(Vector3.ONE, Vector3.ZERO)
+	var box := LookDev.paint_quad()
 	var tri := _tri_marker_mesh()
 	for ni in graph.nodes.size():
 		var n: Dictionary = graph.nodes[ni]
@@ -636,14 +709,16 @@ func _junction_control() -> void:
 			var ang := atan2(dir.x, dir.y)
 			var basis := Basis.from_euler(Vector3(0, ang, 0))
 			var mouth := p + dir * (r + EDGE_LINE_INSET + 0.25)
-			var xf := Transform3D(basis, Vector3(mouth.x, MARK_Y, mouth.y))
+			var xf := Transform3D(basis, Vector3(mouth.x, LookDev.PAINT_Y, mouth.y))
 			if cls < hi:
-				# Stop bar: across the whole approach, 0.4 m deep. Two junctions a
-				# few metres apart would otherwise paint this one on the other's
-				# tarmac, which is the same mistake as painting it on your own
-				# patch and just as visible from the car.
+				# Stop bar: across the approach, inside the edge lines. Two
+				# junctions a few metres apart would otherwise paint this one on
+				# the other's tarmac, which is the same mistake as painting it on
+				# your own patch and just as visible from the car.
+				var span := maxf(w - EDGE_LINE_INSET * 2.0, 1.0)
 				if not _patched_by_other(ni, mouth):
-					_add("markings", box, xf.scaled_local(Vector3(w, LINE_T, 0.4)), "paint_white")
+					_add("markings", box,
+						xf.scaled_local(Vector3(span, 1.0, LookDev.BAR_W)), "paint_white")
 			else:
 				# Give way: a row of triangles, apexes to the junction. The guard
 				# is per triangle, not per row: a row is as wide as the approach,
@@ -656,7 +731,7 @@ func _junction_control() -> void:
 					if _patched_by_other(ni, at):
 						continue
 					_add("giveway", tri,
-							Transform3D(basis, Vector3(at.x, MARK_Y, at.y)), "paint_white")
+						Transform3D(basis, Vector3(at.x, LookDev.PAINT_Y, at.y)), "paint_white")
 
 
 ## True when some junction other than `node` has already laid tarmac over p.
@@ -694,7 +769,7 @@ func _intersections() -> void:
 		mi.name = "Intersections_%d_%d" % [key.x, key.y]
 		mi.mesh = (cells[key] as SurfaceTool).commit()
 		mi.material_override = _mat(_asphalt_key(key))
-		mi.position.y = 0.02
+		mi.position.y = LookDev.JUNCTION_Y
 		add_child(mi)
 
 
@@ -751,10 +826,19 @@ func _drainage() -> void:
 	# one, measured: the two rail origins come out 0.800 m either side of the
 	# channel's, and 0.15 and 1.75 past the carriageway edge. Both rails are the
 	# same mesh, offset per instance.
-	const DRAIN_OFF := 0.95
-	const DRAIN_W := 1.6
-	const DRAIN_DEPTH := 0.30
-	const DRAIN_RAIL_W := 0.30
+	#
+	# **The drain is measured from the back of the footpath, not from the
+	# carriageway edge.** It used to be measured from the edge, which put a 1.6 m
+	# trench at carriageway + 0.95 - i.e. underneath the kerb *and* underneath the
+	# footpath, three surfaces fighting over the same metre of ground. That is
+	# what the dark slots along the kerb in the before frame are. Cairns puts the
+	# open drain in the nature strip behind the footpath anyway.
+	# (`LookDev.back_of_footpath_to_drain_centre()`, not a const: it is a sum of
+	# five other dimensions, and GDScript will not fold a function call into a
+	# constant expression.)
+	const DRAIN_W := LookDev.DRAIN_W
+	const DRAIN_DEPTH := LookDev.DRAIN_DEPTH
+	const DRAIN_RAIL_W := LookDev.DRAIN_RAIL_W
 	var channel := _box_mesh(Vector3(DRAIN_W, DRAIN_DEPTH, 4.0), Vector3(0, -DRAIN_DEPTH * 0.5, 0))
 	var rail := _box_mesh(Vector3(DRAIN_RAIL_W, DRAIN_DEPTH * 2.0, 4.0), Vector3.ZERO)
 	var water := _box_mesh(Vector3(1.1, 0.02, 4.0), Vector3.ZERO)
@@ -772,7 +856,7 @@ func _drainage() -> void:
 		var pieces := int(length / 8.0)
 		for i in pieces:
 			var mid: Vector2 = a.lerp(b, (float(i) + 0.5) / float(maxi(pieces, 1)))
-			var p := mid + nrm * (hw + DRAIN_OFF)
+			var p := mid + nrm * (hw + LookDev.back_of_footpath_to_drain_centre())
 			if _blocked_by_junction(Vector3(p.x, 0, p.y)):
 				continue
 			var xf := Transform3D(Basis.from_euler(Vector3(0, ang, 0)), Vector3(p.x, 0, p.y))
@@ -1555,8 +1639,25 @@ func _streetlights() -> void:
 			var side: float = 1.0 if (ei + i) % 2 == 0 else -1.0
 			var off: float = float(e["width"]) * 0.5 + 1.2
 			var p: Vector2 = mid + nrm * off * side
+			## A lamp inside the junction box is skipped, which is right - but the
+			## skip was the *only* rule, and it left a gap at every junction in the
+			## map. Measured on the `junction` pose: road mean 9.8/255 with 68% of
+			## the band below the dark threshold, against 90.7 and 20% on a mid-block
+			## street. The brightest 260 m of a night city with 1278 lamps in it has
+			## no lamps in it, because that is exactly where the lamp loop gets
+			## suppressed. So a suppressed lamp slides *along* the street until it
+			## clears the box: the pole still stands clear of the junction and the
+			## junction still gets lit.
 			if _blocked_by_junction(Vector3(p.x, 0, p.y)):
-				continue
+				var slid := false
+				for nudge in [7.0, -7.0, 13.0, -13.0]:
+					var q: Vector2 = p + dir * nudge
+					if not _blocked_by_junction(Vector3(q.x, 0, q.y)):
+						p = q
+						slid = true
+						break
+				if not slid:
+					continue
 			var h := 7.0
 			var base := Vector3(p.x, KERB_HEIGHT, p.y)
 			_add("poles", pole, Transform3D(Basis(), base).scaled_local(Vector3(1.0, h, 1.0)), "pole")
