@@ -101,6 +101,7 @@ func _initialize() -> void:
 	_check_palette_against_doc()
 	_check_materials()
 	_check_geometry()
+	_check_frond_outline()
 	_check_budgets()
 	_check_batching()
 	_check_consumer()
@@ -519,6 +520,344 @@ func _check_geometry() -> void:
 			"variants are genuinely different meshes")
 	_ok(ArtKitBuildings.variant("qld_house", 3)[0].mesh == ArtKitBuildings.variant("qld_house", 3)[0].mesh,
 			"buildings hand out shared mesh resources")
+
+
+# =============================================================================
+# 3b. FROND OUTLINE
+# =============================================================================
+
+## ## What this section is for
+##
+## On 2026-10-02 the owner sent a night screenshot (red S15A, LAP 1/1) in which
+## "tree canopies read as floating green rhombus grids and read as toy props at
+## night". Measured cause, from the built meshes: every feather frond was a
+## 3-segment wedge whose blade was 0.60 x its own length. Three flat facets,
+## each as wide as the frond was long, and eleven of them closing the crown into
+## a lid. None of that is taste - it is a facet count and a width ratio, and
+## both are measurable.
+##
+## So this section asserts counts, and every threshold below carries the
+## measurement it was set from. Both numbers were read off the real meshes
+## before and after the change, on all three variants, on this machine:
+##
+## | prop               | facets/frond before | after | edge/reach before | after |
+## |--------------------|---------------------|-------|-------------------|-------|
+## | palm_coco          | 3.0                 | 7.0   | 0.646-0.783       | 0.259-0.312 |
+## | palm_alexandrine   | 3.0                 | 7.0   | 0.639-0.660       | 0.209-0.212 |
+## | palm_areca         | 3.0                 | 6.0   | 0.478-0.576       | 0.213-0.249 |
+## | tree_fern          | 3.0                 | 7.0   | 0.637-0.666       | 0.258-0.265 |
+##
+## A threshold with no measured source is how WHEEL_GRIP_FLOOR shipped against
+## the wrong number. Sources are in `docs/decisions/0001-art-director.md`
+## §"Frond outline".
+
+## Minimum distinct facet orientations per frond.
+##
+## Counted on the built mesh, not read off a constant: every unique triangle
+## normal is quantised to 1e-3 and the distinct set is divided by the frond
+## count. Flat shading means one normal per spine span, so this *is* the number
+## of straight runs in the frond - which is exactly the thing that made the old
+## crown read as folded paper.
+##
+## Source: the shipped fronds measure 7.0 (`palm_coco`, `palm_alexandrine`,
+## `tree_fern`) and 6.0 (`palm_areca`, which carries a crown per stem and cannot
+## afford more inside its 560-triangle budget). The floor is set to 6, the
+## lowest in use. Every pre-fix frond measured 3.0, so this check fails on the
+## old geometry with a factor of two to spare rather than scraping past.
+##
+## The quantisation is deliberate: a span's two triangles share a normal and a
+## duplicated quad shares it again, so all three collapse to one entry. That is
+## why the pre-fix count is 3 and not 6 - `quad_flip` was emitting a
+## bit-identical duplicate, not a reversed back face.
+const MIN_FROND_FACETS := 6
+
+## Fronds per crown, for the three palms whose crown count is fixed.
+##
+## `palm_areca` is absent on purpose: its crowns are welded across up to five
+## stems into one part, so "per frond" would have to reverse-engineer the stem
+## count, which is exactly the kind of coupling that makes a test lie. Its
+## outline is held by the two checks below, which need no frond count.
+const FEATHER_FRONDS_PER_CROWN := {
+	"palm_coco": 11,
+	"palm_alexandrine": 9,
+	"tree_fern": 6,
+}
+
+## Feather palms deliberately left out of the per-frond facet check, with the
+## reason, so the exemption is a declaration rather than a hole.
+##
+## Asserted against below: adding a palm to the check without either declaring
+## its frond count or listing it here is a failure, not a silently weaker test.
+const FROND_COUNT_EXEMPT := {
+	# Carries one crown per stem and welds them into a single part, and the stem
+	# count is `3 + variant % VARIANTS`, so a fixed frond count does not exist.
+	# Its fronds are 6-facet like the rest and its outline is held by the
+	# edge/reach and canopy-gap checks, which need no frond count.
+	"palm_areca": "crowns welded across a variant-dependent number of stems",
+}
+
+## The longest single straight edge anywhere on a frond, as a fraction of that
+## frond's horizontal reach.
+##
+## This is a compound measure and is documented as one: it folds in the widest
+## blade edge, the per-span step along the spine, and - because the blade rolls
+## along its length - the skew a rolled span gives its own edge. It is used
+## because it is the number that decides whether a frond presents a broad flat
+## facet to a streetlight or a slender blade, and because it is read off the
+## built mesh rather than off the parameters that produced it.
+##
+## Source: measured across all 12 feather-palm cases, the worst reading after the
+## change is 0.312 (`palm_coco` v2) and the best reading before it is 0.478
+## (`palm_areca` v2). 0.40 sits between them - 28% above the worst shipped
+## reading and 16% below the best old one. The physical reason the old number
+## was so much higher is the botany figure quoted in `props.gd`: a coconut
+## frond's leaflets spread about 0.5-1 m to a side of a 4-6 m frond, so a blade
+## edge should be well under a third of its reach. At 0.60 x reach the old
+## fronds were four times the widest the species allows.
+const MAX_FROND_EDGE_OF_REACH := 0.40
+
+## Fraction of the crown's own top-down footprint that must be sky.
+##
+## This is a silhouette-area measure: the crown is grid-sampled from directly
+## above and the cells whose centre falls inside no crown triangle are sky.
+##
+## Source: measured across all 12 cases, the shipped feather palms run 0.69-0.83
+## and the old ones ran 0.47-0.66. 0.55 is 25% below the worst shipped reading.
+## Honest note on what this one does and does not catch: at 0.55 it separates
+## `palm_coco`, `palm_alexandrine` and `palm_areca` from their old geometry, but
+## `tree_fern` measured 0.61-0.66 before the change and would have passed. Its
+## old crown was already airy because its fronds are short and droop hard. The
+## facet and edge checks above are the ones that catch `tree_fern`; this one
+## exists to stop any of the four drifting back toward a lid.
+const MIN_CANOPY_GAP := 0.55
+
+## Resolution of the top-down sky test. 32x32 cells over the crown's footprint:
+## enough that a gap between two fronds spans several cells, cheap enough that
+## the section costs well under a second headless.
+const CANOPY_GRID := 32
+
+
+func _check_frond_outline() -> void:
+	_section("frond outline")
+
+	var names: Array[String] = ["palm_coco", "palm_alexandrine", "palm_areca", "tree_fern"]
+	var reg := ArtKitProps.registry()
+	var missing: Array[String] = []
+	for n in names:
+		if not reg.has(n):
+			missing.append(n)
+	_ok(missing.is_empty(), "the four feather palms are all registered", str(missing))
+
+	# --- facet count: how many straight runs is a frond made of? -------------
+	#
+	# Only for the palms whose frond count is known. Dividing by a made-up count
+	# would let `palm_areca` "pass" without ever having measured a frond, which is
+	# a green that means nothing - so instead the coverage is asserted, and a palm
+	# added to `names` without a frond count fails loudly rather than silently
+	# dividing by 1. `palm_areca` is caught by the two checks below instead.
+	var counted: Array[String] = []
+	for n in names:
+		if not FEATHER_FRONDS_PER_CROWN.has(n) and not FROND_COUNT_EXEMPT.has(n):
+			counted.append(n)
+	_ok(counted.is_empty(),
+			"every checked palm either declares its frond count or is a declared exemption (exempt: %s)"
+			% ", ".join(PackedStringArray(FROND_COUNT_EXEMPT.keys())), str(counted))
+
+	var coarse: Array[String] = []
+	var facet_worst := 999
+	var facet_worst_name := ""
+	for n in FEATHER_FRONDS_PER_CROWN:
+		var fronds: int = FEATHER_FRONDS_PER_CROWN[n]
+		for v in ArtKitProps.VARIANTS:
+			var part := _crown_part(n, v)
+			if part == null:
+				coarse.append("%s/v%d has no foliage part" % [n, v])
+				continue
+			var facets := float(_distinct_facets(part.mesh)) / float(fronds)
+			if facet_worst > facets:
+				facet_worst = int(facets)
+				facet_worst_name = "%s/v%d" % [n, v]
+			if facets < float(MIN_FROND_FACETS):
+				coarse.append("%s/v%d %.1f facets/frond" % [n, v, facets])
+	_ok(coarse.is_empty(),
+			"every feather frond is built from at least %d distinct facets, all variants (worst %d at %s)"
+			% [MIN_FROND_FACETS, facet_worst, facet_worst_name], str(coarse))
+
+	# --- blade width vs reach ----------------------------------------------
+	var fat: Array[String] = []
+	var edge_worst := 0.0
+	var edge_worst_name := ""
+	for n in names:
+		for v in ArtKitProps.VARIANTS:
+			var r := _longest_edge_of_reach(n, v)
+			if r > edge_worst:
+				edge_worst = r
+				edge_worst_name = "%s/v%d" % [n, v]
+			if r > MAX_FROND_EDGE_OF_REACH:
+				fat.append("%s/v%d %.3f" % [n, v, r])
+	_ok(fat.is_empty(),
+			"no frond presents an edge longer than %.2f x its own reach (worst %.3f at %s)"
+			% [MAX_FROND_EDGE_OF_REACH, edge_worst, edge_worst_name], str(fat))
+
+	# --- sky through the canopy, seen from straight above --------------------
+	var lidded: Array[String] = []
+	var gap_worst := 1.0
+	var gap_worst_name := ""
+	var gaps: Array[String] = []
+	for n in names:
+		for v in ArtKitProps.VARIANTS:
+			var g := _canopy_gap(n, v)
+			gaps.append("%s/v%d=%.2f" % [n, v, g])
+			if g < gap_worst:
+				gap_worst = g
+				gap_worst_name = "%s/v%d" % [n, v]
+			if g < MIN_CANOPY_GAP:
+				lidded.append("%s/v%d gap %.2f" % [n, v, g])
+	_ok(lidded.is_empty(),
+			"every feather crown shows at least %d%% sky from above (tightest %.2f at %s)"
+			% [roundi(MIN_CANOPY_GAP * 100.0), gap_worst, gap_worst_name], str(lidded))
+	print("       measured canopy sky gaps: %s" % ", ".join(PackedStringArray(gaps)))
+
+
+## The foliage part of a prop: the one wearing a `surface_foliage_*` material with
+## the most triangles. For all four feather palms that is the crown - the fruit
+## bunch and the frond-base skirt are both smaller.
+func _crown_part(prop: String, variant: int) -> ArtKitPart:
+	var best: ArtKitPart = null
+	for p in ArtKitProps.variant(prop, variant):
+		if not String(p.mat).begins_with("surface_foliage"):
+			continue
+		if best == null or p.tri > best.tri:
+			best = p
+	return best
+
+
+## Distinct triangle-normal directions in a mesh, quantised to 1e-3 so that
+## coplanar triangles and duplicated quads collapse into one entry. Under flat
+## shading this counts the number of distinct planes the mesh is folded along,
+## which for a frond is the number of spans in its spine.
+func _distinct_facets(mesh: ArrayMesh) -> int:
+	var seen := {}
+	for s in mesh.get_surface_count():
+		var arrays: Array = mesh.surface_get_arrays(s)
+		var norms: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+		for n in norms:
+			seen["%d,%d,%d" % [roundi(n.x * 1000.0), roundi(n.y * 1000.0),
+					roundi(n.z * 1000.0)]] = true
+	return seen.size()
+
+
+## Every triangle corner of a part, three per triangle. SurfaceTool commits
+## non-indexed, so the vertex array is already triangles; the index branch is
+## here so this keeps working if that ever changes.
+func _tri_corners(part: ArtKitPart) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	for s in part.mesh.get_surface_count():
+		var arrays: Array = part.mesh.surface_get_arrays(s)
+		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var index: Variant = arrays[Mesh.ARRAY_INDEX]
+		if index == null:
+			out.append_array(verts)
+		else:
+			for i in (index as PackedInt32Array):
+				out.append(verts[i])
+	return out
+
+
+## The longest edge of the crown's triangles as a fraction of the crown's
+## horizontal reach, measured about the crown's own XZ centroid so a leaning
+## trunk cannot shrink the denominator.
+func _longest_edge_of_reach(prop: String, variant: int) -> float:
+	var part := _crown_part(prop, variant)
+	if part == null:
+		return 0.0
+	var v := _tri_corners(part)
+	var longest := 0.0
+	for i in range(0, v.size() - 2, 3):
+		for e in 3:
+			longest = maxf(longest, v[i + e].distance_to(v[i + (e + 1) % 3]))
+	var c := _xz_centre(v)
+	var reach := 0.0
+	for p in v:
+		reach = maxf(reach, Vector2(p.x - c.x, p.z - c.y).length())
+	return longest / maxf(reach, 1e-4)
+
+
+## The fraction of the crown's own top-down footprint that is sky: grid-sample the
+## XZ bounding square of the crown, and count the cells whose centre is not inside
+## any crown triangle. Reported as gap = 1 - covered.
+func _canopy_gap(prop: String, variant: int) -> float:
+	var part := _crown_part(prop, variant)
+	if part == null:
+		return 0.0
+	var v := _tri_corners(part)
+	if v.is_empty():
+		return 0.0
+	var c := _xz_centre(v)
+	var min_x := INF
+	var max_x := -INF
+	var min_z := INF
+	var max_z := -INF
+	for p in v:
+		min_x = minf(min_x, p.x)
+		max_x = maxf(max_x, p.x)
+		min_z = minf(min_z, p.z)
+		max_z = maxf(max_z, p.z)
+	# Projected triangles, each with a bounding box so the inner loop can bail
+	# early. Without it this is cells x triangles point-in-triangle tests.
+	var tris: Array = []
+	var boxes: Array = []
+	for i in range(0, v.size() - 2, 3):
+		var t := PackedVector2Array([Vector2(v[i].x, v[i].z),
+				Vector2(v[i + 1].x, v[i + 1].z), Vector2(v[i + 2].x, v[i + 2].z)])
+		tris.append(t)
+		boxes.append(Vector4(minf(minf(t[0].x, t[1].x), t[2].x),
+				maxf(maxf(t[0].x, t[1].x), t[2].x),
+				minf(minf(t[0].y, t[1].y), t[2].y), maxf(maxf(t[0].y, t[1].y), t[2].y)))
+
+	var covered := 0
+	var cells := 0
+	for gy in CANOPY_GRID:
+		for gx in CANOPY_GRID:
+			var px := lerpf(min_x, max_x, (float(gx) + 0.5) / float(CANOPY_GRID))
+			var pz := lerpf(min_z, max_z, (float(gy) + 0.5) / float(CANOPY_GRID))
+			# Outside the crown's own disc is sky by definition rather than by
+			# geometry, so it is not counted either way - otherwise a crown would
+			# be rewarded for being small.
+			if Vector2(px - c.x, pz - c.y).length() > 0.5 * maxf(max_x - min_x, max_z - min_z):
+				continue
+			cells += 1
+			for k in tris.size():
+				var bb: Vector4 = boxes[k]
+				if px < bb.x or px > bb.y or pz < bb.z or pz > bb.w:
+					continue
+				if _in_tri_2d(Vector2(px, pz), tris[k]):
+					covered += 1
+					break
+	if cells == 0:
+		return 0.0
+	return 1.0 - float(covered) / float(cells)
+
+
+func _xz_centre(v: PackedVector3Array) -> Vector2:
+	var sx := 0.0
+	var sz := 0.0
+	for p in v:
+		sx += p.x
+		sz += p.z
+	return Vector2(sx / float(v.size()), sz / float(v.size()))
+
+
+## Barycentric point-in-triangle, 2D. The sign test handles both windings and
+## degenerate triangles without a separate area check.
+func _in_tri_2d(p: Vector2, t: PackedVector2Array) -> bool:
+	var d1 := (p.x - t[1].x) * (t[0].y - t[1].y) - (t[0].x - t[1].x) * (p.y - t[1].y)
+	var d2 := (p.x - t[2].x) * (t[1].y - t[2].y) - (t[1].x - t[2].x) * (p.y - t[2].y)
+	var d3 := (p.x - t[0].x) * (t[2].y - t[0].y) - (t[2].x - t[0].x) * (p.y - t[0].y)
+	var has_neg := d1 < 0.0 or d2 < 0.0 or d3 < 0.0
+	var has_pos := d1 > 0.0 or d2 > 0.0 or d3 > 0.0
+	return not (has_neg and has_pos)
+
 
 
 # =============================================================================

@@ -253,6 +253,33 @@ static func palm_for(seed_value: int) -> Array:
 # PALMS
 # =============================================================================
 
+## Frond blade half-width as a fraction of frond length.
+##
+## Source: *Cocos nucifera* fronds run 4-6 m and the leaflets of a mature frond
+## spread about 0.5-1 m to a side, so blade width is 1.0-2.0 m on a 4-6 m frond -
+## a full-width ratio of 0.17-0.33, i.e. a half-width ratio of 0.08-0.17. The
+## narrow end of that band is the safe one: over-widening is what closed the
+## canopy into a disc last time. Alexandra palm (*Ptychosperma alexandrae*) fronds
+## are 1.5-2.5 m with a ~0.3 m blade, ratio ~0.12 half-width, same band.
+##
+## This was 0.30 - a full blade width of 0.60 x length, roughly four times the
+## widest the botany allows. That is the measurement behind "the canopies read as
+## floating green rhombus grids": at 11 fronds those spokes overlap about twice
+## over and the crown closes into one solid faceted disc.
+##
+## 0.075 is inside the botany band and was picked by looking, not by arithmetic:
+## at 0.05 the blades were so narrow they read as straps with no canopy mass,
+## which is the opposite failure. See `docs/decisions/0001-art-director.md`
+## §"Frond outline" for the render that settled it.
+const FROND_HALF_WIDTH := 0.075
+
+## Spine segments per frond, for the palms that can afford them. Seven spans put
+## a new vertex roughly every 12% of the frond's arc, which is what turns the
+## three visible chords of the old spine into a smooth arch under flat shading.
+## `palm_areca` uses FROND_SEGMENTS_SMALL because it carries a crown per stem.
+const FROND_SEGMENTS := 7
+const FROND_SEGMENTS_SMALL := 6
+
 ## Coconut palm. The tall one: a smooth, slightly curved grey trunk with the
 ## leaf-scar rings implied by a radius wobble, a heavy crown of 11 arching
 ## fronds, and a fruit bunch tucked under the crown. The fruit is 40 triangles
@@ -267,7 +294,7 @@ static func _build_palm_coco(variant: int = 0, height_scale: float = 1.0) -> Arr
 	# The crown rides the top of the curve, not the top of the bounding box.
 	var crown := bend + Vector3(0.0, h, 0.0)
 	parts.append(_palm_crown(crown, 11, s.randf_range(3.0, 3.9),
-			s.randf_range(0.5, 0.85), s, "surface_foliage_a", 0.10))
+			s.randf_range(0.5, 0.85), s, "surface_foliage_a", 0.10, FROND_SEGMENTS))
 	parts.append(ArtKitPart.of(_fruit_bunch(crown, s), "surface_foliage_c"))
 	# A skirt of dead frond bases just under the crown. 14 triangles of nothing,
 	# and it hides the joint where the trunk meets the crown.
@@ -294,7 +321,7 @@ static func _build_palm_alexandrine(variant: int = 0, height_scale: float = 1.0)
 			s.randf_range(-0.35, 0.35), s.randf_range(-0.2, 0.2), 3), "bark"))
 	var crown := Vector3(0.0, h, 0.0)
 	parts.append(_palm_crown(crown, 9, s.randf_range(1.9, 2.5),
-			s.randf_range(0.15, 0.35), s, "surface_foliage_a", 0.22))
+			s.randf_range(0.15, 0.35), s, "surface_foliage_a", 0.22, FROND_SEGMENTS))
 	return ArtKitPart.weld(parts)
 
 
@@ -320,7 +347,7 @@ static func _build_palm_areca(variant: int = 0, height_scale: float = 1.0) -> Ar
 				dir.x * lean, dir.z * lean, 3, dir * 0.18), "bark"))
 		parts.append(_palm_crown(dir * (lean * 1.1) + Vector3(0, h, 0), 6,
 				s.randf_range(1.3, 1.8), s.randf_range(0.4, 0.7), s,
-				"surface_foliage_a", 0.16))
+				"surface_foliage_a", 0.16, FROND_SEGMENTS_SMALL))
 	return ArtKitPart.weld(parts)
 
 
@@ -388,25 +415,30 @@ static func _oriented_fan(yaw: float, tilt: float, radius: float, base: Vector3)
 ## A crown of drooping fronds fanning around `centre`. Shared by three of the four
 ## palms, which is the honest overlap: a frond is a frond, and what changes
 ## between species is the count, the length, the droop and the stiffness.
+##
+## `segments` is the spine resolution and it is a *per-species* number, not a
+## constant, for one reason: `palm_areca` carries a crown per stem across up to
+## five stems, so it cannot afford the same resolution inside its 560-triangle
+## budget. Everything else about a frond is identical between species.
 static func _palm_crown(centre: Vector3, count: int, length: float, droop: float,
-		s: RandomNumberGenerator, mat: String, stiffness: float) -> ArtKitPart:
+		s: RandomNumberGenerator, mat: String, stiffness: float,
+		segments: int) -> ArtKitPart:
 	var st := ArtKitMesh.begin()
 	for i in count:
 		var yaw := TAU * float(i) / float(count) + s.randf_range(-0.18, 0.18)
 		var tilt := s.randf_range(0.30, 0.62) * (1.0 - stiffness * 0.5)
 		var ln := length * s.randf_range(0.82, 1.15)
 		var horiz := Vector3(cos(yaw), 0.0, sin(yaw))
-		var side := horiz.cross(Vector3.UP).normalized()
+		# `reach` and `tip_drop` keep the crown's footprint and hang identical to
+		# the three-chord version this replaced, so the change is confined to how
+		# the frond is *shaped* and not to where the crown sits in the frame.
+		var reach := ln * 0.94
 		var lift := ln * sin(tilt)
-		# Four spine points along the frond: it leaves the crown rising, then
-		# flattens, then falls. The taper of the blade does the rest.
-		var p0 := centre + Vector3.UP * lift
-		var p1 := centre + horiz * (ln * 0.34) + Vector3.UP * (lift * 0.86)
-		var p2 := centre + horiz * (ln * 0.68) + Vector3.UP * (lift * 0.52) - Vector3.UP * (ln * 0.30)
-		var p3 := centre + horiz * (ln * 0.94) + Vector3.UP * (lift * 0.18) - Vector3.UP * (ln * droop)
-		_strip(st, p0, p1, ln * 0.30, ln * 0.15, side)
-		_strip(st, p1, p2, ln * 0.15, ln * 0.08, side)
-		_strip(st, p2, p3, ln * 0.08, 0.012, side)
+		var tip_drop := ln * droop - lift * 0.18
+		# Per-frond roll, signed, so a crown's blades face opposite ways and the
+		# canopy does not read as one fan of identical facets.
+		ArtKitMesh.frond(st, centre, horiz, reach, lift, maxf(tip_drop, 0.0),
+				ln * FROND_HALF_WIDTH, segments, s.randf_range(-0.55, 0.55))
 	return ArtKitPart.of(ArtKitMesh.commit(st), mat)
 
 
@@ -525,7 +557,7 @@ static func _build_tree_fern(variant: int = 0) -> Array:
 		parts.append(ArtKitPart.of(ArtKitMesh.tube(0.11, 0.05, 0.55, 4,
 				Vector3(cos(a) * 0.22, h * 0.30, sin(a) * 0.22)), "surface_foliage_c"))
 	parts.append(_palm_crown(Vector3(0, h, 0), 6, s.randf_range(1.4, 2.1),
-			s.randf_range(0.5, 0.8), s, "surface_foliage_b", 0.05))
+			s.randf_range(0.5, 0.8), s, "surface_foliage_b", 0.05, FROND_SEGMENTS))
 	return ArtKitPart.weld(parts)
 
 

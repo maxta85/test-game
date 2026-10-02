@@ -42,7 +42,8 @@ rules below are checked, not documented-and-hoped-for.
 | `props.gd` | street furniture and vegetation. |
 | `buildings.gd` | buildings, including the wrapper for the 2198 real OSM footprints. |
 | `scatter.gd` | the consumer. One node, one line at the call site: placements in, draw calls out. |
-| `artkit_check.gd` | this document's enforceable claims. 92 checks. |
+| `artkit_check.gd` | this document's enforceable claims. 97 checks. |
+| `artkit_shot.gd` | contact-sheet renderer. One fixed camera, palette night lighting, `--closeup` for frond work. Writes only to `--out`. |
 
 ## 3. Units, axes, origin
 
@@ -232,6 +233,91 @@ at 7000 is not, and no amount of draw-call collapsing saves it.
 | `qld_house` | 780 | the most-seen building in the game |
 | `walk_up_block` | 1100 | the tallest thing in a low-rise city |
 | `wrap_footprint` | 350 per storey | 2198 of them; scales with storeys |
+
+## 7a. Frond outline
+
+Added 2026-10-02, in response to the owner's night screenshot (red S15A, LAP
+1/1) in which "tree canopies read as floating green rhombus grids and read as toy
+props at night". This is the section that records where the numbers in the frond
+checks came from, because a threshold with no measured source is exactly how
+`WHEEL_GRIP_FLOOR` shipped against the wrong value.
+
+**What was wrong.** Measured on the built meshes, every feather frond was a
+3-segment wedge whose blade was 0.60 × its own length. Three flat facets, each
+as wide as the frond was long, and eleven of them per crown. That is a rhombus;
+a ring of rhombi is a lid, not a canopy.
+
+**What changed.** `ArtKitMesh.frond()` replaces the three-chord spine with a
+quadratic bezier sampled at 6-7 spans, replaces the monotonic taper with a
+lanceolate profile widest at t=0.33, rolls the blade along its length so spans
+catch the key light at different angles, and emits **one** quad per span instead
+of two. The doubled quad was not a back face: `quad_flip` was handed the same
+four vertices in the same order, producing a bit-identical duplicate that z-fought
+and cost 50% of the crown's triangles for nothing. Every foliage material is
+`CULL_DISABLED`, so no back face is needed at all. That is what paid for the
+extra spans — 7 spans single-sided is 14 triangles against 12 for 3 spans
+doubled.
+
+**The three numbers**, measured before and after on all three variants, on the
+machine the change was made on:
+
+| prop | facets/frond before | after | edge/reach before | after | canopy sky before | after |
+|---|---:|---:|---:|---:|---:|---:|
+| `palm_coco` | 3.0 | 7.0 | 0.646–0.783 | 0.259–0.312 | 0.51–0.54 | 0.69–0.73 |
+| `palm_alexandrine` | 3.0 | 7.0 | 0.639–0.660 | 0.209–0.212 | 0.54–0.57 | 0.71–0.75 |
+| `palm_areca` | 3.0 | 6.0 | 0.478–0.576 | 0.213–0.249 | 0.47–0.53 | 0.69–0.72 |
+| `tree_fern` | 3.0 | 7.0 | 0.637–0.666 | 0.258–0.265 | 0.61–0.66 | 0.78–0.83 |
+
+- **facets/frond** — distinct triangle normals on the crown, quantised to 1e-3,
+  divided by the frond count. Flat shading means one normal per spine span, so
+  this *is* the number of straight runs in the frond. Floor **6**: the shipped
+  fronds are 7, and 6 is `palm_areca`'s, which carries a crown per stem and
+  cannot afford more inside its 560-triangle budget. Every pre-fix frond measured
+  3.0, so the check fails the old geometry with a factor of two to spare.
+- **edge/reach** — longest single straight edge on the crown over its horizontal
+  reach, measured about the crown's own XZ centroid. Floor **0.40**: 28% above
+  the worst shipped reading (0.312) and 16% below the best pre-fix one (0.478).
+  It is a compound measure — widest blade edge, per-span spine step, and the skew
+  a rolled span gives its own edge — and it is documented as one in the check.
+  The physical reason the old number was so far out: *Cocos nucifera* leaflets
+  spread about 0.5–1 m to a side of a 4–6 m frond, so a blade edge should sit
+  well under a third of the frond's reach. At 0.60 the old fronds were four times
+  the widest the species allows.
+- **canopy sky** — the fraction of the crown's own top-down footprint that is
+  sky, grid-sampled from directly above. Floor **0.55**: 25% below the worst
+  shipped reading (0.69). Honest note on scope: this one separates `palm_coco`,
+  `palm_alexandrine` and `palm_areca` from their old geometry, but `tree_fern`
+  measured 0.61–0.66 *before* the change and would have passed. Its old crown was
+  already airy because its fronds are short and droop hard. The facet and edge
+  checks are the ones that catch `tree_fern`; the sky check exists so none of the
+  four drifts back toward a lid.
+
+**Blade width.** `props.gd` `FROND_HALF_WIDTH = 0.075` (half-width as a
+fraction of frond length). The botany band for a coconut frond is 0.08–0.17 as
+a half-width ratio; Alexandra palm sits at ~0.12, inside it. The old value was
+0.30 — about four times the widest the species allows. Within the band the value
+was chosen by looking, not by arithmetic: at 0.05 the blades read as straps with
+no canopy mass, which is the opposite failure.
+
+**Cost.** No budget moved. `palm_coco` 256 → 278 of 300, `palm_alexandrine`
+157 → 175 of 200, `tree_fern` 129 → 141 of 160, `palm_areca` and `palm_fan`
+unchanged at 535/560 and 336/350.
+
+**Looking at it.** `artkit_shot.gd` renders the kit's props on a contact sheet
+from a fixed camera under the palette's own night lighting, so two commits differ
+only by what changed in `artkit/`. It reports the frame's mean luminance and
+non-black sample count and exits non-zero on an all-black frame, because "the
+render is dark" and "the render never happened" are otherwise the same file.
+
+```
+godot --path . --rendering-driver opengl3 --audio-driver Dummy \
+    --resolution 1600x900 --script res://artkit/artkit_shot.gd -- \
+    --out /tmp/sheet.png --closeup --props palm_coco
+```
+
+`--closeup` is the framing where "flat quad" and "arched frond" stop being
+arguable. Note it must be a rendering run, not `--headless`: headless uses the
+dummy renderer, whose mesh storage is null and which renders nothing.
 
 ## 8. The OSM path
 
