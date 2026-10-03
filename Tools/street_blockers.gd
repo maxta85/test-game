@@ -134,12 +134,35 @@ func _corridor_survey(space: PhysicsDirectSpaceState3D) -> Dictionary:
 	var lane := {}
 	for c in LANE_CANDIDATES:
 		lane["%.1f" % float(c)] = 2.0 * hw_typical()
+	# Census of what is UNDER THE CENTRELINE, separately from what is beside it.
+	# A corridor polyline is a line on a map; the carriageway is generated from the
+	# road graph. They can disagree, and when they do the street is not a street.
+	# A 1400 m name in the map data proves nothing about 1400 m of road.
+	var road_stations := 0
+	var bare_run := 0
+	var bare_worst := 0
+	var bare_worst_s := -1.0
+	var bare_starts: Array = []
 
 	var s := 0.0
 	while s < _total:
 		var pose := _pose(s)
 		var hw := _half_width(pose["pos"])
 		stations += 1
+
+		# 0.4 m box, not the carriageway-width one: this asks whether TARMAC is
+		# under the centreline, and a 14 m box would happily find the road of a
+		# street running 6 m to the side and call this one paved.
+		if GROUND.has("RoadCollision") and _has(space, pose["pos"], pose["t"], 0.2, "RoadCollision"):
+			road_stations += 1
+			bare_run = 0
+		else:
+			bare_run += 1.0 / STATIONS_PER_M
+			if bare_run > bare_worst:
+				bare_worst = bare_run
+				bare_worst_s = s - bare_run + 1.0 / STATIONS_PER_M
+			if absf(bare_run - 1.0 / STATIONS_PER_M) < 0.0001:
+				bare_starts.append(s)
 
 		var names := _names_in(space, pose["pos"], pose["t"], hw)
 		var clear_names: Array = []
@@ -187,7 +210,18 @@ func _corridor_survey(space: PhysicsDirectSpaceState3D) -> Dictionary:
 		worst = INF
 	return {"stations": stations, "blocked": blocked_stations,
 		"pinches": pinches, "bodies": bodies, "lane": lane,
+		"road_stations": road_stations, "bare_worst": bare_worst,
+		"bare_worst_s": bare_worst_s, "bare_starts": bare_starts,
 		"worst": worst, "worst_s": worst_s}
+
+
+## Is `name` inside the swept box? Same query as `_sweep`, filtered.
+func _has(space: PhysicsDirectSpaceState3D, centre: Vector3, tan: Vector2,
+		half_w: float, name: String) -> bool:
+	for b in _sweep(space, centre, tan, half_w):
+		if String(b.name) == name:
+			return true
+	return false
 
 
 ## Widest carriageway width on this street, for seeding the lane scores before
@@ -229,9 +263,9 @@ func _clear_about(band: Array, half_w: float, offset: float) -> float:
 
 ## Body names across the whole carriageway at one station.
 func _names_in(space: PhysicsDirectSpaceState3D, centre: Vector3, tan: Vector2,
-		half_w: float) -> Array:
+		half_w: float, depth: float = 0.30) -> Array:
 	var out: Array = []
-	for b in _sweep(space, centre, tan, half_w):
+	for b in _sweep(space, centre, tan, half_w, depth):
 		var n := String(b.name)
 		if not out.has(n):
 			out.append(n)
@@ -289,12 +323,15 @@ func _widest_clear_range(band: Array, half_w: float) -> Array:
 	return [-half_w + float(best_lo) * BAND_W, -half_w + float(best_hi) * BAND_W]
 
 
-## A box the width of the carriageway, `SWEEP_H` tall and `2 * BAND` deep along
-## the street, swept at one point.
+## A box `2 * half_w` across the carriageway, `SWEEP_H` tall and `depth` deep along
+## the street, swept at one point. The default depth of 0.30 m is right for the
+## corridor survey, whose stations are every 0.25 m so consecutive boxes overlap
+## and cover the street continuously; it is far too shallow for asking what a CAR
+## is touching, which is what `_at_station` is for.
 func _sweep(space: PhysicsDirectSpaceState3D, centre: Vector3, tan: Vector2,
-		half_w: float) -> Array:
+		half_w: float, depth: float = 0.30) -> Array:
 	var box := BoxShape3D.new()
-	box.size = Vector3(half_w * 2.0, SWEEP_H, 0.30)
+	box.size = Vector3(half_w * 2.0, SWEEP_H, depth)
 	# Local X runs across the carriageway, local Z along it. Built from explicit
 	# columns: Basis(x, y, z) takes three Vector3s and a Vector2 in the third slot
 	# is a parse error, not a coercion.
@@ -319,20 +356,33 @@ func _sweep(space: PhysicsDirectSpaceState3D, centre: Vector3, tan: Vector2,
 ## method - so asking one for its extents is a runtime error, not a null. A
 ## downward ray per lateral band answers the same question for less: how high does
 ## the obstruction stand at this point across the carriageway.
+##
+## The sweep here is AT_DEPTH deep along the street, not SWEEP_H's 0.30 m, and that
+## difference is the whole reason this mode exists. A contact reported at a car's
+## CENTRE is with something up to half a car length ahead of it, and the 0.30 m
+## box the corridor survey uses cannot see that: it reported a bare carriageway at
+## every lateral offset for stations where the drive log plainly had the car
+## touching a prop. Asking "what is at the station where the car is" and getting
+## "nothing" is a question about the sweep, not about the street.
+const AT_DEPTH := 6.0
+
+
 func _at_station(space: PhysicsDirectSpaceState3D, at: float) -> void:
 	var pose := _pose(at)
 	var hw := _half_width(pose["pos"])
 	var tan: Vector2 = pose["t"]
 	var right := Vector2(tan.y, -tan.x)
 	print("")
-	print("[blockers --at=%.1f] half-width %.2f m, centre (%.1f, %.1f)" % [
-		at, hw, pose["pos"].x, pose["pos"].z])
+	print("[blockers --at=%.1f] half-width %.2f m, centre (%.1f, %.1f), swept %.1f m deep" % [
+		at, hw, pose["pos"].x, pose["pos"].z, AT_DEPTH])
+	print("the depth is a car: contacts reported at a car's centre are up to half a")
+	print("car length ahead of it, and a 0.30 m slice cannot see them.")
 	print("")
 	var seen := {}
 	var off := -hw
 	while off < hw - 0.001:
 		var c: Vector3 = pose["pos"] + Vector3(right.x, 0.0, right.y) * (off + BAND_W * 0.5)
-		for n in _names_in(space, c - Vector3(0.0, BOX_LIFT, 0.0), tan, BAND_W * 0.5):
+		for n in _names_in(space, c - Vector3(0.0, BOX_LIFT, 0.0), tan, BAND_W * 0.5, AT_DEPTH):
 			var key := "%s@%+.2f" % [n, off]
 			if seen.has(key):
 				continue
@@ -417,9 +467,11 @@ func _report(r: Dictionary) -> void:
 	print("a car needs about %.1f m of clear width; the survey resolves %.1f m" % [
 		CAR_CLEAR, BAND_W])
 	print("")
+	_road_census(r)
 	if (r["pinches"] as Array).is_empty():
 		print("NOTHING in the carriageway at any station. The whole street is clear.")
 		print("")
+		_lane_report(r)
 		print("Report line: BLOCKERS=0 NARROWEST=%.1f" % CAR_CLEAR)
 		print("=".repeat(78))
 		return
@@ -517,3 +569,37 @@ func _note(w: float) -> String:
 	if w >= 1.9:
 		return "a bare car width - swerve hard"
 	return "below car width - no line"
+
+
+## How much of this "street" has tarmac under its centreline.
+##
+## A corridor polyline in the map data is a LINE. The carriageway the car drives on
+## is generated from the road graph, and the two are built from the same fetch but
+## are not the same object. A long straight run in the name list can therefore be a
+## fragment stitched across the map rather than a road anyone built, and the only
+## way to know is to ask the collider what is underneath, station by station.
+##
+## This is asked with a 0.4 m box on the centreline, not the carriageway-width one
+## the corridor survey uses: a wide box finds the road of a street running a few
+## metres to the side and reports this one as paved.
+func _road_census(r: Dictionary) -> void:
+	var on := int(r["road_stations"])
+	var total := int(r["stations"])
+	var bare := total - on
+	print("ROAD BENEATH THE CENTRELINE: %d of %d stations (%.0f%%)" % [
+		on, total, 100.0 * float(on) / maxf(float(total), 1.0)])
+	if bare == 0:
+		print("  the whole polyline is tarmac. It is a street.")
+	else:
+		print("  %d stations (%.0f m) have NO road on the centreline." % [
+			bare, bare / STATIONS_PER_M])
+		print("  longest bare run: %.1f m starting at s=%.1f m" % [
+			float(r["bare_worst"]), float(r["bare_worst_s"])])
+		var starts: Array = r["bare_starts"]
+		if starts.size() > 12:
+			print("  %d bare runs start at: %s ... (truncated)" % [
+				starts.size(), str(starts.slice(0, 12))])
+		else:
+			print("  %d bare runs start at: %s" % [starts.size(), str(starts)])
+		print("  A run of bare stations means the polyline is not following a road there.")
+	print("")
