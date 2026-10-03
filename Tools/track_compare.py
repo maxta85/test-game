@@ -61,6 +61,10 @@ ROUTE_SOURCE = os.path.join(ROOT, "Systems", "race", "race_def.gd")
 LENGTH_TOL_PCT = 6.0
 ENDPOINT_TOL_M = 25.0
 POSITION_TOL_M = 200.0
+# How often the emitted trace is sampled against its backing source polyline. The
+# endpoints alone are not enough: a trace can start and finish on the right road and
+# bow 100 m off it in the middle, and an endpoint-only check reports that as perfect.
+TRACE_SAMPLE_M = 10.0
 
 
 def unproject(x, z, lat0=gen.ORIGIN[0], lon0=gen.ORIGIN[1]):
@@ -148,6 +152,24 @@ def dist_to_polyline(p, pts):
     never happened. Min over every segment is the honest measure.
     """
     return min(_seg_dist(p, pts[i], pts[i + 1]) for i in range(len(pts) - 1))
+
+
+def sample_polyline(pts, step):
+    """Vertices plus points every `step` metres along each segment.
+
+    Sampling the interior is what turns "the endpoints are on the source" into "the
+    whole trace is on the source", which is the claim worth making about a road
+    centreline.
+    """
+    out = list(pts)
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
+        seg = math.dist(a, b)
+        n = int(seg // step)
+        for k in range(1, n + 1):
+            t = (k * step) / seg
+            out.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+    return out
 
 
 def _seg_dist(p, a, b):
@@ -240,6 +262,9 @@ def main():
               f"{present}")
         checked = 0
         worst_short = worst_off = 0.0
+        offsets = []          # every sampled point of every emitted trace
+        trace_median = {}
+        per_street = {}       # street -> [offsets], for the backing-street report
         src_km = sum(e[0] for v in source.values() for e in v) / 1000.0
         map_km = sum(c["length"] for c in corridors) / 1000.0
         for c in corridors:
@@ -255,31 +280,63 @@ def main():
                 key=lambda e: dist_to_polyline(pts[0], e[1])
                 + dist_to_polyline(pts[-1], e[1]))
             blen, bpts = best
-            d0 = dist_to_polyline(pts[0], bpts)
-            d1 = dist_to_polyline(pts[-1], bpts)
-            off = max(d0, d1)
+            # Sample the whole trace, not just its ends: the interior is where a
+            # hand-edited or mis-projected centreline drifts away from its road.
+            mine = [dist_to_polyline(q, bpts)
+                    for q in sample_polyline(pts, TRACE_SAMPLE_M)]
+            d0, d1, off = mine[0], mine[-1], max(mine)
+            med = sorted(mine)[len(mine) // 2]
             short = max(0.0, c["length"] - blen) / max(blen, 1.0) * 100.0
             worst_off = max(worst_off, off)
             worst_short = max(worst_short, short)
             checked += 1
+            offsets.extend(mine)
+            per_street.setdefault(c["name"], []).extend(mine)
+            trace_median[c["name"]] = med
             if short > LENGTH_TOL_PCT or off > ENDPOINT_TOL_M:
-                failures.append(f"{c['name']} ({c['length']} m): closest source way "
-                                f"{blen:.1f} m, {short:.1f}% short, endpoints "
-                                f"{d0:.0f}/{d1:.0f} m off the source polyline")
-                print(f"[FAIL] {c['name']} ({c['length']:.1f} m): source way "
-                      f"{blen:.1f} m, {short:.1f}% short, endpoints "
-                      f"{d0:.0f}/{d1:.0f} m off")
+                failures.append(f"{c['name']} ({c['length']} m): backing way "
+                                f"{blen:.1f} m, {short:.1f}% short, trace up to "
+                                f"{off:.1f} m off it (median {med:.2f} m)")
+                print(f"[FAIL] {c['name']} ({c['length']:.1f} m): backing way "
+                      f"{blen:.1f} m, {short:.1f}% short, trace median {med:.2f} m, "
+                      f"worst {off:.1f} m off")
         if map_km > src_km * 1.001:
             failures.append(f"the map carries {map_km:.2f} km but its sources only "
                             f"total {src_km:.2f} km - geometry was invented")
-        print(f"[ok] {checked}/{len(corridors)} corridors lie on a source polyline "
-              f"(worst {worst_short:.1f}% short of it, worst endpoint "
+        offsets.sort()
+        median = offsets[len(offsets) // 2] if offsets else 0.0
+        p90 = offsets[int(len(offsets) * 0.9)] if offsets else 0.0
+        tag = "ok" if checked == len(corridors) else "FAIL"
+        print(f"[{tag}] {checked}/{len(corridors)} corridors are backed by a source "
+              f"polyline (worst {worst_short:.1f}% short of it, worst point "
               f"{worst_off:.1f} m off; limits {LENGTH_TOL_PCT}% / "
               f"{ENDPOINT_TOL_M} m)")
+        # Trace backing, stated as numbers: the offset of the emitted centreline from
+        # the OSM way that backs it, sampled every 10 m along every trace. 0.00 m means
+        # the emitted vertices are the source vertices - rdp() kept a subset of them,
+        # so there is nothing to interpolate and nothing invented.
+        print(f"     {len(offsets)} points sampled at {TRACE_SAMPLE_M:.0f} m: "
+              f"MEDIAN_OFFSET={median:.2f} p90={p90:.2f} worst={worst_off:.2f} m")
         print(f"     map {map_km:.2f} km of source {src_km:.2f} km; the shortfall is "
               f"fragments under {gen.MIN_CORRIDOR_LEN:.0f} m, disconnected pieces and "
               f"RDP simplification, all dropped on purpose")
 
+
+    # ---- 2b. the backing street: whose trace the game actually starts from.
+    #
+    # Every route in Systems/race/race_def.gd starts at a hardcoded node, and
+    # RoadGraph.build() numbers nodes by corridor order, so node 0 is corridors[0].
+    # Naming the street whose trace backs that node is the useful half of "is the map
+    # real": a 4409 m network is only as trustworthy as the road the grid sits on.
+    if corridors:
+        node0 = corridors[0]
+        med0 = trace_median.get(node0["name"])
+        med_txt = f"{med0:.2f}" if med0 is not None else "no source way"
+        print(f"BACKING_STREET={node0['name']} node0={node0['length']:.1f}m "
+              f"class={node0['class']} points={len(node0['points'])} "
+              f"trace_median_offset={med_txt}m")
+        if node0["name"] not in by_name:
+            failures.append("node 0 has no backing street in the data")
 
     # ---- 3. route names in the registry that have a street behind them.
     print("routes:")
@@ -329,6 +386,12 @@ def main():
 #   - stretch a corridor's far endpoint     -> "endpoints 0/258 m off"
 #   - shift the whole world 37/-21 m        -> "endpoints 43/24 m off" on Hoare Street
 #   - rename a corridor to an invented name-> "no OSM way by that name"
+#   - bow ONE interior vertex of a trace 30 m sideways, endpoints untouched -> caught
+#     ("worst 29.7 m off"). This is the mutation the endpoint-only version of this
+#     check could not see, which is why the interior is sampled.
+#   - shear the whole world 2 m in x -> not a failure (2 m is inside the 25 m
+#     tolerance) but MEDIAN_OFFSET moves 0.18 -> 1.42, so the number is load-bearing
+#     evidence rather than decoration.
 # A check that cannot fail is decoration, so keep these honest when editing.
 if __name__ == "__main__":
     sys.exit(main())
