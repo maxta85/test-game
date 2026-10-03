@@ -130,9 +130,21 @@ func _ready() -> void:
 	# claim, not a footnote, because a "67% of the street" headline computed against
 	# the wrong denominator is exactly the kind of number that survives into a
 	# summary and outlives the run that produced it.
-	_check("the driver's line is the same length as the street",
-		absf(follower.length() - street_len) < 1.0,
-		"street %.1f m, driver line %.1f m (%.2fx) - every distance below is a fraction of the LINE, not of the street" % [
+	# The claim was "the driver's line IS the street", within 1.0 m. That was the
+	# right detector for the defect it was written for - the line was 1.98x the street -
+	# but it is the wrong question now that the line is 0.6% short, because a smoothed
+	# line legitimately IS shorter than the polyline it came from: six Laplacian
+	# passes pull the corners in, and t129 measured 1407.4 m before smoothing against
+	# 1399.5 m after.
+	#
+	# Reformulated so it still catches the bug and does not flag the smoothing:
+	# a line LONGER than the street is the defect signature (a phantom closing leg can
+	# only add length), and a line within 2% of it is the smoothing. Tightening the
+	# old identity claim rather than loosening it would have failed forever; this keeps
+	# the direction of the test that matters.
+	_check("the driver's line is no longer than the street, and within 2% of it",
+		follower.length() <= street_len + 1.0 and absf(follower.length() - street_len) < 0.02 * street_len,
+		"street %.1f m, driver line %.1f m (%.3fx); smoothing accounts for the shortfall" % [
 			street_len, follower.length(), follower.length() / maxf(street_len, 0.001)])
 
 	# The follower's own invariants, asked while the AI is driving rather than
