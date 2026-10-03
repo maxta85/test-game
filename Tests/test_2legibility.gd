@@ -28,6 +28,14 @@ var board: Array = []
 var circuit: RaceDef = null
 var sprint: RaceDef = null
 
+## Everything this suite hangs off the tree root, so `run` can give it all back.
+## The harness clears the world between suites, but it reports a suite that
+## handed its leftovers to the next one as a harness problem: the physics the
+## next suite measures is then measured in a world this suite built. Minimaps
+## and the HUD are added to the root directly (there is no world node to drop),
+## so they have to be tracked here.
+var _roots: Array = []
+
 
 func run(t: TestHarness) -> void:
 	self.t = t
@@ -45,13 +53,22 @@ func run(t: TestHarness) -> void:
 		if not d.closed and sprint == null:
 			sprint = d
 
-	_the_map_is_the_real_network(t)
-	_orientation(t)
-	_the_route_is_the_marked_route(t)
-	_a_closed_loop_on_the_graph(t)
-	_the_marks_are_built_from_the_route(t)
-	_the_map_reads_live_positions(t)
+	# Each of these awaits a frame or two, so each one is a coroutine. Calling
+	# them without `await` starts them all and interleaves their frames, which
+	# made the order they assert in depend on how many frames each happened to
+	# take, and left them all still running when `run` returned.
+	await _the_map_is_the_real_network(t)
+	await _orientation(t)
+	await _the_route_is_the_marked_route(t)
+	await _a_closed_loop_on_the_graph(t)
+	await _the_marks_are_built_from_the_route(t)
+	await _the_map_reads_live_positions(t)
 	await _in_the_hud(t)
+
+	# Only now that nothing is mid-flight is it safe to hand the world back.
+	for n in _roots:
+		await t.drop(n)
+	_roots.clear()
 
 
 # ------------------------------------------------------------------ the network
@@ -97,17 +114,20 @@ func _orientation(t: TestHarness) -> void:
 	# Driving north (-Z). Screen Y grows downward, and the map data's axes are
 	# +X east / +Z south, so north must be up with no flip anywhere.
 	m.set_player(Vector3(0, 0, 0), Vector3(0, 0, -1))
+	await tree.process_frame
 	t.near(m._spin_for(), 0.0, 0.001, "driving north, the map is unrotated")
 	t.near(m._screen_dir(Vector2(0, -1)).y, -1.0, 0.001, "north points up the screen")
 	t.near(m._screen_dir(Vector2(1, 0)).x, 1.0, 0.001, "east points right")
 
 	# Driving east: the map turns a quarter turn so the heading is up.
 	m.set_player(Vector3(0, 0, 0), Vector3(1, 0, 0))
+	await tree.process_frame
 	t.near(m._spin_for(), -PI * 0.5, 0.001, "driving east, the map turns a quarter turn")
 	t.near(m._screen_dir(Vector2(1, 0)).y, -1.0, 0.001, "and the player's heading is up the screen")
 
 	# Driving south: half a turn.
 	m.set_player(Vector3(0, 0, 0), Vector3(0, 0, 1))
+	await tree.process_frame
 	t.near(absf(m._spin_for()), PI, 0.01, "driving south, the map turns half way round")
 	t.near(m._screen_dir(Vector2(0, 1)).y, -1.0, 0.01, "and south is up the screen")
 
@@ -115,6 +135,7 @@ func _orientation(t: TestHarness) -> void:
 	m.set_rotate(false)
 	t.eq(m._spin_for(), 0.0, "north-up does not turn the map at all")
 	m.set_player(Vector3(0, 0, 0), Vector3(1, 0, 0))
+	await tree.process_frame
 	t.near(m._screen_dir(Vector2(1, 0)).x, 1.0, 0.001, "and east is still right")
 	m.set_rotate(true)
 
@@ -273,6 +294,7 @@ func _the_map_reads_live_positions(t: TestHarness) -> void:
 		"with the rival's heading, not a default")
 	m.set_rotate(true)
 	m.set_player(Vector3(400, 0, 300), Vector3(0, 0, -1))
+	await tree.process_frame
 	var turned := Vector2.from_angle(float(m._rivals[0]["heading"])).rotated(m._spin)
 	t.near(turned.y, -1.0, 0.001, "and a rival's heading turns with the map, like the player's")
 	m.set_rotate(false)
@@ -284,6 +306,7 @@ func _the_map_reads_live_positions(t: TestHarness) -> void:
 func _in_the_hud(t: TestHarness) -> void:
 	var hud := RaceHUD.new()
 	tree.root.add_child(hud)
+	_roots.append(hud)
 	await tree.process_frame
 
 	t.ok(hud.minimap != null, "the HUD carries a minimap")
@@ -317,6 +340,7 @@ func _map() -> Minimap:
 	var m := Minimap.new()
 	m.size = Vector2(236, 236)
 	tree.root.add_child(m)
+	_roots.append(m)
 	m.set_graph(g)
 	await tree.process_frame
 	await tree.process_frame
