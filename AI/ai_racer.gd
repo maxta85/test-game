@@ -63,6 +63,23 @@ var graph: RoadGraph
 @export var skill := 0.7
 ## Separate from skill: how much it wants a gap, and how late it will defend.
 @export var aggression := 0.7
+## Metres from the line to the lane actually driven, positive to the right of
+## travel. Only consulted on an OPEN line - see `_steer_along_lane`.
+##
+## DEFAULT 0.0, and that default is a decision with a reason rather than a shrug:
+## the racing circuit is a closed loop whose `RacingLine` already carries an inside
+## bias (`APEX_BUDGET`), so its centre IS the racing line, and offsetting it would
+## move the car off the fast line and onto the inside verge at every corner.
+##
+## It is not zero for a STREET, and that is where the measurement belongs. On a
+## named street the line is the street's centreline, and on these streets the
+## centreline is the OCCUPIED side: `Tools/street_blockers.gd` measured the clear
+## band at +2.5 .. +6.0 m right of travel on both Aumuller and Hoare, because every
+## prop batch stands on the other kerb. A driver tracking the centreline there finds
+## a prop within 84 m. `AI/street_ai_probe.gd` sets this from that measurement;
+## nothing in the game sets it for you, because only the physics server knows where
+## the palms are.
+@export var lane_offset := 0.0
 ## Optional. When set, the driver follows the exact route the race is scored on
 ## rather than generating its own circuit from the graph.
 var director: RaceDirector = null
@@ -74,6 +91,21 @@ var errors: int = 0
 var mode: int = Mode.RACE
 
 var _line: RacingLine = null
+## The follower that actually produces the steering, over the same points as
+## `_line`. `Systems/race/lane_follower.gd`, consumed rather than reimplemented:
+## the driver used to carry its own pure pursuit, which is the same idea missing
+## every part that makes it hold a straight - no yaw damping, no bound on the aim
+## angle, and no speed floor. See `lane_offset` for the measured cost of that.
+var _lane: LaneFollower = null
+## Compare the line's windowed projection with the follower's global one, every
+## frame. Costs a second full scan of the line, so it is off unless asked for.
+@export var audit_projections := false
+## Worst disagreement seen while auditing, in metres along the line.
+var proj_max_gap := 0.0
+## Frames audited, and of those how many disagreed by more than two samples.
+var proj_frames := 0
+var proj_disagree_frames := 0
+var proj_disagree_s: Array = []
 var _idx: int = 0
 var _rng := RandomNumberGenerator.new()
 ## Fixed by default so a race replays the same way twice, which is the only way
@@ -153,6 +185,47 @@ func _build_line() -> void:
 		_idx = director.nearest_route_index(car.global_position) if director != null else 0
 		if is_closed and director == null:
 			_idx = 0
+	_sync_lane()
+
+
+## Hand `_line`'s points to a `LaneFollower`.
+##
+## Built here rather than in `_ready` because the line is rebuilt whenever the
+## route changes, and a follower holding a stale line would drive a car that no
+## longer exists. The two use the SAME lateral convention with no sign flip:
+## `RacingLine._closest_on` measures lateral as `off.dot(dir.orthogonal())` and
+## `point_at` offsets by `dir.normalized().orthogonal() * lateral`, and
+## `LaneFollower` uses `Vector2(tan.y, -tan.x)` — which is `orthogonal()`. So
+## `_target_lateral` and `LaneFollower.lane_offset` are the same number and a
+## conversion would be a bug waiting to happen.
+func _sync_lane() -> void:
+	if _lane == null:
+		_lane = LaneFollower.new()
+	var packed := PackedVector2Array()
+	for p in _line.points:
+		packed.append(p)
+	_lane.set_lane(packed, _line.closed)
+
+
+## Follow a named street instead of a circuit. Public so a harness can put the AI
+## on a real road and measure whether it holds the lane there, which is the case
+## the old controller provably could not handle.
+##
+## `route` is an open polyline of the street's centreline points. It goes through
+## the same `RacingLine` as a circuit - smoothed, apex-biased and pulled back onto
+## the streets - so this does not hand the driver a privileged line; it only says
+## WHICH line.
+func follow_street(route: Array, offset: float = 0.0) -> bool:
+	if route.size() < 2 or graph == null:
+		return false
+	_line = RacingLine.from_route(route, graph, false)
+	if _line.size() < 4:
+		_line = null
+		return false
+	lane_offset = offset
+	_idx = 0
+	_sync_lane()
+	return true
 
 
 ## Where the car is on the line, seeded from scratch if it has clearly left the
@@ -398,8 +471,7 @@ func _pick_error(delta: float) -> void:
 
 func _drive_race(delta: float, here: Dictionary) -> void:
 	var i: int = int(here["i"])
-	var aim_index: int = i + maxi(int(round(_lookahead / _line.spacing)), 2)
-	_steer_at(_line.point_at(aim_index, _target_lateral))
+	_steer_along_lane(here)
 
 	# How fast the line allows here, and what this driver is willing to use.
 	var decel: float = _line.brake_decel * (0.5 + 0.5 * skill)
@@ -426,8 +498,78 @@ func _drive_race(delta: float, here: Dictionary) -> void:
 	car.handbrake = 0.0
 
 
-## Pure pursuit: aim at a point on the line and steer at it. Positive `steer`
-## is a left turn on CarBody, hence the negation.
+## Pure pursuit, by way of `Systems/race/lane_follower.gd`: aim at the lane a
+## little way ahead and steer at it, damped by yaw rate.
+##
+## ONLY ON AN OPEN LINE, and that restriction is measured rather than cautious.
+## Handing a CLOSED lap to `LaneFollower` sent `./test.sh ai` from worst road ratio
+## 0.56 to 2.85, lap 136.7 s to 140.4 s, and 17 samples over the kerb - all of them
+## in RECOVER. The cause is `LaneFollower.project()`: it is a global
+## nearest-point scan with no window and no hint, and a street circuit passes close
+## to itself, so it returns a point on a DIFFERENT LEG of the lap and the driver
+## steers at it. `AI/street_ai_probe.gd --selftest` measures exactly that on a
+## dogleg line: the two projections disagree on 32 of 36 probes, worst by 135.4 m
+## along the line. `RacingLine` has a windowed search and a comment explaining why
+## this is a hazard; the follower does not, and it is not mine to change here.
+##
+## So: an open line gets the follower, a closed circuit keeps the windowed aim it
+## always had. Recovery also keeps `_steer_at`, because it aims at a PLACE (the
+## nearest point on the line, or two samples ahead of it) and a speed-scaled
+## look-ahead cannot express "the nearest point, please".
+##
+## `_target_lateral` carries traffic and defending through unchanged, and it is the
+## same number as `LaneFollower.lane_offset` - see `_sync_lane` on why there is no
+## sign flip between them.
+func _steer_along_lane(here: Dictionary) -> void:
+	if _lane == null or _line.closed:
+		var fallback := _idx + maxi(int(round(_lookahead / _line.spacing)), 2)
+		_steer_at(_line.point_at(fallback, _target_lateral))
+		return
+	_audit_projection(here)
+	_lane.lane_offset = _target_lateral + lane_offset
+	car.steer = _lane.steer_for(car.global_position, car.forward(),
+		car.angular_velocity.y, car.speed_mps)
+
+
+## Whether this driver is actually steering with the follower, and why not if it
+## is not. A harness asks this instead of assuming, because "it consumes
+## LaneFollower" is true for a street and false for a circuit and the difference is
+## the entire point.
+func steering_with_follower() -> bool:
+	return _lane != null and not _line.closed
+
+
+## How far apart the two projections of the same car are, and how often they
+## disagree. OFF BY DEFAULT because it costs a second full scan of the line.
+##
+## `RacingLine.project` searches a WINDOW around the last index, deliberately: a
+## street circuit passes close to itself, and a global nearest-point search on one
+## will happily return a point on a different leg of the lap. That is the failure
+## `RacingLine` documents, and it is why the driver reseeds `_idx` when it loses
+## the plot. `LaneFollower.project` is a global scan with no window and no hint,
+## so when it is handed a CLOSED lap it can disagree with the line the driver has
+## been tracking, and it will steer at the wrong part of the circuit.
+##
+## This exists to measure that rather than assume it. Worst disagreement and the
+## frame count are public; a harness reads them.
+func _audit_projection(here: Dictionary) -> void:
+	if not audit_projections or _lane == null:
+		return
+	var theirs: float = float(_lane.project(car.global_position)["s"])
+	var mine: float = float(here["s"])
+	var gap: float = absf(theirs - mine)
+	proj_frames += 1
+	proj_max_gap = maxf(proj_max_gap, gap)
+	# `spacing` is the line's own resolution, so a disagreement worth acting on is
+	# one larger than a couple of samples.
+	if gap > _line.spacing * 2.0:
+		proj_disagree_frames += 1
+		proj_disagree_s.append({"s": mine, "theirs": theirs, "gap": gap})
+
+
+## Aim at a point on the ground, in world XZ. Recovery only - see
+## `_steer_along_lane`. Positive `steer` is a left turn on CarBody, hence the
+## negation.
 func _steer_at(aim: Vector2) -> void:
 	var to: Vector3 = Vector3(aim.x - car.global_position.x, 0.0, aim.y - car.global_position.z)
 	if to.length_squared() < 0.04:
@@ -458,6 +600,14 @@ func line() -> RacingLine:
 	return _line
 
 
+## The follower doing the steering. Public so a harness can ask it to verify its
+## own geometry while the AI is driving it - the invariants in
+## `LaneFollower.verify()` were written for a street probe and have never been
+## checked against a car being driven by this driver rather than by input.
+func lane() -> LaneFollower:
+	return _lane
+
+
 func line_index() -> int:
 	return _idx
 
@@ -465,6 +615,11 @@ func line_index() -> int:
 ## Drops the route so the next physics frame rebuilds it. For a race restart.
 func reset() -> void:
 	_line = null
+	_lane = null
+	proj_max_gap = 0.0
+	proj_frames = 0
+	proj_disagree_frames = 0
+	proj_disagree_s.clear()
 	_idx = 0
 	errors = 0
 	mode = Mode.RACE
