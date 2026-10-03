@@ -54,10 +54,35 @@ ROOT = os.path.dirname(HERE)
 # CBD on purpose - this is 100+ real residential streets plus two arterials and
 # a river, where the CBD is 15% parking and 60% retail frontage.
 CENTRE = (-16.93190, 145.75130)
-HALF_DEG = 0.008  # ~1.77 km N-S x ~1.70 km E-W, matching ManundaLayout's ~1.4 km block
-CAIRNS_BBOX = (CENTRE[0] - HALF_DEG, CENTRE[1] - HALF_DEG,
-               CENTRE[0] + HALF_DEG, CENTRE[1] + HALF_DEG)  # S, W, N, E
+# World origin. NOT the bbox centre: the projection in convert() is anchored here, so a
+# second OSM source can be merged in without moving any existing geometry. The two bboxes
+# happen to be symmetric about CENTRE today, which is why the output is unchanged - but
+# deriving the origin from a bbox would shift every coordinate in the file by however
+# much that bbox differed from this one, silently re-aiming the anchor street, the start
+# grid, the terrain and every prop placement at the same time. See GORDON_BBOX below for
+# the second source that needs this.
+ORIGIN = CENTRE
+
+CBD_HALF_DEG = 0.008  # ~1.77 km N-S x ~1.70 km E-W, matching ManundaLayout's ~1.4 km block
+CAIRNS_BBOX = (CENTRE[0] - CBD_HALF_DEG, CENTRE[1] - CBD_HALF_DEG,
+               CENTRE[0] + CBD_HALF_DEG, CENTRE[1] + CBD_HALF_DEG)  # S, W, N, E
+
+# Gordon Street, Earlville: ~1.2 km south-west of the CBD block, so the fetch above
+# cannot contain it. `PLAN.md` had "Gordon Street Sprint" as a display name over a
+# graph with no Gordon Street in it. Growing CAIRNS_BBOX to reach it was measured and
+# rejected: the city went from 31.7 km / 247 corridors to 49.4 km / 394, and because
+# buildings and water are extracted from the same fetch it moved
+# `cairns_water.json` from 5 closed features to 8 - seven assertions in Tests/ that
+# this tool has no business rewriting. So Gordon is fetched as its own small source
+# and merged into the corridor list only; the city fetch stays byte-identical.
+GORDON_STREET = (-16.9433971, 145.7317216)  # Nominatim: Gordon Street, Earlville
+GORDON_HALF_DEG = 0.0016  # ~350 m either way, a few blocks of Earlville
+GORDON_BBOX = (GORDON_STREET[0] - GORDON_HALF_DEG, GORDON_STREET[1] - GORDON_HALF_DEG,
+               GORDON_STREET[0] + GORDON_HALF_DEG, GORDON_STREET[1] + GORDON_HALF_DEG)
+MIN_CORRIDOR_LEN = 12.0  # fragments under this are dropped (see convert())
+TARGET_STREET = "Gordon Street"  # what this tool exists to get into the data
 RAW = os.path.expanduser("~/.cache/osm/cairns_raw.xml")
+RAW_GORDON = os.path.expanduser("~/.cache/osm/cairns_raw_gordon.xml")
 OUT = os.path.join(ROOT, "assets", "maps", "cairns_map.json")
 OUT_BUILDINGS = os.path.join(ROOT, "assets", "maps", "cairns_buildings.json")
 OUT_WATER = os.path.join(ROOT, "assets", "maps", "cairns_water.json")
@@ -82,7 +107,7 @@ CLASSIFY = {
 }
 
 
-def fetch(bbox):
+def fetch(bbox, dest=RAW):
     s, w, n, e = bbox
     url = API.format(w=w, s=s, e=e, n=n)
     print(f"fetching {url}", file=sys.stderr)
@@ -92,10 +117,10 @@ def fetch(bbox):
         try:
             with urllib.request.urlopen(req, timeout=180) as r:
                 data = r.read()
-            os.makedirs(os.path.dirname(RAW), exist_ok=True)
-            with open(RAW, "wb") as f:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as f:
                 f.write(data)
-            print(f"  {len(data)} bytes -> {RAW}", file=sys.stderr)
+            print(f"  {len(data)} bytes -> {dest}", file=sys.stderr)
             return
         except (urllib.error.URLError, urllib.error.HTTPError, OSError) as ex:
             last = ex
@@ -457,17 +482,26 @@ def dump(path, obj):
     print(f"-> {path} ({os.path.getsize(path)} bytes)")
 
 
-def convert(bbox, tol):
+def convert(bbox, tol, raw=RAW, emit_areas=True):
+    """One OSM source -> corridors (and, for the city source, buildings + water).
+
+    `raw` defaults to the city cache. The Gordon source is converted with
+    emit_areas=False: those buildings and water bodies are ~1.2 km outside the block
+    the world is dressed for, and emitting them would change files this task has no
+    reason to change.
+    """
     s, w, n, e = bbox
-    lat0, lon0 = (s + n) / 2.0, (w + e) / 2.0
-    print(f"parsing {RAW}", file=sys.stderr)
-    root = ET.parse(RAW).getroot()
+    # The projection origin is the pinned CBD reference, not the middle of the fetch.
+    lat0, lon0 = ORIGIN
+    print(f"parsing {raw}", file=sys.stderr)
+    root = ET.parse(raw).getroot()
     nodes = {}
     for el in root:
         if el.tag == "node":
             nodes[el.get("id")] = (float(el.get("lat")), float(el.get("lon")))
 
-    corridors, dropped, min_len = [], {"class": 0, "short": 0, "motorway": 0}, 12.0
+    corridors, dropped = [], {"class": 0, "short": 0, "motorway": 0}
+    min_len = MIN_CORRIDOR_LEN
     names = {}
     for el in root:
         if el.tag != "way":
@@ -504,7 +538,15 @@ def convert(bbox, tol):
         })
 
     corridors.sort(key=lambda c: -c["length"])
-    corridors, islands = dissolve(corridors)
+    if emit_areas:
+        corridors, islands = dissolve(corridors)
+    else:
+        # No island filter for a separately fetched street. `dissolve()` drops pieces
+        # that do not connect to the rest of the fetch, which is right for one
+        # contiguous city and wrong for a street we deliberately went outside the block
+        # to fetch: Earlville has no road joining it to the CBD block in this data, so
+        # the filter would throw away the one street this fetch exists for.
+        islands = 0
     corridors.sort(key=lambda c: -c["length"])
     xs = [p[0] for c in corridors for p in c["points"]]
     zs = [p[1] for c in corridors for p in c["points"]]
@@ -513,7 +555,11 @@ def convert(bbox, tol):
         "source": "OpenStreetMap contributors, ODbL 1.0",
         "note": "Generated by Tools/osm_cairns.py - do not hand-edit.",
         "bbox": {"south": s, "west": w, "north": n, "east": e},
-        "axes": "+X east, +Z south, origin at bbox centre",
+        "axes": "+X east, +Z south, origin at the CBD reference %s (pinned, not the "
+                 "bbox centre, so a second source can be merged in without moving any "
+                 "existing geometry)" % ("%.5f,%.5f" % ORIGIN),
+        # "sources" is filled in by main(), which is the only place that knows how
+        # many corridors came from each fetch.
         "stats": {
             "corridors": len(corridors), "segments": segs,
             "total_km": round(sum(c["length"] for c in corridors) / 1000.0, 2),
@@ -522,6 +568,10 @@ def convert(bbox, tol):
         },
         "corridors": corridors,
     }
+    if not emit_areas:
+        print(f"\n{len(corridors)} corridors from {raw}")
+        print(f"dropped: {dropped}")
+        return corridors
     areas = extract_areas(root, nodes, lat0, lon0)
     drop = areas["dropped"]
     bstats = {
@@ -567,6 +617,7 @@ def convert(bbox, tol):
     print(f"water: {wstats}")
     for c in corridors[:12]:
         print(f"   {c['length']:8.1f} m  class {c['class']}  {c['name']}")
+    return corridors
 
 
 def check(path, key, minimum):
@@ -613,7 +664,43 @@ def main():
         return
     if not a.cache_only:
         fetch(tuple(a.bbox))
-    convert(tuple(a.bbox), a.tolerance)
+        fetch(GORDON_BBOX, RAW_GORDON)
+    corridors = convert(tuple(a.bbox), a.tolerance)
+
+    # Merge the Gordon source into the corridor list. Dedupe is by (name, rounded
+    # first point) because the two fetches are ~1.2 km apart and cannot overlap, but
+    # Gordon Street is a common enough name that a future wider city fetch would.
+    gordon = convert(GORDON_BBOX, a.tolerance, raw=RAW_GORDON, emit_areas=False)
+    seen = {(c["name"], tuple(c["points"][0])) for c in corridors}
+    merged = [c for c in gordon if (c["name"], tuple(c["points"][0])) not in seen]
+    with open(OUT) as f:
+        doc = json.load(f)
+    # Appended, NOT re-sorted by length. The list order is the road graph's node order:
+    # RoadGraph.build() inserts one node per corridor in sequence, and every route in
+    # Systems/race/race_def.gd starts at a hardcoded node 0. Re-sorting after the merge
+    # put a 1253 m Earlville street at index 0 and silently repointed all five routes at
+    # a different street. City corridors keep their order and length-descending sort;
+    # the appended ones are length-descending among themselves.
+    doc["corridors"] = corridors + sorted(merged, key=lambda c: -c["length"])
+    doc["stats"]["corridors"] = len(doc["corridors"])
+    doc["stats"]["segments"] = sum(len(c["points"]) - 1 for c in doc["corridors"])
+    doc["stats"]["total_km"] = round(
+        sum(c["length"] for c in doc["corridors"]) / 1000.0, 2)
+    xs = [p[0] for c in doc["corridors"] for p in c["points"]]
+    zs = [p[1] for c in doc["corridors"] for p in c["points"]]
+    doc["stats"]["extent_m"] = [round(max(xs) - min(xs), 1), round(max(zs) - min(zs), 1)]
+    doc["sources"] = [{"bbox": "city", "corridors": len(corridors)},
+                      {"bbox": "gordon_street", "corridors": len(merged)}]
+    dump(OUT, doc)
+    names = {c["name"] for c in doc["corridors"]}
+    print(f"merged {len(merged)} gordon-source corridors: "
+          f"{len(corridors)} -> {len(doc['corridors'])} corridors, "
+          f"{doc['stats']['total_km']} km, extent {doc['stats']['extent_m']} m")
+    print(f"{TARGET_STREET} in data: {'yes' if TARGET_STREET in names else 'NO'}")
+    if TARGET_STREET not in names:
+        sys.exit(f"{TARGET_STREET} is not in {OUT} - the gordon source did not "
+                 f"contain it, or the bbox is off. Do not commit a map that fails "
+                 f"this.")
 
 
 if __name__ == "__main__":
