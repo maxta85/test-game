@@ -135,6 +135,9 @@ func _ready() -> void:
 	await get_tree().process_frame
 	await _wait_for_boot()
 	var argv := OS.get_cmdline_user_args()
+	for a in argv:
+		if a.begins_with("--street="):
+			_street_name_override = a.substr(9)
 	if argv.has("--street") or argv.has("--no-assist"):
 		# --no-assist is the control for the steering assist, not a mode of its own:
 		# same road, same spawn, same full throttle, steer pinned to zero. If the
@@ -178,6 +181,10 @@ func _ready() -> void:
 ## is visible as an assist at its limit rather than passing for a clean drive.
 
 const STREET_TIMEOUT := 300.0
+## The street the drive runs on. It is a CONSTANT only as a default: --street=<name>
+## overrides it. It must agree with the street the frames are pinned to, or the
+## check photographs one road and drives another and every number in the report is
+## about a road nobody looked at. Tools/street_capture.gd defaults to the same name.
 const STREET_NAME := "Aumuller Street"
 ## Spawn height above the corridor polyline, in metres. Not 0: the polyline is a
 ## centreline with no idea where the road surface is, and dropping the car onto
@@ -196,16 +203,36 @@ var _street: PackedVector2Array = PackedVector2Array()
 var _street_len := 0.0
 var _street_off_road := false
 var _street_name := STREET_NAME
+var _street_name_override := ""
 var _street_max_load := 0.0
 var _street_max_sr := 0.0
 var _street_assist := true
 var _street_speed_prev := 0.0
+var _street_gear_prev := 1
+var _street_road_rpm_now := 0.0
+var _street_road_rpm_prev := 0.0
+var _street_road_rpm_prevprev := 0.0
+## Gear-change log: one entry per change, with BOTH rpms. `road_rpm` is the one the
+## gearbox actually decides on (CarBody.auto_shift derives it from road speed, not
+## from the tacho); `engine_rpm` is the free-revving engine. Comparing an upshift
+## against `engine_rpm` on a wheelspinning launch fails every single time and looks
+## like a broken gearbox, which is exactly the "threshold compared against the wrong
+## field" trap. Both are recorded so the comparison can be audited, not trusted.
+var _street_shifts: Array = []
+var _street_bad_shift := 0
 var _street_reported := false
 ## km/h lost in a single frame that counts as hitting something rather than
 ## braking or sliding.
 const STREET_IMPACT_KPH := 15.0
 ## One entry per telemetry column, each already tab-terminated. The header is
 ## built off this and the row loop writes in the same order, so they cannot drift.
+## Column list for shots/telemetry.csv, in the order the row loop writes them. Both
+## sides come from here so the header cannot describe a format the rows do not emit.
+const TELEMETRY_COLUMNS := [
+	"t", "s", "kmh", "gear", "rpm", "slip_rad", "lat_m", "half_width", "steer",
+	"x", "z", "wheels_down", "rl_load_n", "rl_fx_n", "rl_sr", "rl_omega", "y",
+	"throttle", "contacts",
+]
 const STREET_COLUMNS := ["t\t", "s\t", "kmh\t", "gear\t", "rpm\t", "slip_rad\t",
 	"lat_m\t", "half_width\t", "steer\t", "x\t", "z\t", "wheels_down\t",
 	"rl_load_n\t", "rl_fx_n\t", "rl_sr\t", "rl_omega\t", "y\t", "throttle\t",
@@ -301,7 +328,7 @@ func _street_pick() -> Dictionary:
 	var best_len := 0.0
 	var fragments := 0
 	for c in OSMLayout.corridors():
-		if String(c.get("name", "")) != STREET_NAME:
+		if String(c.get("name", "")) != _wanted_street():
 			continue
 		var pts: PackedVector2Array = c["points"]
 		var run := 0.0
@@ -312,9 +339,9 @@ func _street_pick() -> Dictionary:
 		fragments += 1
 		if run > best_len:
 			best_len = run
-			best = {"name": STREET_NAME, "pts": pts}
+			best = {"name": _wanted_street(), "pts": pts}
 	if best.is_empty():
-		print("STREET FATAL: no corridor named %s in the map data" % STREET_NAME)
+		print("STREET FATAL: no corridor named %s in the map data" % _wanted_street())
 		print("  the nearest arterial anchors are:")
 		for c in OSMLayout.corridors():
 			var p: PackedVector2Array = c["points"]
@@ -325,7 +352,7 @@ func _street_pick() -> Dictionary:
 				print("    %s  %.1f m" % [String(c.get("name", "?")), run])
 		return {}
 	print("[street] %s: %d fragments in the map, driving the longest at %.1f m" % [
-		STREET_NAME, fragments, best_len])
+		_wanted_street(), fragments, best_len])
 	return best
 
 
@@ -442,6 +469,10 @@ func _street_drive() -> void:
 		_street_speed_prev = float(car.speed_kph)
 		samples += 1
 
+		_street_road_rpm_prevprev = _street_road_rpm_prev
+		_street_road_rpm_prev = _street_road_rpm_now
+		_street_road_rpm_now = _road_rpm_in_gear(car, int(car.current_gear))
+		_track_gear_change(car, t)
 		max_speed = maxf(max_speed, float(car.speed_kph))
 		max_gear = maxi(max_gear, int(car.current_gear))
 		max_slip = maxf(max_slip, absf(float(car.slip_angle_body)))
@@ -508,6 +539,85 @@ func _street_drive() -> void:
 	_hold({})
 	_street_report(car, s, t, distance, speed_sum, maxf(float(samples), 1.0))
 	get_tree().quit(0)
+
+
+## One entry per gear change, with the rpm and speed at the change, and a FAIL for
+## any upshift that happened below the shift rpm.
+##
+## The threshold is compared against `road_rpm`, recomputed here exactly the way
+## `CarBody.auto_shift` computes it, because that is the quantity the box tests. The
+## engine's own `engine_rpm` is recorded next to it but is NOT the gate: during a
+## wheelspinning launch the engine sits near the limiter while the road-derived rpm
+## is still in the hundreds, and gating on the tacho turns a correct gearbox into a
+## hundred false failures.
+## The street name in force: --street=<name> if given, else the default. One
+## accessor so the map lookup, the log line and the verdict can never disagree.
+func _wanted_street() -> String:
+	return _street_name_override if _street_name_override != "" else STREET_NAME
+
+
+## road-derived rpm in a given gear, computed exactly as CarBody.auto_shift does.
+func _road_rpm_in_gear(car: Node, gear: int) -> float:
+	var cs: CarSpec = car.spec
+	if cs == null:
+		return 0.0
+	var road_omega: float = car.speed_mps / maxf(cs.tyre_radius, 0.05)
+	return road_omega * car.gear_ratio(gear) * cs.final_drive * 60.0 / TAU
+
+
+## One entry per gear change, with the rpm and speed at the change, and a FAIL for
+## any upshift that happened below the shift rpm.
+##
+## The threshold is compared against the road-derived rpm, not the tacho, because
+## that is the quantity `CarBody.auto_shift` actually tests. During a wheelspinning
+## launch the engine sits near the limiter while the road-derived rpm is still in
+## the hundreds; gating on `engine_rpm` turns a correct gearbox into a hundred
+## false failures.
+func _track_gear_change(car: Node, t: float) -> void:
+	var gear := int(car.current_gear)
+	if gear == _street_gear_prev:
+		return
+	var cs: CarSpec = car.spec
+	# `prev` is the rpm the box was looking at when it DECIDED to shift: the change
+	# is only visible on the frame AFTER auto_shift ran, and on a wheelspinning
+	# launch the car can lose half its road speed in that frame (measured: decision
+	# at 6800+ rpm, 3899 rpm by the time the change is observable). Asserting on the
+	# post-change sample would report a correct gearbox as broken.
+	var road_rpm := _street_road_rpm_prev
+	var road_rpm_now := _street_road_rpm_now
+	var limit := 0.0
+	if cs != null:
+		limit = cs.shift_up_rpm
+	# Upper bound on what the decision could have seen: the last sample, plus the
+	# LARGEST observed per-frame RISE in the from-gear. Using |now - prev| instead
+	# would conflate a fall with a rise, and on a wheelspinning launch the fall is
+	# ~2900 rpm, which turns a real threshold into an unmeetable one and the check
+	# into decoration. A fall cannot raise the decision value, so it is excluded.
+	var rise := maxf(0.0, road_rpm - _street_road_rpm_prevprev)
+	var one_frame := rise
+	var entry := {
+		"t": t, "from": _street_gear_prev, "to": gear,
+		"road_rpm": road_rpm, "road_rpm_after": road_rpm_now,
+		"engine_rpm": float(car.engine_rpm),
+		"kmh": float(car.speed_kph), "shift_up_rpm": limit, "one_frame_rpm": one_frame,
+	}
+	_street_shifts.append(entry)
+	# The decision value is only observable through a per-frame sample, so the last
+	# sample before the change is a LOWER BOUND on what auto_shift actually saw: the
+	# decision happens inside the physics step and this sampler runs once per step. A
+	# "failure" inside the one-frame band is unresolvable at this sampling rate, not a
+	# gearbox defect. The band comes from the recorded rise, never from a constant
+	# picked to make the check pass.
+	if gear > _street_gear_prev and road_rpm <= limit and road_rpm + one_frame > limit:
+		print("[street] MARGINAL UPSHIFT %d->%d at t=%.2f: decision sample=%.0f vs shift_up_rpm=%.0f, but one frame of travel here is %.0f rpm, so the decision value is not observable - CANNOT DETERMINE (engine_rpm=%.0f, %.1f km/h)" % [
+			_street_gear_prev, gear, t, road_rpm, limit, one_frame,
+			float(car.engine_rpm), float(car.speed_kph)])
+	if gear > _street_gear_prev and road_rpm <= limit and road_rpm + one_frame <= limit:
+		_street_bad_shift += 1
+		print("[street] BAD UPSHIFT %d->%d at t=%.2f: road_rpm at the decision=%.0f is NOT above shift_up_rpm=%.0f (%.0f rpm by the next frame, engine_rpm=%.0f, %.1f km/h)" % [
+			_street_gear_prev, gear, t, road_rpm, limit, road_rpm_now,
+			float(car.engine_rpm), float(car.speed_kph)])
+	_street_gear_prev = gear
 
 
 func _street_pose(d: float) -> Dictionary:
@@ -612,7 +722,25 @@ func _street_report(car: Node, s: float, t: float, distance: float,
 	else:
 		print("the street was driven end to end. see the notes above for the cost.")
 	print("")
-	print("telemetry -> %s/playtest_street.tsv" % OUT_DIR)
+	print("")
+	print("GEAR CHANGES (%d), each with the rpm and speed AT the change:" % _street_shifts.size())
+	if _street_shifts.is_empty():
+		print("  (none - the gearbox never moved)")
+	for e in _street_shifts:
+		var tag := "select"
+		if int(e["to"]) > int(e["from"]):
+			tag = "UPSHIFT"
+		elif int(e["to"]) < int(e["from"]):
+			tag = "DOWNSHIFT"
+		print("  t=%7.2f  %2d -> %-2d  road_rpm(decision)=%7.0f  road_rpm(next)=%7.0f  1frame=%5.0f  engine_rpm=%7.0f  %6.1f km/h  %s" % [
+			float(e["t"]), int(e["from"]), int(e["to"]), float(e["road_rpm"]),
+			float(e["road_rpm_after"]), float(e["one_frame_rpm"]),
+			float(e["engine_rpm"]), float(e["kmh"]), tag])
+	print("upshifts below the shift rpm           : %d of %d" % [
+		_street_bad_shift, _street_shifts.size()])
+	print("")
+	print("telemetry -> %s/playtest_street.tsv, %s/telemetry.csv, %s/gearchanges.csv" % [
+		OUT_DIR, OUT_DIR, OUT_DIR])
 	print("=".repeat(58))
 	var f := FileAccess.open("%s/playtest_street.tsv" % OUT_DIR, FileAccess.WRITE)
 	if f != null:
@@ -624,6 +752,78 @@ func _street_report(car: Node, s: float, t: float, distance: float,
 		for line in log:
 			f.store_line(line)
 		f.close()
+	_write_telemetry_csv()
+	_write_gear_csv()
+
+
+## shots/telemetry.csv - one row per sample, header width ASSERTED at write time.
+##
+## The header is generated from TELEMETRY_COLUMNS, the row loop writes in the same
+## order, and then every row's field count is compared against the header's before
+## the file is accepted. A declared 10-column header over 9-field rows has shipped
+## twice in this project and both times the result looked like a finished dataset,
+## because nothing anywhere compared the two numbers. Here the mismatch is a hard
+## failure at write time, so the bad file is never produced.
+func _write_telemetry_csv() -> void:
+	var path := "%s/telemetry.csv" % OUT_DIR
+	var rows: Array = []
+	for line in log:
+		rows.append(line.split("\t"))
+	var header: int = TELEMETRY_COLUMNS.size()
+	for i in rows.size():
+		var n: int = (rows[i] as Array).size()
+		if n != header:
+			print("TELEMETRY FATAL: row %d has %d fields, header declares %d - not writing %s" % [
+				i, n, header, path])
+			return
+	var cols := PackedStringArray()
+	for c in TELEMETRY_COLUMNS:
+		cols.append(String(c))
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		print("TELEMETRY FATAL: cannot write %s" % path)
+		return
+	f.store_line(",".join(cols))
+	for r in rows:
+		f.store_line(",".join(PackedStringArray(r)))
+	f.close()
+	print("telemetry.csv: %d rows x %d columns, header count asserted at write time" % [
+		rows.size(), header])
+
+
+## shots/gearchanges.csv - every gear change with both rpms, for owner_check.py.
+func _write_gear_csv() -> void:
+	var path := "%s/gearchanges.csv" % OUT_DIR
+	var cols := PackedStringArray([
+		"t", "from_gear", "to_gear", "road_rpm", "road_rpm_after", "one_frame_rpm",
+		"engine_rpm", "kmh", "shift_up_rpm", "kind",
+	])
+	var rows: Array = []
+	for e in _street_shifts:
+		var kind := "select"
+		if int(e["to"]) > int(e["from"]):
+			kind = "upshift"
+		elif int(e["to"]) < int(e["from"]):
+			kind = "downshift"
+		rows.append(PackedStringArray([
+			"%.2f" % float(e["t"]), "%d" % int(e["from"]), "%d" % int(e["to"]),
+			"%.1f" % float(e["road_rpm"]), "%.1f" % float(e["road_rpm_after"]),
+			"%.1f" % float(e["one_frame_rpm"]), "%.1f" % float(e["engine_rpm"]),
+			"%.2f" % float(e["kmh"]), "%.1f" % float(e["shift_up_rpm"]), kind,
+		]))
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		print("GEAR FATAL: cannot write %s" % path)
+		return
+	f.store_line(",".join(cols))
+	for r in rows:
+		var n: int = (r as PackedStringArray).size()
+		if n != cols.size():
+			print("GEAR FATAL: row has %d fields, header declares %d - not writing %s" % [
+				n, cols.size(), path])
+			return
+		f.store_line(",".join(r))
+	f.close()
 
 
 func _wait_for_boot() -> void:
