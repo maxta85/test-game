@@ -14,6 +14,28 @@ const PALM_SPACING := 17.0
 ## Grid resolution of the mapped-footprint coverage test. Coarse on purpose: it
 ## answers plot-sized questions, and a fine grid costs 16x the marks for nothing.
 const OSM_CELL := 16.0
+
+## The terrain carve. The ground under a street is held at CARVE_Y, which is
+## below LookDev.TARMAC_Y (0.015) and below the -0.06 the terrain mesh is
+## dropped by, so the tarmac is what a wheel or a raycast finds first. Deep
+## enough to survive a coarse grid interpolating across it, shallow enough that
+## the 6 cm step where the carve meets natural ground is not a visible lip.
+const CARVE_Y := -0.14
+
+## How far past the back of the footpath the carve still holds, so the verge
+## between the path and the first building is ground rather than a trench.
+const CARVE_MARGIN := 3.0
+
+## Width of the smooth blend from CARVE_Y back to natural ground. Squared-and-
+## doubled (`u*u*(3-2u)`) so the join has no slope discontinuity - a linear
+## blend leaves a visible crease running the length of every street.
+const CARVE_BLEND := 18.0
+
+## Subdivisions applied to a grid cell that could contain part of a street
+## corridor. The base grid is ~27.5 m and the widest carriageway is 14 m, so a
+## cell can be wider than the thing being carved and a vertex-only carve is a
+## coin flip. 4 puts a sample every ~7 m, which resolves a 12 m corridor.
+const CARVE_SUBDIV := 4
 ## How far back from the back of the footpath a frontage building stands. Wide
 ## enough that the carport does not hang over the verge.
 const FRONTAGE_OFFSET := 3.0
@@ -248,25 +270,25 @@ func _terrain() -> void:
 	# four times the area does not quietly quadruple the triangle count and the
 	# collision mesh with it.
 	var step: float = maxf(16.0, s / 55.0)
-	for gz in range(-int(s / step), int(s / step)):
-		for gx in range(-int(s / step), int(s / step)):
+	var n := int(s / step)
+	for gz in range(-n, n):
+		for gx in range(-n, n):
 			var x0 := float(gx) * step
 			var z0 := float(gz) * step
-			var x1 := x0 + step
-			var z1 := z0 + step
-			var h00 := _terrain_height(x0, z0)
-			var h10 := _terrain_height(x1, z0)
-			var h01 := _terrain_height(x0, z1)
-			var h11 := _terrain_height(x1, z1)
-			# Corners walked counter-clockwise seen from above, so _quad reads
-			# +Y as the outward normal. Walked the other way it reads -Y, which
-			# is the ground lit from underneath - black at any exposure.
-			var p00 := Vector3(x0, h00, z0)
-			var p10 := Vector3(x1, h10, z0)
-			var p01 := Vector3(x0, h01, z1)
-			var p11 := Vector3(x1, h11, z1)
-			_quad(st, p00, p01, p11, p10)
-			_quad(st, p00, p11, p10, p01)
+			# A cell that could contain any part of a street corridor gets
+			# subdivided, so the carve is resolved by a sample rather than
+			# interpolated across. Everywhere else stays one quad - the far
+			# field is most of the area and none of it is paved.
+			var sub := _cell_subdivisions(Vector2((x0 + x0 + step) * 0.5, (z0 + z0 + step) * 0.5), step)
+			var fine := step / float(sub)
+			for iz in range(sub):
+				for ix in range(sub):
+					var cx0 := x0 + float(ix) * fine
+					var cz0 := z0 + float(iz) * fine
+					var cx1 := cx0 + fine
+					var cz1 := cz0 + fine
+					_terrain_quad(st, cx0, cz0, cx1, cz1)
+
 	var mesh: ArrayMesh = st.commit()
 	var mi := MeshInstance3D.new()
 	mi.name = "Terrain"
@@ -309,6 +331,35 @@ func _terrain() -> void:
 	print("[World] terrain collision: %d triangles" % int(cs.shape.get_faces().size() / 3))
 
 
+## One cell of terrain, as two triangles from four sampled corners.
+##
+## Corners walked counter-clockwise seen from above, so `_quad` reads +Y as the
+## outward normal. Walked the other way it reads -Y, which is the ground lit from
+## underneath - black at any exposure.
+func _terrain_quad(st: SurfaceTool, x0: float, z0: float, x1: float, z1: float) -> void:
+	var p00 := Vector3(x0, _terrain_height(x0, z0), z0)
+	var p10 := Vector3(x1, _terrain_height(x1, z0), z0)
+	var p01 := Vector3(x0, _terrain_height(x0, z1), z1)
+	var p11 := Vector3(x1, _terrain_height(x1, z1), z1)
+	_quad(st, p00, p01, p11, p10)
+	_quad(st, p00, p11, p10, p01)
+
+
+## How finely to divide one base-grid cell. 1 unless the cell's footprint could
+## reach into a street corridor, in which case CARVE_SUBDIV.
+##
+## The half-diagonal is in the reach test because what matters is not the cell
+## CENTRE's distance to the road but whether any corner of the cell is inside
+## the corridor - a road clipping the corner of an otherwise distant cell still
+## buries the carriageway.
+func _cell_subdivisions(centre: Vector2, step: float) -> int:
+	var near := graph.nearest_road(Vector3(centre.x, 0.0, centre.y))
+	var reach := _carve_half_width(near) + CARVE_BLEND + step * 0.70711
+	if float(near["lateral"]) >= reach:
+		return 1
+	return CARVE_SUBDIV
+
+
 ## Flat flood-prone plain with a shallow dish, a creek line to the west, and a
 ## gentle rise toward the hills. The creek is what stops it reading as a table.
 func _terrain_height(x: float, z: float) -> float:
@@ -321,12 +372,55 @@ func _terrain_height(x: float, z: float) -> float:
 	var d := absf(x - creek_x)
 	if d < 46.0:
 		h -= 2.4 * (1.0 - d / 46.0)
-	# Keep the roads themselves level: flatten toward 0 near any road.
+	# Keep the roads themselves clear of the ground. This used to be a flatten
+	# toward 0.0 over 26 m, which is wrong twice over, and both halves of the
+	# wrongness showed up as the terrain burying the street:
+	#
+	# 1. Flattening *toward* 0.0 leaves the ground at 0.0, which is 15 mm BELOW
+	#    the tarmac (LookDev.TARMAC_Y), so the road wins - but only just, and only
+	#    exactly on the centreline where the flatten is complete. A grid vertex
+	#    20 m out is barely flattened at all (w*w = 0.053), so it keeps its full
+	#    +/-2.0 m of undulation.
+	# 2. It only ever moved the SURFACE at a sampled vertex. The grid is
+	#    `step` = 27.5 m across and the widest carriageway here is 14 m, so the
+	#    quad spanning a road interpolates between a flattened vertex and an
+	#    unflattened one and ramps straight back up over the carriageway. There
+	#    was no guarantee any vertex landed inside the road at all.
+	#
+	# So: a hard carve to a level safely under the tarmac, across the full
+	# lateral width the builder actually paves, then a smooth blend back out to
+	# natural ground so the carve does not leave a trench wall at its edge.
+	# 3. Assigning the carve height outright also FILLS. Where the natural
+	#    ground is already below the road - the creek depression is -2.4 m, the
+	#    broad tilt bottoms out near -1.3 m - forcing h = CARVE_Y built a 1.3 m
+	#    earthwork and put the ground through the creek's water surface, which is
+	#    the only thing the `water` suite holds over this function. A carve
+	#    removes material; it never creates it. So both branches take the minimum
+	#    of the natural ground and the ramp: high ground gets cut down to
+	#    CARVE_Y, hollows are left exactly as they were. That also bounds the
+	#    height the blend ever has to cross at 2.0 m, which keeps the surface
+	#    gentle enough that a water triangle's chord cannot dip under it.
 	var near: Dictionary = graph.nearest_road(Vector3(x, 0, z))
-	if float(near["lateral"]) < 26.0:
-		var w: float = 1.0 - float(near["lateral"]) / 26.0
-		h = lerpf(h, 0.0, w * w)
+	var lateral := float(near["lateral"])
+	var corridor := _carve_half_width(near)
+	if lateral < corridor:
+		h = minf(h, CARVE_Y)
+	elif lateral < corridor + CARVE_BLEND:
+		var u: float = (lateral - corridor) / CARVE_BLEND
+		h = minf(h, lerpf(CARVE_Y, h, u * u * (3.0 - 2.0 * u)))
 	return h
+
+
+## How far out from the centreline the terrain is held clear, on the widest road
+## this map has. Derived from the same lateral budget the builder paves with
+## (`LookDev.channel_to_back_of_footpath`) plus a margin for the verge, so adding
+## a section to the street cannot silently leave it buried.
+func _carve_half_width(near: Dictionary) -> float:
+	var eid := int(near["edge"])
+	if eid < 0 or eid >= graph.edges.size():
+		return 0.0
+	var w: float = float(graph.edges[eid]["width"])
+	return w * 0.5 + LookDev.channel_to_back_of_footpath() + CARVE_MARGIN
 
 
 ## One quad, two triangles, from four corners walked in order around the patch.
