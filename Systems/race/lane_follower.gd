@@ -89,15 +89,20 @@ const AIM_ANGLE_MAX := 0.60
 ## was the scan reaching 135 m away onto another leg of the lap.
 const WINDOW_M := LOOKAHEAD_MAX
 
-## Beyond this, the seed is treated as STALE and a full scan runs to re-seed it.
-##
-## A window is only safe if there is a way out of it, or a car that teleports - a
-## reset, a race restart, a car that has genuinely left the line - stays lost
-## forever inside a window centred on where it used to be. `AIRacer` already uses
-## the same idea with `LOST_LATERAL = 24.0`; 40 m is wider than any road in this
-## network, on purpose, because a driver that panics while merely running a wide
-## line is worse than one that lets the car gather itself up.
+## Beyond this, the driver has genuinely MOVED rather than projected, and the
+## search is widened. See `advance_to`.
 const RESEED_DIST := 40.0
+
+## How FAR the widened search looks, in metres of arc length. NOT infinite.
+##
+## An unbounded re-seed is what t124 tried and reverted: it changed nothing, so that
+## path was not on the one that mattered. It is still the wrong shape - on a line
+## that approaches itself a global scan can hand back a point on a different leg, which
+## is the failure the window exists to prevent - so the widened search stays bounded.
+## 200 m is about one second of travel at 200 km/h, which covers a car that has been
+## flung or reset; a car further off the line than that is genuinely off it, and the
+## right response is to rebuild the lane, which `AIRacer.reset()` does.
+const RESEAT_WINDOW_M := 200.0
 
 ## Steer per rad/s of yaw, subtracted. Yawing left makes yaw positive and positive
 ## steer yaws left, so damping is subtraction. At 0 this is plain pure pursuit and
@@ -155,6 +160,25 @@ var lane_offset := 4.25
 ## State, not a constant: this class is one car at a time, and a second car on the
 ## same lane would need its own follower or an explicit `hint` on every call.
 var _seed := 0
+## Where the car was the last time the driver advanced. The re-seed escape compares
+## against this, so it fires on the car having MOVED rather than on anyone having
+## PROJECTED. Zero means "no advance yet".
+var _last_advance := Vector3.ZERO
+
+## Public read of the window seed. Public because "is this caller's seed where I left
+## it" is a question a self-check has to be able to ask, and reading a private field
+## from a test is not an answer.
+func seed_index() -> int:
+	return _seed
+
+## The state `project()` must NOT touch, for a purity check. A query that changes
+## the seed is a query that is also a driver input.
+##
+## Deliberately only the seed. Memoising the last RESULT inside `project()` would be
+## the same sin wearing a different hat, and a purity check that permits it is not
+## checking purity.
+func debug_state() -> Dictionary:
+	return {"seed": _seed}
 
 ## Largest steer this follower will ever ask for. Reported, not hidden.
 var peak_steer := 0.0
@@ -182,6 +206,7 @@ func set_lane(points: PackedVector2Array, is_closed: bool = false) -> void:
 		_total += pts[i].distance_to(pts[j])
 	_cum[n] = _total
 	_seed = 0
+	_last_advance = Vector3.ZERO
 	peak_steer = 0.0
 
 
@@ -190,45 +215,48 @@ func length() -> float:
 
 
 ## Distance along the lane of `p`, its signed offset from it, the unit tangent
-## there, and the index of the segment it landed on.
+## there, and the index of the segment it landed on. **PURE: it changes nothing.**
 ##
-## WINDOWED AND SEEDED, which is the whole difference from a global scan.
+## PURE, and that is the fix rather than a detail. This used to write the window
+## seed as a side effect, which made every non-driving caller a driver input:
+## `verify()` calls it 24 times and walked the seed into the middle of a 2790 m line
+## while the car sat at s=8, after which the follower aimed 177 degrees off the car's
+## nose, held full lock, the car rotated on the spot, Godot put the RigidBody3D to
+## sleep, and 3 kN of tyre force went into an inert body. Measured: `speed_mps`
+## 15.69 with the self-check afterwards, 0.0534 with it beforehand.
 ##
-## A global nearest-point search is wrong on any line that passes close to itself,
-## and a street circuit does: measured on a dogleg, a global scan disagreed with a
-## windowed one on 32 of 36 probes, worst by **135.4 m along the line** - it was
-## returning a perfectly near point on a DIFFERENT LEG of the lap. Handed a closed
-## circuit that made the racing AI worse: `./test.sh ai` worst road ratio 0.56 ->
-## 2.85 (bound 2.2, red), lap 136.7 s -> 140.4 s, and 17 of 957 samples over the
-## kerb, every one of them in RECOVER. `RacingLine.project` has had a windowed,
-## seeded search all along and a comment describing this hazard; this was the same
-## omission in a second file.
+## A self-check, a diagnostic and a telemetry frame are all callers, and none of them
+## is the driver. Reading the lane and advancing along it are different operations
+## and they now have different entry points: `project()` for the first,
+## `advance_to()` for the second, and only the second touches the seed.
 ##
-## The window is `WINDOW_M` of arc length either side of the seed, and it is
-## derived rather than picked - see that constant. The escape hatch is
-## `RESEED_DIST`: a window with no way out of it loses a car that teleports
-## forever.
-##
-## `hint` is the seed. Pass -1 (the default) to use the seed this follower already
-## holds, which is what `steer_for` does - it is called every step for one car and
-## has no hint to offer. The seed is follower STATE, so this class is one car at a
-## time; a second car would need its own.
+## `hint` is the seed to search around. Pass -1 (the default) for the one this
+## follower holds. Neither value is written back.
 func project(p: Vector3, hint: int = -1) -> Dictionary:
 	if pts.size() < 2:
 		return {"s": 0.0, "lat": 0.0, "t": Vector2(1, 0), "i": 0, "dist": INF}
+	var seed := _seed if hint < 0 else _wrap(clampi(hint, 0, pts.size() - 1))
+	return _scan(seed, p, WINDOW_M)
 
-	var seed := _seed
-	if hint >= 0:
-		seed = _wrap(clampi(hint, 0, pts.size() - 1))
+
+## Project AND move the driver's seed. The driving path, and the only one allowed
+## to change state.
+##
+## The re-seed escape stays, and it now fires on **MOTION** rather than on
+## projection: if the car has travelled further than `RESEED_DIST` since the last
+## advance, the window is centred where it used to be and cannot be trusted, so the
+## search is widened. Firing it on projection instead - which is what it did, since
+## every projection went through the same path - meant a self-check could trigger it,
+## and a global scan on a self-approaching line can return a point on a different leg.
+func advance_to(p: Vector3, hint: int = -1) -> Dictionary:
+	if pts.size() < 2:
+		return {"s": 0.0, "lat": 0.0, "t": Vector2(1, 0), "i": 0, "dist": INF}
+	var seed := _seed if hint < 0 else _wrap(clampi(hint, 0, pts.size() - 1))
 	var found := _scan(seed, p, WINDOW_M)
-	if found["dist"] > RESEED_DIST:
-		# The seed is stale - the car teleported, or it really has left the line.
-		# A full scan is the correct answer here and only here.
-		var wide := _scan(0, p, INF)
-		found = wide
-		_seed = int(wide["i"])
-	else:
-		_seed = int(found["i"])
+	if _last_advance != Vector3.ZERO and p.distance_to(_last_advance) > RESEED_DIST:
+		found = _scan(int(found["i"]), p, RESEAT_WINDOW_M)
+	_seed = int(found["i"])
+	_last_advance = p
 	return found
 
 
@@ -371,10 +399,22 @@ func lookahead_for(speed_mps: float) -> float:
 ##
 ## One demand only: point the front of the car at the lane ahead of it. There is no
 ## second term to fight this one, which is the entire point - see the header.
-func steer_for(pos: Vector3, forward: Vector3, yaw_rate: float, speed_mps: float) -> float:
+## `advance` false makes this a PURE query: it answers "what steer would this pose
+## get" without moving the seed.
+##
+## Needed because `verify()` asks exactly that question, 24 times, and asking it used
+## to retarget the driver - the same defect one level up. A question with no side
+## effect is worth having even when the caller already knows not to keep the answer;
+## the caller that did not know was the whole bug.
+func steer_for(pos: Vector3, forward: Vector3, yaw_rate: float, speed_mps: float,
+		advance: bool = true, hint: int = -1) -> float:
 	if pts.size() < 2:
 		return 0.0
-	var here := project(pos)
+	# `advance_to`, not `project`: steering is the one caller that is allowed to move
+	# the seed. Everything else - `verify`, a diagnostic, telemetry - reads, and
+	# `hint` is how a caller that is NOT the driver says where it is looking, since
+	# the follower's own seed deliberately no longer moves for it.
+	var here: Dictionary = advance_to(pos, hint) if advance else project(pos, hint)
 	var ahead: Vector3 = aim_at(float(here["s"]) + lookahead_for(speed_mps), pos.y)
 	last_aim = ahead
 
@@ -485,7 +525,8 @@ func verify(samples: int = 24) -> Dictionary:
 			continue
 		straight += 1
 		var fwd := Vector3(t.x, 0.0, t.y)
-		var steer: float = steer_for(aim, fwd, 0.0, 10.0)
+		# Pure: `verify()` is a self-check and must not be a driver input.
+		var steer: float = steer_for(aim, fwd, 0.0, 10.0, false, idx)
 		worst_steer = maxf(worst_steer, absf(steer))
 
 	if worst_lat > 0.25:
