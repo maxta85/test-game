@@ -73,6 +73,10 @@ static func registry() -> Dictionary:
 			"kind": "vegetation", "mat": "bark",
 			"use": "tropical cedar with a buttressed base. The vertical that breaks a flat roofline",
 		},
+		"tree_paperbark": {
+			"kind": "vegetation", "mat": "bark",
+			"use": "street paperbark, 15-20 m, real trunk, canopy wider than the crown so it overhangs the carriageway",
+		},
 		"tree_fern": {
 			"sink": true,
 			"kind": "vegetation", "mat": "bark",
@@ -567,6 +571,51 @@ static func _build_tree_fern(variant: int = 0) -> Array:
 
 static func tree_fern(variant: int = 0) -> Array:
 	return _memo("tree_fern:%d" % variant, func() -> Array: return _build_tree_fern(variant))
+
+
+## Street paperbark, 15-20 m. The measured gap on the anchor arterial: the kerb
+## had low icosphere domes and a 9.5 m rain tree, so nothing in frame was tall
+## enough to be a canopy and the road read as a corridor of equal-height boxes.
+##
+## Two things this has to get right, both learned from the before frames:
+##   1. A real trunk. `h * 0.55` of clean stem before the first branch, so from
+##      a 2.4 m eye height the trunk is a vertical in the frame and the crown
+##      is above the roofline instead of sitting on it.
+##   2. A crown WIDER than the stem is tall. The canopy blobs are pushed out to
+##      `reach` (2.6-4.1 m) and lifted to `h * 0.78`, so a tree planted 3 m
+##      back from the kerb overhangs the carriageway. That overhang is the whole
+##      reason for the class - a shade tree you cannot see the edge of.
+static func _build_tree_paperbark(variant: int = 0) -> Array:
+	var s := _rng(variant, 909)
+	var h := s.randf_range(15.0, 20.0)
+	var reach := s.randf_range(2.6, 4.1)
+	var parts: Array = []
+	# Trunk, leaning slightly off plumb so 1600 of them are not a fence of posts.
+	parts.append(ArtKitPart.of(ArtKitMesh.curved_tube(0.46, 0.21, h * 0.62, 8,
+			s.randf_range(-0.22, 0.22), s.randf_range(-0.22, 0.22), 4), "bark"))
+	# Two limbs reaching out to hold the canopy off the stem. Without them the
+	# crown reads as a lollipop stuck on a stick.
+	for i in 2:
+		var a := s.randf_range(0.0, TAU)
+		parts.append(ArtKitPart.of(ArtKitMesh.tube(0.13, 0.06, h * 0.30, 4,
+				Vector3(cos(a) * reach * 0.5, h * 0.50, sin(a) * reach * 0.5)), "bark"))
+	# Five canopy blobs on a ring, not a stack: the outer ones carry the width
+	# that makes it overhang, the inner one fills the centre so you do not see
+	# daylight through the middle of a solid-looking crown.
+	for i in 5:
+		var a := TAU * float(i) / 5.0 + s.randf_range(-0.25, 0.25)
+		var r := s.randf_range(2.2, 3.1)
+		var rr: float = reach if i < 3 else reach * 0.55
+		parts.append(ArtKitPart.of(ArtKitMesh.blob(r, 4, 8, r * 0.26, variant * 7 + i + 11,
+				Vector3(cos(a) * rr, h * 0.78 + s.randf_range(-0.4, 0.5),
+						sin(a) * rr)), "surface_foliage_b"))
+	parts.append(ArtKitPart.of(ArtKitMesh.blob(s.randf_range(2.0, 2.6), 4, 7, 2.6 * 0.26,
+			variant * 3 + 29, Vector3(0.0, h * 0.80, 0.0)), "surface_foliage_b"))
+	return ArtKitPart.weld(parts)
+
+
+static func tree_paperbark(variant: int = 0) -> Array:
+	return _memo("tree_paperbark:%d" % variant, func() -> Array: return _build_tree_paperbark(variant))
 
 
 static func _build_bush_scrub(variant: int = 0) -> Array:

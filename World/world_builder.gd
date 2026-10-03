@@ -1552,14 +1552,23 @@ func _too_close_to_road(p: Vector2, min_offset: float = -1.0) -> bool:
 func _vegetation() -> void:
 	var trunk_mesh := _palm_trunk_mesh(0.34, 1.0)
 	var frond_mesh := _frond_mesh()
-	var bush_mesh := _icosphere(rng.randf_range(1.4, 2.6), 0)
 
 	_materials["palm_trunk"] = MatLib.palm_bark()
 	_materials["palm_frond"] = MatLib.foliage(Color(0.10, 0.24, 0.09))
-	_materials["bush"] = MatLib.foliage(Color(0.075, 0.17, 0.06))
 
 	var palms := 0
 	var bushes := 0
+	var big_trees := 0
+	# Verge scrub and the street paperbarks go through `ArtKitBatch`, not
+	# `_add`, for two reasons that were both measured in the before frames. The
+	# old scrub was a single `_icosphere(randf_range(1.4, 2.6))` shared by all
+	# 1234 bushes, and under sodium light a 2.4 m green dome reads as a brown
+	# tent - it was in every frame. And the kerb had nothing above 13 m on it, so
+	# a 4-lane divided arterial read as a corridor of equal-height boxes. The
+	# batched path costs 3 draw calls for the scrub (one per variant) instead of
+	# one, and gets real silhouettes plus a 15-20 m canopy for free.
+	var scrub := ArtKitBatch.new()
+	var canopy := ArtKitBatch.new()
 	for e in graph.edges:
 		var a: Vector2 = graph.node_pos(int(e["a"]))
 		var b: Vector2 = graph.node_pos(int(e["b"]))
@@ -1599,15 +1608,38 @@ func _vegetation() -> void:
 						.scaled_local(Vector3(1.0, 1.0, 1.0)), "palm_frond")
 			palms += 1
 
-		# Low scrub along the verges.
-		for i in int(length / 22.0):
-			var mid2: Vector2 = a.lerp(b, (float(i) + rng.randf() * 0.8) / float(maxi(int(length / 22.0), 1)))
+		# Low scrub along the verges. Variant comes from the edge id, not the
+		# placement index, so it is stable per run - the memo is keyed on
+		# (name, variant), and the batch needs the same resource every time.
+		var scrub_n := maxi(int(length / 22.0), 1)
+		for i in scrub_n:
+			var mid2: Vector2 = a.lerp(b, (float(i) + rng.randf() * 0.8) / float(scrub_n))
 			var p2: Vector2 = mid2 + nrm * (float(graph.edges[e["id"]]["width"]) * 0.5 + 3.5) * (1.0 if rng.randf() < 0.5 else -1.0)
-			_add("bushes", bush_mesh,
-				Transform3D(Basis.from_euler(Vector3(0, rng.randf() * TAU, 0)), Vector3(p2.x, 0.4, p2.y)),
-				"bush")
+			scrub.add_array(ArtKitProps.variant("bush_scrub", posmod(i, ArtKitProps.VARIANTS)),
+				Transform3D(Basis.from_euler(Vector3(0, rng.randf() * TAU, 0)), Vector3(p2.x, 0.4, p2.y)))
 			bushes += 1
-	print("[World] %d palms, %d bushes" % [palms, bushes])
+
+		# Street paperbarks. Offset is half the carriageway plus 2.2-3.4 m, and
+		# the crown reaches 2.6-4.1 m out, so on a 14 m road the canopy edge
+		# lands ~1.5 m inside the far kerb line. That overhang is the point: it
+		# is what a 4-lane divided arterial under paperbarks actually looks like,
+		# and it is what the reference frames show.
+		var tree_n := maxi(int(length / 34.0), 1)
+		for i in tree_n:
+			var mid3: Vector2 = a.lerp(b, (float(i) + 0.35 + rng.randf() * 0.3) / float(tree_n))
+			var side3: float = 1.0 if (i % 2) == 0 else -1.0
+			var p3: Vector2 = mid3 + nrm * (float(graph.edges[e["id"]]["width"]) * 0.5 + rng.randf_range(2.2, 3.4)) * side3
+			if _blocked_by_junction(Vector3(p3.x, 0, p3.y)):
+				continue
+			canopy.add_array(ArtKitProps.variant("tree_paperbark", posmod(i + int(e["id"]), ArtKitProps.VARIANTS)),
+				ArtKitBatch.place(Vector3(p3.x, 0.0, p3.y), rng.randf() * TAU))
+			big_trees += 1
+
+	if scrub.instances() > 0:
+		scrub.build(self)
+	if canopy.instances() > 0:
+		canopy.build(self)
+	print("[World] %d palms, %d bushes, %d paperbarks" % [palms, bushes, big_trees])
 
 
 func _streetlights() -> void:
