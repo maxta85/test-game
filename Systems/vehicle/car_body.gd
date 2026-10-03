@@ -267,10 +267,11 @@ func _physics_process(delta: float) -> void:
 func _update_telemetry() -> void:
 	speed_mps = linear_velocity.length()
 	speed_kph = speed_mps * 3.6
-	if speed_mps > 1.0:
-		slip_angle_body = atan2(linear_velocity.dot(right()), maxf(absf(linear_velocity.dot(forward())), 0.8))
-	else:
-		slip_angle_body = 0.0
+	# The near-stationary behaviour of this is TyreModel's, not ours: it owns the
+	# two floors that stop a parked car's slip angle dividing by nothing. Same
+	# arithmetic as when it was written inline here, now named and unit-tested.
+	slip_angle_body = TyreModel.slip_angle_rad(speed_mps,
+		linear_velocity.dot(forward()), linear_velocity.dot(right()))
 
 	_telemetry_tick += 1
 	if _telemetry_tick % 6 == 0:
