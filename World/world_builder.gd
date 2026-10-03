@@ -262,14 +262,19 @@ func _terrain_extent() -> float:
 	return maxf(800.0, reach + 120.0)
 
 
+## The terrain grid's cell size. The cell count is held roughly constant as the
+## extent grows, so covering four times the area does not quietly quadruple the
+## triangle count and the collision mesh with it. Split out so the subgrade suite
+## can ask the builder for the real step instead of re-deriving it and drifting.
+func _terrain_step() -> float:
+	return maxf(16.0, _terrain_extent() / 55.0)
+
+
 func _terrain() -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var s := _terrain_extent()
-	# The cell count is held roughly constant as the extent grows, so covering
-	# four times the area does not quietly quadruple the triangle count and the
-	# collision mesh with it.
-	var step: float = maxf(16.0, s / 55.0)
+	var step := _terrain_step()
 	var n := int(s / step)
 	for gz in range(-n, n):
 		for gx in range(-n, n):

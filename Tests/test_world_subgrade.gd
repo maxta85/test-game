@@ -195,11 +195,12 @@ func _carve_is_bounded(t: TestHarness, b: WorldBuilder, g: RoadGraph) -> void:
 func _grid_is_subdivided(t: TestHarness, b: WorldBuilder, g: RoadGraph) -> void:
 	var coarse := 0
 	var cells := 0
+	var step: float = b._terrain_step()
 	for x in range(-700, 700, 40):
 		for z in range(-700, 700, 40):
-			var n := b._cell_subdivisions(Vector2(float(x), float(z)))
+			var n := b._cell_subdivisions(Vector2(float(x), float(z)), step)
 			cells += 1
-			if n.x <= 1 and n.y <= 1:
+			if n <= 1:
 				coarse += 1
 	t.ok(coarse * 4 < cells,
 			"cells within reach of a corridor are subdivided (%d of %d sample cells still coarse)" % [coarse, cells])
