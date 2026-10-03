@@ -127,6 +127,19 @@ func rpm() -> float:
 	return _rpm
 
 
+## The run/stop ramp, 0..1, after the same one-pole that closes it. Read-only.
+##
+## It is here for the sample path, which has no generator of its own and needs
+## the same fade for the same reason: a voice that starts at full level and stops
+## at full level clicks, and this is the curve the fallback already closes on.
+## Reusing it rather than writing a second one is the point - a fade constant
+## applied once per *frame* instead of once per *sample* is off by a factor of
+## the frame time, and 0.06 s of smoothing applied 60 times a second closes in
+## half a second rather than in 0.06 s.
+func fade() -> float:
+	return _fade
+
+
 func reset() -> void:
 	_target_rpm = IDLE_RPM
 	_target_load = 0.0

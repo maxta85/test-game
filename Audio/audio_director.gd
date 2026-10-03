@@ -82,12 +82,20 @@ func play_cue(name: String, gain_db: float = 0.0) -> bool:
 ## whatever the car happens to have, so it never throws on the first frame's
 ## zeroed rpm and never has to be guarded by the caller.
 ##
+## `redline` and `boost` are the two numbers the car's drivetrain has and an
+## engine sample needs: the layer bands are fractions of the redline, and boost
+## is the only thing that can raise a new event rather than a new pitch. Both
+## default to something harmless, so the two-argument call `Audio/audio_check.gd`
+## makes still means "feed the engine" and nothing else.
+##
 ## Also what starts the voice, and it is the *only* thing that does: a director
 ## nobody has fed has no engine, and one that plays on its own is an idling
 ## engine in a menu with no car in it.
-func set_engine(rpm: float, load: float) -> void:
+func set_engine(rpm: float, load: float, redline: float = 0.0, boost: float = 0.0) -> void:
 	if _voice != null:
 		_voice.set_sounding(true)
+		_voice.set_redline(redline)
+		_voice.set_boost(boost, load)
 		_voice.synth.set_engine(rpm, load)
 
 
