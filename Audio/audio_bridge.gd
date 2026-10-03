@@ -107,7 +107,12 @@ func _physics_process(_delta: float) -> void:
 		# every parameter it is handed through a one-pole, which is what the noise
 		# on rpm arriving at 60 Hz needs, and a second filter in here would only
 		# delay the pitch by the same amount it was meant to remove the noise from.
-		director.set_engine(car.engine_rpm, car.throttle)
+		#
+		# `spec.redline` and `boost` are handed over rather than looked up by the
+		# audio side, for the same reason: they are the car's own drivetrain
+		# state, they are already public, and an engine sample's layer bands are
+		# fractions of one and its wastegate is a function of the other.
+		director.set_engine(car.engine_rpm, car.throttle, car.spec.redline, car.boost)
 
 
 ## A slot that was filled and is now invalid. A slot that was never filled is not

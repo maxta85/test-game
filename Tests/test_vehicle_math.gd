@@ -9,6 +9,7 @@ func run(t: TestHarness) -> void:
 	_suspension(t)
 	_torque_curve(t)
 	_slip_math(t)
+	_near_stationary(t)
 
 
 func _longitudinal_peak(t: TestHarness) -> void:
@@ -151,3 +152,104 @@ func _slip_math(t: TestHarness) -> void:
 	t.ok(is_finite(TyreModel.slip_ratio(0.0, 0.0)), "slip ratio is finite at zero speed")
 	t.ok(is_finite(TyreModel.slip_angle_tan(0.0, 0.0)), "slip angle is finite at zero speed")
 	t.ok(is_finite(TyreModel.slip_angle_tan(0.001, 5.0)), "slip angle is finite when crawling sideways")
+
+
+## The near-stationary denominator. Every slip quantity in the car divides a
+## lateral (or circumferential) speed by a forward speed, and the forward speed
+## goes to zero. What must never happen is the ratio leaving its range, because
+## the only consumers of it are a HUD, a camera lean, a drift readout and a
+## driving AI - a NaN or a 500 in any of them reads as "the car is sliding
+## sideways at 500 m/s" when the car is parked.
+##
+## Measured on this file, sweeping speed 0..2.0 m/s against forward speed
+## 0..1.0 m/s: the chassis slip angle is exactly 0.000000 rad for every speed at
+## or below 1.0 m/s, and never exceeds 0.896055 rad (51.34 deg) anywhere, with
+## no non-finite value produced. Those two numbers are what the floors buy, and
+## they are what the assertions below pin.
+func _near_stationary(t: TestHarness) -> void:
+	var side := 1.0
+
+	# 1. At or below SLIP_MIN_SPEED the angle is not merely small, it is exactly
+	# zero - the boundary is inclusive, so 1.0 m/s itself is still stationary.
+	for speed in [0.0, 0.04, 0.05, 0.5, 0.99, TyreModel.SLIP_MIN_SPEED]:
+		for fwd in [0.0, 0.01, 0.049, 0.05, 0.2, 0.8, 5.0]:
+			t.eq(TyreModel.slip_angle_rad(speed, fwd, side), 0.0,
+				"chassis slip is exactly zero at %.2f m/s with %.3f m/s forward" % [speed, fwd])
+
+	# 2. Just above the gate with a vanishing forward component - the case that
+	# divides by nothing. The floor takes over and the answer is the cap,
+	# atan(side / SLIP_MIN_FORWARD) = 0.896055 rad, not infinity.
+	var cap: float = atan(side / TyreModel.SLIP_MIN_FORWARD)
+	t.near(TyreModel.slip_angle_rad(1.01, 0.0, side), cap, 1e-6,
+		"above the speed gate a zero forward component saturates at the cap (%.6f rad)" % cap)
+	t.between(cap, 0.89, 0.90, "and that cap is a sane 51 degrees, not 90")
+	t.ok(is_finite(TyreModel.slip_angle_rad(1.01, 0.0001, side)),
+		"chassis slip is finite one tick above the gate at a crawling forward speed")
+
+	# 3. The floor is the floor: every forward speed under it gives the identical
+	# answer. If this ever stops holding, the floor has leaked and the ratio is
+	# varying with a speed nobody can measure.
+	var saturated := TyreModel.slip_angle_rad(3.0, 0.0, side)
+	for fwd in [0.001, 0.01, 0.049, 0.05, 0.2, 0.5, TyreModel.SLIP_MIN_FORWARD - 0.01]:
+		t.near(TyreModel.slip_angle_rad(3.0, fwd, side), saturated, 1e-6,
+			"forward %.3f m/s under the floor is indistinguishable from zero" % fwd)
+
+	# 4. Monotone: past the floor a faster forward component can only shrink the
+	# angle. A ratio that grows as the denominator shrinks is the defect.
+	var prev := INF
+	for fwd in [0.8, 0.81, 0.9, 1.2, 2.0, 5.0, 10.0, 30.0]:
+		var got := TyreModel.slip_angle_rad(3.0, fwd, side)
+		t.ok(got <= prev + 1e-9,
+			"chassis slip never grows as forward speed rises (at %.2f m/s forward)" % fwd)
+		prev = got
+
+	# 5. Continuous across the floor. A step here would show up as a jolt when
+	# the car creeps over the threshold, and nothing above would catch it.
+	var under := TyreModel.slip_angle_rad(3.0, TyreModel.SLIP_MIN_FORWARD - 0.001, side)
+	var over := TyreModel.slip_angle_rad(3.0, TyreModel.SLIP_MIN_FORWARD + 0.001, side)
+	t.between(absf(over - under), 0.0, 0.01,
+		"no discontinuity where the floor ends (%.6f rad across it)" % absf(over - under))
+
+	# 6. Nothing anywhere in the near-stationary neighbourhood is non-finite or
+	# out of range. A sweep, not a sample: the bug this exists for is a blow-up
+	# in a corner of the input space, and corners are what a sweep finds.
+	var worst := 0.0
+	var finite := true
+	for si in range(0, 41):
+		for fi in range(0, 21):
+			var got := TyreModel.slip_angle_rad(float(si) * 0.05, float(fi) * 0.05, side)
+			if not is_finite(got):
+				finite = false
+			worst = maxf(worst, absf(got))
+	t.ok(finite, "every chassis slip angle in speed 0..2.0 x forward 0..1.0 is finite")
+	t.near(worst, cap, 1e-5, "and the worst of them is the cap (%.6f rad)" % worst)
+
+	# 7. Sign of the slide is the sign of the lateral component, and the forward
+	# component's own sign is irrelevant - a car in reverse is not cornering
+	# backwards.
+	t.ok(TyreModel.slip_angle_rad(3.0, 5.0, -2.0) < 0.0, "sliding left gives a negative body slip")
+	t.near(TyreModel.slip_angle_rad(3.0, -5.0, side), TyreModel.slip_angle_rad(3.0, 5.0, side), 1e-6,
+		"forward direction does not change the body's slip angle")
+
+	# 8. Cross-check the two independent implementations of the same idea: the
+	 # per-axle tangent (floored at EPS_SPEED) and the chassis angle (floored at
+	 # SLIP_MIN_FORWARD). Above both floors they must be the same number.
+	for fwd in [1.21, 2.0, 8.0, 25.0]:
+		t.near(atan(TyreModel.slip_angle_tan(fwd, side)),
+			TyreModel.slip_angle_rad(3.0, fwd, side), 1e-5,
+			"axle slip and chassis slip agree at %.2f m/s forward" % fwd)
+	t.gt(TyreModel.EPS_SPEED, TyreModel.SLIP_MIN_FORWARD,
+		"the per-axle floor is the wider of the two, so the axle saturates first")
+
+	# 9. The sentinels are floors. A zero here reintroduces the exact division
+	# this suite exists to catch, and it would reintroduce it silently.
+	for pair in [[TyreModel.EPS_SPEED, "EPS_SPEED"], [TyreModel.SLIP_MIN_FORWARD, "SLIP_MIN_FORWARD"],
+			[TyreModel.SLIP_MIN_SPEED, "SLIP_MIN_SPEED"]]:
+		t.gt(float(pair[0]), 0.0, "%s is a positive floor, not a zero" % String(pair[1]))
+
+	# 10. And the floors actually bind at the speeds they claim to, so the
+	# constants above cannot drift away from the arithmetic they describe.
+	t.near(TyreModel.slip_angle_tan(0.0, side), side / TyreModel.EPS_SPEED, 1e-6,
+		"per-axle slip saturates at side / EPS_SPEED, the textbook 0.833333")
+	t.near(TyreModel.slip_ratio(side, 0.0), (side - 0.0) / TyreModel.EPS_SPEED, 1e-6,
+		"slip ratio saturates at (wheel - ground) / EPS_SPEED at a standstill")

@@ -61,6 +61,44 @@ const WATCH_LOOP := 0.6
 ## worth opening once there is something in it to measure.
 const METER_MIX_WAIT_MS := 1000
 
+## The audio server's mix period, in seconds: the 4096 frames it consumes per
+## mix at the 44100 Hz `EngineVoice` generates at. **This is the resolution of
+## every bus meter in the project.** A meter does not change between mixes, so
+## a window's real unit is mixes and not milliseconds.
+##
+## The number a window asks for is derived from this, and that is what makes it
+## honest rather than a hidden second opinion about timing. A free-running main
+## loop starves the audio thread and a starved thread mixes *less* often -
+## measured here: 93, 93, 187, 376 and 187 ms between consecutive mixes - never
+## more often. So a count derived from this is a floor on how much a window
+## covers rather than a promise about how long it will take, and asking for four
+## of them is four of them whether they take 370 ms or 1.5 s to arrive.
+const MIX_PERIOD := 4096.0 / 44100.0
+
+## How long, as a multiple of the nominal mix period, to keep waiting for the
+## mixes a window asked for before reporting what it has. Only a server that
+## has stopped mixing altogether reaches this, and a truncated window is the
+## least of that problem.
+const MIX_PATIENCE := 10.0
+
+## The fewest mixes a window must actually contain to be evidence of anything.
+## Distinct from the count a *level* window derives from `MIX_PERIOD`: that one
+## asks for how much of the signal a window should cover, this one is the floor
+## below which a window is not reporting on the meter at all. Asserted on the
+## probe below rather than assumed, because a window that silently held one mix
+## instead of three would satisfy every metered assertion in this suite while
+## answering a different question - which is how this suite's own engine case
+## survived a broken wait.
+const MIN_MIXES := 3
+## The gain step the meter's own scale is checked against, and the tolerance it
+## has to hold it to. A square wave's peak is its amplitude, so this is
+## arithmetic rather than calibration.
+const PROBE_STEP_DB := 6.0
+const PROBE_TOL_DB := 0.2
+## The bus the meter is proved on: added by the suite, and removed again, so the
+## game's own buses are never the thing under test.
+const PROBE_BUS := "SoundProbe"
+
 ## Metres between the car and the wall it is thrown at. A contact is a trigger
 ## that cannot be faked - `body_entered` needs a closing speed - so this suite
 ## throws a car at something rather than calling the impact handler.
@@ -80,6 +118,10 @@ var _director: AudioDirector
 var _heard: Dictionary = {}
 var _world: Node3D
 var _car: CarBody
+## The mixes the last `_peak` window actually contained, counted as it went. Read
+## back through `last_mixes()` so a check can assert a window was the window it
+## claims to be rather than trusting that it was.
+var _last_mixes := 0
 
 
 func run(t: TestHarness) -> void:
@@ -94,6 +136,7 @@ func run(t: TestHarness) -> void:
 	_director = _service._director()
 	t.ok(_director != null, "with a director to play cues through")
 	await _at_rest(t)
+	await _prove_the_meter(t)
 	await _beds(t)
 	await _engine(t)
 	await _tyres(t)
@@ -118,6 +161,110 @@ func _at_rest(t: TestHarness) -> void:
 	t.between(engine, -200.0, SILENT, "an engine with no car is silent  (%.1f dB)" % engine)
 	var sfx := await _peak(AudioBuses.SFX)
 	t.between(sfx, -200.0, SILENT, "and so are the tyres  (%.1f dB)" % sfx)
+
+
+# ------------------------------------------------------------------ the meter
+
+## The measuring apparatus, proved against a signal whose level is known exactly,
+## before it is used to measure anything else.
+##
+## Every other case here reads a bus twice and compares the two reads. That is only
+## a measurement if the read means the same thing both times, and if a known change
+## of gain comes out as the same number of dB - and neither of those was asserted
+## anywhere. A window that silently held one mix instead of `MIN_MIXES` would
+## satisfy every metered assertion in this suite while answering a different
+## question, which is precisely how this suite's own engine case survived a wait
+## that was measuring a ramp in flight rather than a level. So the meter is checked
+## against a probe rather than against the game: a square wave, because its peak is
+## its amplitude and every mixed block contains a plateau long enough to hold it, at
+## the server's own mix rate, so nothing is resampled on the way in and the expected
+## answer is arithmetic.
+##
+## Named `_prove_the_meter` and not `_meter` because `_meter(idx, right)` below is
+## already the single-bus read, and two things in one file claiming one name is how
+## one of them ends up wrong.
+func _prove_the_meter(t: TestHarness) -> void:
+	var before := AudioServer.bus_count
+	AudioServer.add_bus()
+	var idx := AudioServer.bus_count - 1
+	AudioServer.set_bus_name(idx, PROBE_BUS)
+	# Sent nowhere: the probe is measured on its own bus and must not be able to
+	# move the Master reading that `_beds` is about to take.
+	AudioServer.set_bus_send(idx, &"")
+	AudioServer.set_bus_volume_db(idx, 0.0)
+	var player := AudioStreamPlayer.new()
+	player.bus = PROBE_BUS
+	player.stream = _probe_tone()
+	_tree.root.add_child(player)
+	player.play()
+	await _await_mixes(MIN_MIXES)
+
+	player.volume_db = 0.0
+	await _await_mixes(MIN_MIXES)
+	var loud := await _peak(PROBE_BUS, WATCH_LOOP)
+	t.ok(loud > -40.0, "the probe is sounding at all  (%.2f dB)" % loud)
+	t.ok(last_mixes() >= MIN_MIXES,
+			"and a window holds the mixes it claims to  (%d, want >= %d)" % [
+					last_mixes(), MIN_MIXES])
+
+	# The same buffer and the same gain, read twice. A peak meter over a square
+	# wave has exactly one answer, so anything else is the window, not the signal.
+	player.volume_db = 0.0
+	await _await_mixes(MIN_MIXES)
+	var again := await _peak(PROBE_BUS, WATCH_LOOP)
+	t.near(again, loud, 0.05,
+			"the same buffer read against itself is 0.0 dB apart  (%.4f dB)" % absf(again - loud))
+
+	# A known -6 dB of gain on that same buffer, which has to read as -6 dB. This
+	# is the assertion with teeth: it fails if the window is measuring a transient,
+	# if the dB scale is not the one this check thinks it is, or if the window is
+	# not the meter's own.
+	player.volume_db = -PROBE_STEP_DB
+	await _await_mixes(MIN_MIXES)
+	var quiet := await _peak(PROBE_BUS, WATCH_LOOP)
+	t.near(loud - quiet, PROBE_STEP_DB, PROBE_TOL_DB,
+			"a known -%.1f dB of gain reads -%.1f dB  (%.4f dB apart)" % [
+					PROBE_STEP_DB, PROBE_STEP_DB, loud - quiet])
+
+	# ...and the comparison must reject a step it was not given, or it is decoration.
+	t.ok(absf((loud - quiet) - PROBE_STEP_DB / 2.0) > PROBE_TOL_DB,
+			"NOT and would have failed on half that step")
+	t.ok(absf((loud - quiet) - 0.0) > PROBE_TOL_DB,
+			"NOT nor on no step at all")
+
+	player.stop()
+	player.queue_free()
+	await _tree.process_frame
+	var live := AudioServer.get_bus_index(PROBE_BUS)
+	if live >= 0:
+		AudioServer.remove_bus(live)
+	t.eq(AudioServer.bus_count, before, "and the probe bus is gone again")
+
+
+## A square wave at the server's own rate, so the peak a window takes is the
+## amplitude and not a lucky sample. 20 Hz against a ~44.1 kHz mix is a 2200-sample
+## plateau: every block the server mixes holds several, whatever it happens to be
+## aligned to.
+func _probe_tone() -> AudioStreamWAV:
+	var rate := maxi(AudioServer.get_mix_rate(), 8000)
+	var period := maxi(int(float(rate) / 20.0), 16)
+	var w := AudioStreamWAV.new()
+	w.format = AudioStreamWAV.FORMAT_16_BITS
+	w.mix_rate = rate
+	w.stereo = false
+	w.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	w.loop_begin = 0
+	w.loop_end = period
+	var data := PackedByteArray()
+	data.resize(period * 2)
+	for i in period:
+		# Half full scale: -6.02 dBFS, which is a level rather than a rail, so a
+		# mix that overshoots on the way cannot be mistaken for the answer.
+		var v := 16384 if i < period / 2 else -16384
+		data[i * 2] = v & 0xff
+		data[i * 2 + 1] = (v >> 8) & 0xff
+	w.data = data
+	return w
 
 
 # --------------------------------------------------------------------- beds
@@ -152,8 +299,15 @@ func _engine(t: TestHarness) -> void:
 	t.between(before, -200.0, SILENT, "the engine is silent before there is a car  (%.1f dB)" % before)
 
 	_car = _make_car("kairo_s13")
-	await _frames(4)
+	await _settled_engine()
 	var idle := await _peak(AudioBuses.ENGINE)
+	# The reading is only an idle reading if the engine was idling while it was
+	# taken. This is what makes "the stimulus had settled" an assertion instead of
+	# a claim: break `_settled_engine` and the synth is still at the load it had
+	# before, so this goes red while the dB difference below still looks fine.
+	var synth := _director.engine_synth() as EngineSynth
+	t.near(synth.load(), 0.0, 0.05,
+			"and the idle reading was taken at idle  (load %.3f)" % synth.load())
 	t.between(idle, AUDIBLE, 6.0, "a car on the grid has an engine  (%.1f dB)" % idle)
 	t.gt(idle - before, CAUSED,
 			"which is %d dB louder than no car at all" % int(idle - before))
@@ -161,8 +315,10 @@ func _engine(t: TestHarness) -> void:
 	# It follows the revs rather than sitting at idle whatever happens, which is
 	# the difference between an engine and a drone.
 	_car.throttle = 1.0
-	await _frames(30)
+	await _settled_engine()
 	var hot := await _peak(AudioBuses.ENGINE)
+	t.near(synth.load(), 1.0, 0.05,
+			"and the loud reading was taken at full load  (load %.3f)" % synth.load())
 	t.between(hot, AUDIBLE, 6.0, "and on full throttle it is louder  (%.1f dB)" % hot)
 	t.gt(hot - idle, 3.0, "by %d dB" % int(hot - idle))
 	_car.throttle = 0.0
@@ -468,25 +624,67 @@ func _slide(amount: float) -> void:
 ## noise rather than the mixer.
 func _peak_both(bus: String, secs: float = WATCH) -> Vector2:
 	var idx := AudioServer.get_bus_index(bus)
+	if not await _await_mix():
+		# The server never mixed inside the wait, so this window measured nothing
+		# and the block it inherited is all there is.
+		return Vector2(_meter(idx, false), _meter(idx, true))
+	var want := _mixes_for(secs)
+	var deadline := _mix_deadline(want)
+	var since := AudioServer.get_time_since_last_mix()
 	var peak := Vector2(-200.0, -200.0)
-	var opened := await _await_mix()
-	var until := Time.get_ticks_msec() + int(secs * 1000.0)
-	while Time.get_ticks_msec() < until:
-		peak.x = maxf(peak.x, AudioServer.get_bus_peak_volume_left_db(idx, 0.0))
-		peak.y = maxf(peak.y, AudioServer.get_bus_peak_volume_right_db(idx, 0.0))
-		await _tree.process_frame
-	# A window the server never mixed for has measured nothing at all, and the
-	# block it inherited is all there is.
-	if not opened:
-		peak.x = maxf(peak.x, AudioServer.get_bus_peak_volume_left_db(idx, 0.0))
-		peak.y = maxf(peak.y, AudioServer.get_bus_peak_volume_right_db(idx, 0.0))
-	return peak
+	for _m in want:
+		while true:
+			peak.x = maxf(peak.x, _meter(idx, false))
+			peak.y = maxf(peak.y, _meter(idx, true))
+			var now := AudioServer.get_time_since_last_mix()
+			if now < since:
+				break
+			since = now
+			if Time.get_ticks_msec() >= deadline:
+				return peak
+			await _tree.process_frame
+	return Vector2(maxf(peak.x, _meter(idx, false)), maxf(peak.y, _meter(idx, true)))
+
+
+## How many mixes a window of `secs` is asking for. That is the only part of a
+## window's length the meter can resolve, so it is the only part that is counted;
+## `secs` keeps meaning what the callers say it means, and the number of mixes
+## that fits in it is derived rather than assumed to have happened.
+func _mixes_for(secs: float) -> int:
+	return maxi(1, int(secs / MIX_PERIOD))
+
+
+## Wall-clock backstop for a window that wants `count` mixes, so a server that
+## stops mixing ends the window instead of hanging the run.
+func _mix_deadline(count: int) -> int:
+	return Time.get_ticks_msec() + int(MIX_PATIENCE * MIX_PERIOD * 1000.0 * float(count))
+
+
+## One side of one bus's meter.
+func _meter(idx: int, right: bool) -> float:
+	return AudioServer.get_bus_peak_volume_right_db(idx, 0.0) if right \
+			else AudioServer.get_bus_peak_volume_left_db(idx, 0.0)
 
 
 ## Real time, where something is time-based: a bed fading in over its own
 ## envelope, or the physics settling onto its springs.
+##
+## Wall clock, deliberately, and not `create_timer`. This runner is started with
+## `--fixed-fps 60`, which pins the engine delta at 1/60 s no matter how much
+## wall clock passes, and a `SceneTreeTimer` counts *simulated* frames. Measured
+## on this runner: `create_timer(0.5)` returned after **20.3 ms** of wall time
+## and `create_timer(1.0)` after **1.098 ms**, where without `--fixed-fps` the
+## same calls take 354 ms and 1000.7 ms. So a settle written that way is a
+## thirty-frame wait wearing a half-second's name, and anything measured after
+## it is measured on a world that has not settled.
+##
+## `Time.get_ticks_usec()` is the monotonic OS clock, so it is untouched by
+## `Engine.time_scale` and by `--fixed-fps` alike, and this does not assume a
+## frame rate either: it re-checks every frame and returns on the clock.
 func _settle(secs: float = 0.5) -> void:
-	await _tree.create_timer(secs).timeout
+	var until := Time.get_ticks_usec() + int(secs * 1000000.0)
+	while Time.get_ticks_usec() < until:
+		await _tree.process_frame
 
 
 ## Frames until the bus is quiet, or the budget runs out. Returns the frames it
@@ -539,24 +737,61 @@ func _frames(n: int) -> void:
 ## Waiting for a mix can only remove those readings and cannot hide a real one:
 ## a stream that is still making a sound is still making it while the window is
 ## open, and the mixes inside the window say so.
+##
+## The window itself is counted in MIXES, which is the rest of the fix. A
+## millisecond window against a meter that only changes every MIX_PERIOD is a
+## sample count nobody chose: measured on this runner, a 450 ms window contained
+## anywhere from two to five mixes depending on the phase it opened at, so every
+## reading in this suite was "the loudest of however many 93 ms blocks happened
+## to land, selected by an uncontrolled phase". That is not a measurement. It
+## cost this suite two different failures for the same defect on the same tree,
+## and the engine one is worth stating plainly: the voice is a generator behind
+## a 0.25 s ring, so it takes 380-440 ms from a car existing to the engine being
+## audible at the bus - measured, four mixes at -200.0000 dB and then -22.3 dB -
+## against a 450 ms window. Whether the transition landed inside the window was
+## a coin flip, and a coin flip reads -200.0000 dB as "there is no engine here".
+##
+## Counting mixes removes the coin flip without touching the bar: WATCH and
+## WATCH_LOOP still mean what they always meant, the same number of mixes are
+## measured, and now the number of them is the same every run instead of being
+## whatever the phase allowed. Nothing is widened to make a marginal reading
+## pass - the maximum is still taken over the same kind of blocks - and because
+## a window now reliably contains its four or six mixes, a *silent* assertion
+## gets slightly more chances to catch a transient, not fewer.
 func _peak(bus: String, secs: float = WATCH, right: bool = false) -> float:
 	var idx := AudioServer.get_bus_index(bus)
+	_last_mixes = 0
 	if idx < 0:
 		return -200.0
-	var opened := await _await_mix()
+	if not await _await_mix():
+		# The server never mixed inside the wait, so this window measured nothing
+		# and the block it inherited is all there is.
+		return _meter(idx, right)
+	var want := _mixes_for(secs)
+	var deadline := _mix_deadline(want)
+	var since := AudioServer.get_time_since_last_mix()
 	var best := -200.0
-	var deadline := Time.get_ticks_msec() + int(secs * 1000.0)
-	while Time.get_ticks_msec() < deadline:
-		var level := AudioServer.get_bus_peak_volume_right_db(idx, 0.0) if right \
-				else AudioServer.get_bus_peak_volume_left_db(idx, 0.0)
-		best = maxf(best, level)
-		await _tree.process_frame
-	# The server never mixed inside the wait, so this window measured nothing
-	# and the block it inherited is all there is.
-	if not opened:
-		best = maxf(best, AudioServer.get_bus_peak_volume_right_db(idx, 0.0) if right \
-				else AudioServer.get_bus_peak_volume_left_db(idx, 0.0))
-	return best
+	# Counted as they are seen, so `last_mixes()` is what this window really
+	# contained rather than what it asked for - a window truncated by the deadline
+	# reports the shortfall instead of hiding it behind the request.
+	var seen := 0
+	for _m in want:
+		# Sampled every frame rather than every mix: the maximum is the point of
+		# the window and the frames between mixes cost nothing. Only the *waiting*
+		# is counted in mixes.
+		while true:
+			best = maxf(best, _meter(idx, right))
+			var now := AudioServer.get_time_since_last_mix()
+			if now < since:
+				seen += 1
+				break
+			since = now
+			if Time.get_ticks_msec() >= deadline:
+				_last_mixes = seen
+				return best
+			await _tree.process_frame
+	_last_mixes = seen
+	return maxf(best, _meter(idx, right))
 
 
 ## Blocks until the audio server has mixed at least once, so the first meter
@@ -564,12 +799,80 @@ func _peak(bus: String, secs: float = WATCH, right: bool = false) -> float:
 ## time since the last mix, and that counter restarting is the only signal there
 ## is that a mix has happened.
 func _await_mix() -> bool:
+	return await _await_mixes(1, METER_MIX_WAIT_MS) > 0
+
+
+## Blocks until the audio server has mixed at least `count` times, and reports how
+## many it saw. `budget_ms` of 0 means an order of magnitude per mix, which is
+## what a caller asking for several wants; `_await_mix` passes its own because it
+## gates on a single mix arriving and has always spent exactly that much on it. One
+## implementation of the restart counting, because two copies of it drift.
+func _await_mixes(count: int, budget_ms: int = 0) -> int:
+	if budget_ms <= 0:
+		budget_ms = METER_MIX_WAIT_MS * (count + 1)
 	var since := AudioServer.get_time_since_last_mix()
-	var deadline := Time.get_ticks_msec() + METER_MIX_WAIT_MS
-	while Time.get_ticks_msec() < deadline:
+	var deadline := Time.get_ticks_msec() + budget_ms
+	var seen := 0
+	while seen < count and Time.get_ticks_msec() < deadline:
 		var now := AudioServer.get_time_since_last_mix()
 		if now < since:
-			return true
+			seen += 1
 		since = now
 		await _tree.process_frame
-	return false
+	return seen
+
+
+## The mixes the last `_peak` window actually contained, counted as the window went.
+## Read back so a check can assert the window was the one it claims to be rather than
+## trusting that it was.
+func last_mixes() -> int:
+	return _last_mixes
+
+
+## Waits for the engine's own level ramp to arrive before any meter window opens.
+##
+## The engine's loudness is not the bridge's target load, it is the synth's
+## **smoothed** load, and that is advanced on the audio thread, inside
+## `EngineSynth.render` (`Audio/engine_synth.gd`), so the ramp is driven by the
+## audio server's mix rate and by nothing else.
+##
+## So `_frames(30)` - thirty *physics* frames - is not "half a second of full
+## throttle". This runner is started with `--fixed-fps 60`, which pins the engine
+## delta at 1/60 s no matter how much wall clock passes, so what thirty physics
+## frames buy is thirty physics frames of *wall clock*, and how long that is depends
+## on the machine. Measured here, sweeping the count:
+##
+##     frames(1) ->   1 ms -> load 0.0000      frames(30) ->  66 ms -> load 0.9963
+##     frames(2) ->   4 ms -> load 0.1759      frames(60) -> 124 ms -> load 1.0000
+##     frames(4) ->   8 ms -> load 0.4404
+##     frames(8) ->  16 ms -> load 0.7419
+##
+## The load is a function of elapsed wall time, at about 2.2 ms and +0.176 of load
+## per render, not a function of the frame count the name suggests. On a box that
+## runs a physics frame in 0.33 ms the same thirty frames are ten milliseconds -
+## which is what the original worker measured - and buy about five renders instead
+## of thirty. Thirty frames is not a shorter version of the right answer, it is a
+## different question, and the answer changes with the machine.
+##
+## That is the whole of `by 0 dB (got 0.9026, want > 3.0000)`: the window opened on
+## a ramp in flight and reported wherever the ramp happened to be when the window
+## closed. It also settles the idle reading, whose window used to open on the
+## engine's fade-in - measured, that window read -20.8, -31.7, -31.7, -33.4 dB, so
+## its maximum was a start transient 11 dB above the idle it was supposed to be the
+## baseline for.
+##
+## So the wait is on the condition: the smoothed load has reached the load the
+## bridge is handing over, and two mixes have passed since, because one mix is what
+## it takes to render the target and the next is what renders the result of the ramp.
+## Bounded, so a starved audio thread is a wrong number rather than a hang.
+func _settled_engine() -> void:
+	var s := _director.engine_synth() as EngineSynth
+	var want := 0.0 if _car == null else clampf(_car.throttle, 0.0, 1.0)
+	var deadline := Time.get_ticks_msec() + METER_MIX_WAIT_MS * 2
+	while Time.get_ticks_msec() < deadline:
+		if s != null and absf(s.load() - want) <= 0.02:
+			var seen := await _await_mixes(2, METER_MIX_WAIT_MS * 2)
+			if seen >= 2 or Time.get_ticks_msec() >= deadline:
+				return
+			continue
+		await _tree.process_frame

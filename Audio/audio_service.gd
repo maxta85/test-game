@@ -86,6 +86,10 @@ const HOST_CLICKS := ["race_start_requested", "garage_requested", "quit_requeste
 static var instance: AudioService = null
 
 var bridge: AudioBridge = null
+## The music bus's player and its play/duck/fade, in one place. Public because
+## this is the game's audio surface: a menu that wants the music quieter says so
+## here rather than reaching for the bed player, and a check reads `state()`.
+var music: MusicChannel = null
 
 var _owned: AudioDirector = null
 var _music: AudioStreamPlayer = null
@@ -107,6 +111,10 @@ func _ready() -> void:
 		AudioBuses.set_volume(String(bus), float(MIX[bus]))
 
 	_music = _start_bed("music", AudioBuses.MUSIC, MUSIC_DB)
+	# The channel wraps the player made above rather than making its own, so the
+	# bed's name, bus, trim and level at boot are exactly what they were: the
+	# music is playing before anything asks it to be louder or quieter.
+	music = MusicChannel.new(_music, MUSIC_DB)
 	_night = _start_bed("night", AudioBuses.AMBIENCE, NIGHT_DB)
 	# The tyre voice is made playing, and silent: a loop that starts when the
 	# player wants to hear it is a loop that clicks on the way in.
@@ -158,7 +166,11 @@ func _exit_tree() -> void:
 
 ## The menus are built by the host's `_ready`, which is after every autoload, so
 ## the click wiring is retried until there is something to wire.
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	# Before anything that can return early: a fade closes on its own frames, not
+	# on the frames the menus happen to exist for.
+	if music != null:
+		music.tick(delta)
 	if _menus == null or not is_instance_valid(_menus):
 		_menus = _find_menus()
 		if _menus == null:
@@ -375,3 +387,12 @@ func set_car(car: CarBody) -> void:
 func set_race(race: RaceDirector) -> void:
 	if bridge != null:
 		bridge.race = race
+
+
+## Whether the bridge is there at all. Not something a caller needs in order to
+## work - everything below tolerates a null bridge - and it is here so a host can
+## say out loud that the game is silent instead of discovering it in play. The
+## bridge is built in this autoload's `_ready`, so this is false only if the
+## autoload did not run or was replaced, and both are worth a warning.
+func has_bridge() -> bool:
+	return bridge != null and is_instance_valid(bridge) and bridge.director != null
