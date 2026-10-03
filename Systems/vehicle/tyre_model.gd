@@ -16,7 +16,36 @@ extends RefCounted
 ## toward the sliding-grip plateau. The tail is what makes a handbrake slide
 ## holdable instead of snapping straight back.
 
+## Denominator floor for every slip ratio in the car, in m/s. This is the
+## quantity that decides what "barely moving" means: below it the denominator is
+## the floor, not the speed, so the ratio saturates at `numerator / EPS_SPEED`
+## instead of running away. At 1.2 m/s a 1.0 m sideways slide saturates at 0.833
+## - a large but finite slip demand, which `shape()` turns into sliding grip.
+##
+## A floor is the only honest option here. The ratio is genuinely undefined at
+## rest - there is no angle between a velocity vector and a direction it is not
+## moving in - and the two dishonest alternatives are worse: a tiny epsilon makes
+## the ratio explode (a 0.0004 m/s forward crawl divides by itself and reports
+## 500, which reads as "sliding, not driving" when the car is parked), and no
+## floor at all produces NaN that propagates into the tyre force.
 const EPS_SPEED := 1.2
+
+## Denominator floor for the chassis slip angle, in m/s. `CarBody` used to write
+## this as a bare `0.8` inline, which made it untestable and unexplained: it is
+## the one number standing between a parked car and a 90-degree slip readout.
+## 0.8 m/s is a walking pace - a car genuinely moving that slowly is not
+## cornering, so treating its body slip as small-but-real is right, and the angle
+## it can report is capped at atan(1.0 / 0.8) = 0.896 rad (51.3 deg).
+const SLIP_MIN_FORWARD := 0.8
+
+## Chassis speed below which the car is treated as stationary and its body slip
+## angle is reported as exactly zero, in m/s. Separate from SLIP_MIN_FORWARD
+## because this one gates the whole signal: below it there is no meaningful
+## direction of travel to measure an angle against, and a direction that flips
+## every frame from tyre noise would make the camera and the drift readouts
+## jitter while the car sits still. The sign convention below carries the
+## previous inline `if speed > 1.0` exactly.
+const SLIP_MIN_SPEED := 1.0
 
 ## Grip plateaus reached once the tyre is fully sliding.
 const LATERAL_TAIL := 0.72      ## a sliding tyre keeps most of its cornering force
@@ -74,6 +103,30 @@ static func slip_ratio(wheel_speed: float, ground_speed: float) -> float:
 ## `v_forward` is the component along the wheel heading, `v_side` is lateral.
 static func slip_angle_tan(v_forward: float, v_side: float) -> float:
 	return v_side / maxf(absf(v_forward), EPS_SPEED)
+
+
+## Chassis slip angle in radians: the angle between where the car is pointing
+## and where it is actually going, which is the single number the camera lean,
+## the drift readouts and the AI all read.
+##
+## `speed` is the chassis speed, `v_forward` and `v_side` its velocity in body
+## axes. Two guards, in this order, and both are about the denominator:
+##
+##   1. At or below SLIP_MIN_SPEED the car is stationary, so the angle is not
+##      merely small, it is undefined - there is no direction of travel to
+##      measure against - and it is reported as exactly 0.0.
+##   2. Above that, the forward speed is floored at SLIP_MIN_FORWARD, so a car
+##      sliding almost purely sideways cannot divide by its own vanishing
+##      forward component.
+##
+## This lives here, next to the two ratios it shares a floor with, so the
+## near-stationary behaviour is one named policy in one place instead of a
+## literal buried in a telemetry update. It was inlined in `CarBody` and this is
+## the arithmetic unchanged.
+static func slip_angle_rad(speed: float, v_forward: float, v_side: float) -> float:
+	if speed <= SLIP_MIN_SPEED:
+		return 0.0
+	return atan2(v_side, maxf(absf(v_forward), SLIP_MIN_FORWARD))
 
 
 ## Combines longitudinal and lateral demand onto a friction ellipse.
