@@ -3,8 +3,8 @@
   "version": "0.2.2",
   "tag": "v0.2.2",
   "asset": "CairnsAfterDark.exe",
-  "sha256": "f7ea046ef836aa3bf9be3398a3192795c2b2f6297e301c449039974ba889a959",
-  "size": 141454592,
+  "sha256": "c337f4270d359448edac7d15a55ac0376080c890c0f2f65ab211d75eaefb3044",
+  "size": 168199968,
   "repo": "maxta85/test-game",
   "releases_url": "https://github.com/maxta85/test-game/releases",
   "saves_path": "%APPDATA%\\CairnsAfterDark"
