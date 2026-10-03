@@ -331,6 +331,24 @@ func _q3_wedged() -> void:
 		centre - fwd * 2.0 + Vector3.UP * 1.0, centre - fwd * 2.0 - Vector3.UP * 1.0)))
 	print("  linear_velocity           : %s m/s" % str(car.linear_velocity.round()))
 	print("  angular_velocity          : %s rad/s" % str(car.angular_velocity.round()))
+	# Is the body integrating AT ALL? A RigidBody3D that is asleep or frozen ignores
+	# every force applied to it, so 3 kN of tyre force and no motion is the expected
+	# result rather than a contradiction. `RigidBody3D.sleeping` has no getter
+	# property in Godot 4, so it is read off the method that IS exposed.
+	print("  can_sleep                 : %s" % str(car.can_sleep))
+	print("  freeze / freeze_mode      : %s / %s" % [str(car.freeze), str(car.freeze_mode)])
+	print("  is_sleeping()             : %s" % str(car.is_sleeping()))
+	print("  mass                      : %.1f kg" % car.mass)
+	print("  gravity_scale             : %.3f" % car.gravity_scale)
+	# And where the follower is actually aiming, against where the car points.
+	var nose: Vector3 = fwd
+	var to_aim: Vector3 = follower.last_aim - car.global_position
+	to_aim.y = 0.0
+	print("  follower aim point       : %s" % str(follower.last_aim.round()))
+	print("  car forward               : %s" % str(nose.round()))
+	print("  car to aim                : %s  (%.1f m, %+.1f deg off the nose)" % [
+		str(to_aim.round()), to_aim.length(),
+		rad_to_deg(atan2(to_aim.normalized().cross(nose).y, to_aim.normalized().dot(nose)))])
 	print("")
 	if int(car.get_contact_count()) == 0:
 		print("  Q3 VERDICT: nothing is touching the car. It is not wedged.")
