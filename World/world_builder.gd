@@ -10,6 +10,29 @@ extends Node3D
 
 const KERB_HEIGHT := 0.14
 const FOOTPATH_WIDTH := 1.6
+## Paving slabs along the footpath, and the joint left between them.
+##
+## The footpath used to be one unbroken box per 4 m piece, which at night renders
+## as a flat pale wedge with no joints, no scale reference and nothing for a
+## streetlight to catch - the brightest surface at ground level in
+## `ART_DIRECTION.md`, and completely featureless.
+##
+## 1.0 m slabs on a 4 cm joint. The joint is a real gap - the slab is inset by half
+## the joint on each side - so what shows through is the dark ground below, which
+## at night is the value a joint should be. This is render-only and costs no draw
+## calls: every slab goes into the same `footpaths` MultiMesh batch under the same
+## `footpath` material, so it is instances, not draw calls.
+##
+## Measured on `World/slab_capture.gd`, same camera before and after, paving band
+## of the frame: dark transverse joint lines per pixel column went 1.235 -> 6.149,
+## 0.895 -> 7.895 and 1.381 -> 7.800 on three streets 240 m apart, while band mean,
+## clipped% and dark% all held. The before numbers are not zero - the unbroken
+## ribbon already had faint minima from the 12 cm overlap between consecutive 4 m
+## pieces - which is why the metric counts joint lines rather than measuring total
+## row-to-row variation. See `_joint_lines` in the capture script for why the
+## obvious metric pointed the wrong way.
+const SLAB_LEN := 1.0
+const SLAB_JOINT := 0.04
 const PALM_SPACING := 17.0
 ## Grid resolution of the mapped-footprint coverage test. Coarse on purpose: it
 ## answers plot-sized questions, and a fine grid costs 16x the marks for nothing.
@@ -586,10 +609,36 @@ func _kerbs_and_footpaths() -> void:
 				_add("channels", channel_mesh,
 					edge_xf.scaled_local(Vector3(1.0, 1.0, run)), "channel")
 				var wp: Vector2 = mid + nrm * (hw + LookDev.KERB_TOP_W + FOOTPATH_WIDTH * 0.5) * side
-				var wxf := Transform3D(Basis.from_euler(Vector3(0, ang, 0)),
-					Vector3(wp.x, KERB_HEIGHT, wp.y))
-				_add("footpaths", walk_mesh, wxf.scaled_local(Vector3(FOOTPATH_WIDTH, 1.0, run)),
-					"footpath")
+				# Slabs, not one ribbon. Each slab is inset by half the joint on
+				# each side, so the joint is a gap you can see the ground through
+				# rather than a line painted on a continuous box.
+				#
+				# Tiled on the TRUE piece length, not on `run`: `run` carries a 12 cm
+				# overlap so neighbouring kerb pieces meet, and tiling slabs on an
+				# overlapped length leaves a short slab at every piece boundary -
+				# a rhythm that is regular everywhere except every 4 m, which is
+				# worse than no rhythm at all.
+				#
+				# `wp + dir * off`, NOT `mid + dir * off`. The first version of this
+				# loop recomputed the position from `mid` and silently dropped the
+				# lateral offset, which laid every slab down the CENTRE of the
+				# carriageway: 62290 slabs of pavement in the middle of the road,
+				# and the footpaths underneath them unchanged. It rendered
+				# convincingly - it is paving, receding, lit - and it only showed up
+				# because the rig's `--tint` control on the BEFORE build put magenta
+				# footpath where the AFTER build had bare carriageway.
+				var piece_len := length / float(maxi(pieces, 1))
+				var n_slabs := maxi(1, int(round(piece_len / SLAB_LEN)))
+				var slot := piece_len / float(n_slabs)
+				var slab_len: float = maxf(slot - SLAB_JOINT, 0.2)
+				for s in n_slabs:
+					var off := (float(s) + 0.5) * slot - piece_len * 0.5
+					var c: Vector2 = wp + dir * off
+					var wxf := Transform3D(Basis.from_euler(Vector3(0, ang, 0)),
+						Vector3(c.x, KERB_HEIGHT, c.y))
+					_add("footpaths", walk_mesh,
+						wxf.scaled_local(Vector3(FOOTPATH_WIDTH, 1.0, slab_len)),
+						"footpath")
 
 
 func _blocked_by_junction(p: Vector3) -> bool:
