@@ -56,14 +56,14 @@ const HEAD_GAIN := 2.4
 const YAW_FLOOR := 0.13
 ## Steer per metre of cross-track error. Overridable with `--gain=`.
 ##
-## 0.10 is too weak to hold the line it is given: Aumuller's polyline is THREE
-## points over 824.5 m, so the "centreline" is a chord and holding a constant
-## offset from it needs a standing steer input. At 0.10 the measured mean line was
-## 5.80 m against a -4.25 m target - a 1.55 m steady-state error, which put the car
-## on the kerb line it was told to avoid and cost six excursions. Both gains are
-## reported; a controller that cannot hold its own target is not evidence about the
-## street.
-const LAT_GAIN := 0.25
+## 0.25 is not a tuning knob anyone should turn, and that was measured rather than
+## assumed: at 0.25 the loop DIVERGES. Aumuller's polyline is THREE points over
+## 824.5 m, so the line being tracked is a chord and cross-track error swings hard
+## as the car moves along it; 0.25 steer per metre is enough lag to turn that into
+## a growing oscillation. The run at 0.25 finished 44.04 m off the centreline,
+## mean |lat| 28.90 m, and stopped at s=420 m of 824.5 m - worse than the 0.10 run
+## it was meant to improve on. 0.10 reaches the far end; 0.25 does not.
+const LAT_GAIN := 0.10
 ## Where the driver holds across the carriageway, in metres on THIS file's `lat`
 ## axis. Overridable with `--lane=<m>`, and the default is the clear side of the
 ## street, derived from `Tools/street_blockers.gd` rather than chosen by feel:
