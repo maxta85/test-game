@@ -134,8 +134,496 @@ func _ready() -> void:
 	add_child(main)
 	await get_tree().process_frame
 	await _wait_for_boot()
+	var argv := OS.get_cmdline_user_args()
+	if argv.has("--street") or argv.has("--no-assist"):
+		# --no-assist is the control for the steering assist, not a mode of its own:
+		# same road, same spawn, same full throttle, steer pinned to zero. If the
+		# car still will not accelerate with no steering input at all, then the
+		# assist is not what is stopping it and the search belongs in the vehicle.
+		_street_assist = not argv.has("--no-assist")
+		for a in argv:
+			# --from=<m> starts the run part way down the street and --seconds=<n>
+			# shortens it. Both exist to attribute a stall: the same full throttle
+			# from three different places answers "is this car unable to drive" apart
+			# from "this one spot on the street is blocked", which a single run from
+			# the start line cannot tell apart.
+			if a.begins_with("--from="):
+				_street_from = maxf(a.substr(7).to_float(), STREET_START_M)
+			elif a.begins_with("--seconds="):
+				_street_limit = a.substr(10).to_float()
+		await _street_drive()
+		return
 	await _start_race()
 	await _drive()
+
+
+# ================================================================== street drive
+##
+## Aumuller Street, end to end. The race phases above answer "does the car
+## respond"; this answers the question a lap cannot, which is whether there is a
+## road under it at all - 825 m of real arterial, from one end to the other, at
+## speed, with nothing swapped out and no fallback anywhere.
+##
+## Deliberately does NOT start a race. A race is not the same experiment:
+## `RaceDirector.tick` writes `entrants[i].position` directly every frame while
+## the countdown runs, which teleports the car through the suspension
+## integrators, and `_conclude_if_over` freezes the session the moment the
+## finish line is crossed. Both would corrupt the measurement.
+##
+## Steering is assisted, and that is disclosed rather than hidden: the car is
+## steered by a proportional controller on the same throttle/brake/steer
+## surface a human and AIRacer use. The assist cannot make an undrivable car
+## drivable - it cannot create tyre force, drive torque or ground contact - but
+## the demand it puts on the car is logged (`max |steer|`) so a number near 1.0
+## is visible as an assist at its limit rather than passing for a clean drive.
+
+const STREET_TIMEOUT := 300.0
+const STREET_NAME := "Aumuller Street"
+## Spawn height above the corridor polyline, in metres. Not 0: the polyline is a
+## centreline with no idea where the road surface is, and dropping the car onto
+## the collider is the only placement that guarantees the suspension is loaded
+## before the first throttle input. A spawn embedded in the road surface leaves
+## `contact` true with `load` at zero, and TyreModel.longitudinal() returns 0.0
+## for load <= 0 - free-spinning wheels, no thrust, no error.
+const STREET_SPAWN_Y := 0.60
+const STREET_SETTLE_FRAMES := 90        ## seconds of simulated time before giving up
+const STREET_START_M := 8.0          ## where along the street the car is placed
+const STREET_HEAD_GAIN := 2.4        ## steer per radian of heading error
+const STREET_LAT_GAIN := 0.10        ## steer per metre of lateral error
+const STREET_YAW_FLOOR := 0.13       ## rad/s; drop the heading term below this
+
+var _street: PackedVector2Array = PackedVector2Array()
+var _street_len := 0.0
+var _street_off_road := false
+var _street_name := STREET_NAME
+var _street_max_load := 0.0
+var _street_max_sr := 0.0
+var _street_assist := true
+var _street_speed_prev := 0.0
+var _street_reported := false
+## km/h lost in a single frame that counts as hitting something rather than
+## braking or sliding.
+const STREET_IMPACT_KPH := 15.0
+## One entry per telemetry column, each already tab-terminated. The header is
+## built off this and the row loop writes in the same order, so they cannot drift.
+const STREET_COLUMNS := ["t\t", "s\t", "kmh\t", "gear\t", "rpm\t", "slip_rad\t",
+	"lat_m\t", "half_width\t", "steer\t", "x\t", "z\t", "wheels_down\t",
+	"rl_load_n\t", "rl_fx_n\t", "rl_sr\t", "rl_omega\t", "y\t", "throttle\t",
+	"contacts\t"]
+var _street_from := STREET_START_M
+var _street_limit := STREET_TIMEOUT
+var _street_origin := STREET_START_M
+var _street_off_count := 0
+var _street_off_max := 0.0
+var _street_off_time := 0.0
+var _street_off_worst_time := 0.0
+var _street_max_lat := 0.0
+var _street_max_steer := 0.0
+var _street_fl := 0.0        ## peak front wheel surface speed, km/h
+var _street_rl := 0.0
+var _street_min_wheels := 99
+var _street_air_frames := 0
+var _street_rear_slip := 0.0
+var _street_done := false
+var _street_had_reverse := false
+
+
+## Distance along the anchor polyline of `p`, its signed lateral offset from it,
+## and the unit tangent there. Walking the same polyline OSMLayout.anchor()
+## returns keeps the "825 m" in the report and the 825 m being driven the same
+## number, instead of two independent ones that quietly disagree.
+func _street_at(p: Vector3) -> Dictionary:
+	var best_s := 0.0
+	var best_lat := 0.0
+	var best_t := Vector2(1, 0)
+	var best_d := INF
+	var acc := 0.0
+	var v := Vector2(p.x, p.z)
+	for i in _street.size() - 1:
+		var a := _street[i]
+		var b := _street[i + 1]
+		var ab := b - a
+		var len2 := ab.length_squared()
+		if len2 < 0.0001:
+			continue
+		var t: float = clampf((v - a).dot(ab) / len2, 0.0, 1.0)
+		var proj := a + ab * t
+		var w := v - proj
+		var d := w.length()
+		if d < best_d:
+			best_d = d
+			best_s = acc + sqrt(len2) * t
+			best_t = ab / sqrt(len2)
+			# Signed by the tangent's own right-hand side, so "off to the right"
+			# means one thing everywhere in this function.
+			best_lat = best_t.x * w.y - best_t.y * w.x
+		acc += sqrt(len2)
+	return {"s": best_s, "lat": best_lat, "t": best_t, "dist": best_d}
+
+
+## Half the carriageway, from the graph edge the car is actually on. The
+## polyline alone would have to assume the anchor stayed an ARTERIAL, and the
+## class is per-edge: Aumuller crosses wider streets and gets upgraded in place.
+func _street_half_width(p: Vector3) -> float:
+	var graph: RoadGraph = main.graph
+	if graph == null:
+		return 7.0
+	var near: Dictionary = graph.nearest_road(p)
+	var eid := int(near["edge"])
+	if eid < 0:
+		return 7.0
+	return float(graph.edges[eid]["width"]) * 0.5
+
+
+## Heading error in radians, positive meaning "yaw left to match the tangent".
+##
+## Positive steer on CarBody yaws from -Z toward -X, so the heading angle is read
+## as atan2(-x, -z) and a positive correction needs a positive steer. Deriving
+## that from the source rather than from a remembered sign is the point: the
+## opposite convention is a divergence that looks like an undrivable car.
+func _street_head_err(f: Vector3, t: Vector2) -> float:
+	var phi_f := atan2(-f.x, -f.z)
+	var phi_t := atan2(-t.x, -t.y)
+	return wrapf(phi_t - phi_f, -PI, PI)
+
+
+## The street under test, picked by NAME and by the LONGEST run of that name.
+##
+## `OSMLayout.anchor()` is not a substitute: it scores every arterial fragment by
+## how close its midpoint is to the city centre, with the length worth only
+## 0.01 m per metre, so it picks whichever fragment happens to be most central.
+## On today's data that is a 265 m piece of Mulgrave Road. Aumuller Street is split
+## into seven separate fragments in assets/maps/cairns_map.json and the long one is
+## 824.5 m, which is the street the test is about. Driving the anchor instead would
+## have quietly measured a different, much shorter street under the same verdict.
+func _street_pick() -> Dictionary:
+	var best: Dictionary = {}
+	var best_len := 0.0
+	var fragments := 0
+	for c in OSMLayout.corridors():
+		if String(c.get("name", "")) != STREET_NAME:
+			continue
+		var pts: PackedVector2Array = c["points"]
+		var run := 0.0
+		for i in pts.size() - 1:
+			run += pts[i].distance_to(pts[i + 1])
+		if pts.size() < 2 or run <= 0.0:
+			continue
+		fragments += 1
+		if run > best_len:
+			best_len = run
+			best = {"name": STREET_NAME, "pts": pts}
+	if best.is_empty():
+		print("STREET FATAL: no corridor named %s in the map data" % STREET_NAME)
+		print("  the nearest arterial anchors are:")
+		for c in OSMLayout.corridors():
+			var p: PackedVector2Array = c["points"]
+			var run := 0.0
+			for i in p.size() - 1:
+				run += p[i].distance_to(p[i + 1])
+			if run > 100.0:
+				print("    %s  %.1f m" % [String(c.get("name", "?")), run])
+		return {}
+	print("[street] %s: %d fragments in the map, driving the longest at %.1f m" % [
+		STREET_NAME, fragments, best_len])
+	return best
+
+
+func _street_drive() -> void:
+	var anchor: Dictionary = _street_pick()
+	if anchor.is_empty():
+		get_tree().quit(2)
+		return
+	_street_name = String(anchor.get("name", STREET_NAME))
+	_street = anchor["pts"]
+	_street_len = 0.0
+	for i in _street.size() - 1:
+		_street_len += _street[i].distance_to(_street[i + 1])
+	print("[street] %s, %d points, %.1f m of centreline, steering assist %s" % [
+		_street_name, _street.size(), _street_len, "ON" if _street_assist else "OFF (control)"])
+
+	# The menus own ESC and re-assert their own visibility, and they put a
+	# START RACE board over the street. Same reasoning as Tools/map_flight_shots.
+	for n in _all_nodes(main):
+		if n is CanvasItem:
+			(n as CanvasItem).visible = false
+	var flow := _find_flow(main)
+	if flow != null:
+		flow.call("close")
+
+	var car: Node = main.player_car
+	if car == null:
+		print("STREET FATAL: no player_car")
+		get_tree().quit(2)
+		return
+
+	_street_from = minf(_street_from, maxf(_street_len - 20.0, STREET_START_M))
+	_street_origin = _street_from
+	_street_limit = minf(_street_limit, STREET_TIMEOUT)
+	var at := _street_pose(_street_from)
+	var start: Vector3 = at["pos"]
+	var dir: Vector2 = at["t"]
+	# reset_to() re-seeds every wheel integrator, which is the whole reason the
+	# grid teleport went wrong; placing the car through it avoids importing that
+	# failure into a measurement of something else.
+	car.reset_to(start, Vector3(0, atan2(-dir.x, -dir.y), 0))
+	# RigidBody3D reports nothing about collisions unless asked, and
+	# max_contacts_reported defaults to zero. Without both of these the impact dump
+	# prints "<no body reported>" for a hit it has already detected by speed.
+	car.contact_monitor = true
+	car.max_contacts_reported = 8
+	print("[street] placed at %.1f, %.1f facing %.3f, %.3f" % [
+		start.x, start.z, dir.x, dir.y])
+	# Let it drop and settle before asking anything of it. Sampled here because
+	# "did the suspension load" is the difference between a tyre model that is
+	# broken and a car that was spawned inside the road.
+	for f in STREET_SETTLE_FRAMES:
+		await get_tree().process_frame
+		if f % 30 == 0 or f == STREET_SETTLE_FRAMES - 1:
+			var probe: Dictionary = car.get_wheel("RL")
+			print("[street] settle %3d: y=%.3f  load=%.0f N  fx=%.0f N  contact=%s" % [
+				f, car.global_position.y, float(probe.get("load", -1.0)),
+				float(probe.get("fx", -1.0)), str(probe.get("contact", false))])
+
+	_hold({"throttle": 0.0})
+	var s := 0.0
+	var t := 0.0
+	var samples := 0
+	var speed_sum := 0.0
+	var distance := 0.0
+	print("[street] --- go ---")
+	while t < _street_limit and not _street_done:
+		await get_tree().process_frame
+		var dt := get_process_delta_time()
+		if dt <= 0.0:
+			continue
+		t += dt
+
+		var pos: Vector3 = car.global_position
+		var here: Dictionary = _street_at(pos)
+		s = float(here["s"])
+		var lat := float(here["lat"])
+		var tan: Vector2 = here["t"]
+		var hw := _street_half_width(pos)
+
+		var err := _street_head_err(-car.global_transform.basis.z, tan)
+		var yaw: float = car.angular_velocity.y
+		# Below walking pace the heading term is the only thing that can rescue a
+		# wrong way, and near zero speed any integral of it is noise, so it is
+		# gated off rather than divided by speed.
+		var eff_err := err if absf(yaw) > STREET_YAW_FLOOR else err * minf(1.0, absf(yaw) / STREET_YAW_FLOOR)
+		var steer := 0.0
+		if _street_assist:
+			steer = clampf(STREET_HEAD_GAIN * eff_err + STREET_LAT_GAIN * lat, -1.0, 1.0)
+
+		_hold({"throttle": 1.0, "steer": steer})
+		_street_max_steer = maxf(_street_max_steer, absf(steer))
+		_street_max_lat = maxf(_street_max_lat, absf(lat))
+
+		var off: bool = absf(lat) > hw
+		if off:
+			if not _street_off_road:
+				_street_off_count += 1
+				_street_off_road = true
+				_street_off_time = 0.0
+				print("[street] OFF ROAD #%d at %.1f m, s=%.1f m, lat=%+.2f m (half width %.2f)" % [
+					_street_off_count, t, s, lat, hw])
+			_street_off_time += dt
+			_street_off_worst_time = maxf(_street_off_worst_time, _street_off_time)
+			_street_off_max = maxf(_street_off_max, absf(lat))
+		elif _street_off_road:
+			_street_off_road = false
+			print("[street] back on the road at %.1f m, s=%.1f m, off for %.2f s" % [
+				t, s, _street_off_time])
+
+		var vel: Vector3 = car.linear_velocity
+		distance += vel.length() * dt
+		speed_sum += float(car.speed_kph)
+		_street_speed_prev = float(car.speed_kph)
+		samples += 1
+
+		max_speed = maxf(max_speed, float(car.speed_kph))
+		max_gear = maxi(max_gear, int(car.current_gear))
+		max_slip = maxf(max_slip, absf(float(car.slip_angle_body)))
+		if int(car.current_gear) < 0:
+			_street_had_reverse = true
+		var down := int(car.wheels_on_ground)
+		_street_min_wheels = mini(_street_min_wheels, down)
+		if down < 4:
+			_street_air_frames += 1
+
+		# Front and rear are read separately because the two answer different
+		# questions: front surface speed says the steering is connected to the
+		# road, rear surface speed against body speed says the rear is driving
+		# rather than coasting, and rear slip is what a bad assist actually causes.
+		var wf: Dictionary = car.get_wheel("FL")
+		if not wf.is_empty():
+			_street_fl = maxf(_street_fl, absf(float(wf["omega"]) * float(wf["radius"]) * 3.6))
+		var wr: Dictionary = car.get_wheel("RL")
+		if not wr.is_empty():
+			_street_rl = maxf(_street_rl, absf(float(wr["omega"]) * float(wr["radius"]) * 3.6))
+			_street_max_load = maxf(_street_max_load, float(wr.get("load", 0.0)))
+			_street_max_sr = maxf(_street_max_sr, absf(float(wr.get("sr_smooth", 0.0))))
+			_street_rear_slip = maxf(_street_rear_slip, absf(float(wr["slip_angle"])))
+
+		# One value per %-slot, joined by hand. A single format string with twelve
+		# values and eleven slots does not fail loudly here: it throws
+		# "not all arguments converted" every frame and writes one junk row per
+		# frame, which is 18000 rows of nonsense that looks like a finished dataset.
+		var dbg: Dictionary = car.get_wheel("RL")
+		var cells := PackedStringArray()
+		for cell in [
+			"%.2f" % t, "%.1f" % s, "%.1f" % float(car.speed_kph),
+			"%d" % int(car.current_gear), "%.0f" % float(car.engine_rpm),
+			"%.3f" % float(car.slip_angle_body), "%+.2f" % lat, "%.2f" % hw,
+			"%+.2f" % steer, "%.1f" % pos.x, "%.1f" % pos.z, "%d" % down,
+			"%.0f" % float(dbg.get("load", -1.0)), "%.0f" % float(dbg.get("fx", -1.0)),
+			"%+.3f" % float(dbg.get("sr_smooth", 0.0)), "%.0f" % float(dbg.get("omega", 0.0)),
+			"%.3f" % car.global_position.y, "%.1f" % float(car.throttle),
+			"%d" % int(car.get_contact_count()),
+		]:
+			cells.append(cell)
+		log.append("\t".join(cells))
+		# One-off collision dump. Losing 45 km/h in two frames is not a slide, and
+		# naming the body that did it is the difference between "there is an
+		# obstacle on Aumuller" and a bug report somebody can act on. Fires once.
+		# Triggered on "touching something while moving", not on a speed drop: the
+		# 45 km/h the car loses at s=54 is shed over four frames at ~11 km/h each,
+		# which is below any deceleration threshold you would pick by eye. The
+		# contact itself is instantaneous and unambiguous.
+		if int(car.get_contact_count()) > 0 and t > 1.0 and not _street_reported:
+			_street_reported = true
+			var names: Array = []
+			for b in car.get_colliding_bodies():
+				names.append("%s(%s)" % [String(b.name), str(b.get_class())])
+			print("[street] CONTACT at %.2f s, s=%.1f m: %.1f km/h (prev frame %.1f), lateral %+.2f m, hit: %s" % [
+				t, s, float(car.speed_kph), _street_speed_prev, lat,
+				", ".join(names) if names.size() > 0 else "<no body reported>"])
+		_street_speed_prev = float(car.speed_kph)
+
+		if s >= _street_len - STREET_START_M or (s - _street_origin) >= (_street_len - STREET_START_M - _street_origin):
+			_street_done = true
+			print("[street] reached the far end at %.2f s" % t)
+			break
+	_hold({})
+	_street_report(car, s, t, distance, speed_sum, maxf(float(samples), 1.0))
+	get_tree().quit(0)
+
+
+func _street_pose(d: float) -> Dictionary:
+	var acc := 0.0
+	for i in _street.size() - 1:
+		var a := _street[i]
+		var b := _street[i + 1]
+		var seg := a.distance_to(b)
+		if seg < 0.0001:
+			continue
+		if acc + seg >= d:
+			var u := (d - acc) / seg
+			var p := a.lerp(b, u)
+			return {"pos": Vector3(p.x, STREET_SPAWN_Y, p.y), "t": (b - a) / seg, "s": d}
+		acc += seg
+	var p := _street[_street.size() - 1]
+	var t := (_street[_street.size() - 1] - _street[_street.size() - 2]).normalized()
+	return {"pos": Vector3(p.x, STREET_SPAWN_Y, p.y), "t": t, "s": acc}
+
+
+func _all_nodes(root: Node) -> Array:
+	var out: Array = []
+	var stack: Array = [root]
+	while stack.size() > 0:
+		var n: Node = stack.pop_back()
+		out.append(n)
+		for c in n.get_children():
+			stack.append(c)
+	return out
+
+
+## `MenuFlow`, found by its API rather than by its type. Naming the class pulls
+## in `UI/menu_flow.gd`, which uses the `Cfg` autoload, and an autoload identifier
+## is not registered when Godot runs a bare `--script`.
+func _find_flow(n: Node) -> Node:
+	var stack: Array = [n]
+	while stack.size() > 0:
+		var cur: Node = stack.pop_back()
+		if cur.has_method("close") and cur.has_method("races"):
+			return cur
+		for c in cur.get_children():
+			stack.append(c)
+	return null
+
+
+func _street_report(car: Node, s: float, t: float, distance: float,
+		speed_sum: float, samples: float) -> void:
+	var arrived: bool = s >= _street_len - STREET_START_M - 0.5 or s - _street_origin >= _street_len - STREET_START_M - _street_origin - 0.5
+	var mean_speed := speed_sum / maxf(samples, 1.0)
+	print("")
+	print("=".repeat(58))
+	print("STREET VERDICT   (%s, %.0f m of centreline)" % [
+		_street_name, _street_len])
+	print("=".repeat(58))
+	print("started at                       : s=%.1f m" % _street_origin)
+	print("reached the far end              : %s (at s=%.1f m of %.1f m)" % [
+		"YES" if arrived else "NO", s, _street_len])
+	print("time                              : %.2f s" % t)
+	print("distance driven (path)           : %.1f m" % distance)
+	print("progress along the centreline    : %.1f m of %.1f m (%.0f%%), %.1f m driven of %.1f m to drive" % [
+		s, _street_len, 100.0 * s / maxf(_street_len, 0.001), s - _street_origin,
+		maxf(_street_len - STREET_START_M - _street_origin, 0.001)])
+	print("top speed                         : %.1f km/h" % max_speed)
+	print("mean speed                       : %.1f km/h" % mean_speed)
+	print("top gear reached                 : %d" % max_gear)
+	print("selected reverse at any point    : %s" % _street_had_reverse)
+	print("times off the carriageway        : %d" % _street_off_count)
+	print("furthest off the centreline      : %.2f m" % _street_off_max)
+	print("worst single excursion            : %.2f s off the road" % _street_off_worst_time)
+	print("peak lateral offset              : %.2f m" % _street_max_lat)
+	print("peak |steer| demanded by assist   : %.2f of 1.00" % _street_max_steer)
+	print("peak body slip angle             : %.3f rad (%.1f deg)" % [
+		max_slip, rad_to_deg(max_slip)])
+	print("peak rear-wheel slip angle        : %.3f rad (%.1f deg)" % [
+		_street_rear_slip, rad_to_deg(_street_rear_slip)])
+	print("peak front wheel surface speed    : %.1f km/h" % _street_fl)
+	print("peak rear wheel surface speed     : %.1f km/h" % _street_rl)
+	print("min wheels on ground              : %d" % _street_min_wheels)
+	print("physics steps with a wheel off    : %d" % _street_air_frames)
+	print("")
+	if not arrived:
+		print("FAILURES:")
+		print("  - DID NOT REACH THE FAR END. It got to %.1f m of %.1f m in %.1f s." % [
+			s, _street_len, t])
+		if max_speed < 15.0:
+			print("  - CAR DID NOT ACCELERATE (top %.1f km/h) - throttle is not reaching the tyre model." % max_speed)
+		if _street_max_load < 100.0:
+			print("  - THE SUSPENSION NEVER LOADED (peak rear load %.0f N). TyreModel.longitudinal() returns 0.0 for load <= 0, so with no load the wheels free-spin and the car has no thrust at all. This is a spawn or collider problem, not a tyre problem." % _street_max_load)
+			print("  - peak rear slip ratio was %+.3f with peak rear surface speed %.1f km/h, i.e. the wheels were turning against a stationary car." % [_street_max_sr, _street_rl])
+		if _street_fl < 1.0:
+			print("  - FRONT WHEELS NEVER TURNED (peak %.2f km/h of surface speed)." % _street_fl)
+		if _street_rl < 1.0:
+			print("  - REAR WHEELS NEVER TURNED (peak %.2f km/h of surface speed)." % _street_rl)
+		if _street_off_count > 0:
+			print("  - LEFT THE CARRIAGEWAY %d time(s), up to %.2f m off the centreline." % [
+				_street_off_count, _street_off_max])
+		if _street_air_frames > 0:
+			print("  - A WHEEL LEFT THE GROUND on %d physics steps (min %d wheels down)." % [
+				_street_air_frames, _street_min_wheels])
+		print("  STOPPED AT: x=%.1f z=%.1f  s=%.1f m  speed=%.1f km/h" % [
+			car.global_position.x, car.global_position.z, s, float(car.speed_kph)])
+	else:
+		print("the street was driven end to end. see the notes above for the cost.")
+	print("")
+	print("telemetry -> %s/playtest_street.tsv" % OUT_DIR)
+	print("=".repeat(58))
+	var f := FileAccess.open("%s/playtest_street.tsv" % OUT_DIR, FileAccess.WRITE)
+	if f != null:
+		# Built from one list, because a hand-written header that does not match the
+		# rows is a file that lies about its own format: an earlier 16-column
+		# header shipped against 18-column rows and every column past the
+		# sixteenth was silently unlabelled.
+		f.store_line("".join(STREET_COLUMNS))
+		for line in log:
+			f.store_line(line)
+		f.close()
 
 
 func _wait_for_boot() -> void:
