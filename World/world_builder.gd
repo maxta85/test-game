@@ -1646,11 +1646,16 @@ func _streetlights() -> void:
 	## Sodium lamps. Warm orange, spaced the way a suburban council actually
 	## spaces them - alternating sides, at the kerb, every ~34 m.
 	var pole := _tapered_cylinder_mesh(0.09, 0.13, 1.0, 6)
-	var arm := _box_mesh(Vector3(1, 1, 1), Vector3.ZERO)
+	var arm := _tapered_cylinder_mesh(0.11, 0.085, 1.0, 6)
+	var shade := _box_mesh(Vector3(1, 1, 1), Vector3.ZERO)
 	var lamp := _box_mesh(Vector3(1, 1, 1), Vector3.ZERO)
 	_materials["pole"] = MatLib.wall(Color(0.16, 0.17, 0.17))
 	if not _materials.has("lamp_glow"):
-		_materials["lamp_glow"] = MatLib.emissive(MatLib.SODIUM, 1.15)
+		# 1.15 blew the lens to pure white, which is a second, smaller version of
+		# the same defect the energy cut fixed on the road: a clipped highlight
+		# with no detail left in it. 0.85 keeps the lens clearly the brightest
+		# thing in frame while still having a visible surface.
+		_materials["lamp_glow"] = MatLib.emissive(MatLib.SODIUM, 0.85)
 
 	var count := 0
 	for ei in graph.edges.size():
@@ -1698,8 +1703,27 @@ func _streetlights() -> void:
 			# so it is something you clip a mirror on rather than drive through.
 			_solid_post(_solid_prop, p, 0.15, KERB_HEIGHT + h * 0.5)
 			var tip: Vector3 = base + Vector3(nrm.x * -1.4 * side, h, nrm.y * -1.4 * side)
-			_add("poles", arm, Transform3D(Basis.from_euler(Vector3(0, atan2(-dir.x, -dir.y), 0)), tip + Vector3(0, -0.2, 0)).scaled_local(Vector3(0.12, 0.12, 1.5)), "pole")
-			_add("lamps", lamp, Transform3D(Basis(), tip).scaled_local(Vector3(0.42, 0.16, 0.75)), "lamp_glow")
+			# Cobra double-arm luminaire: a tapered arm out to the head, then a
+			# DARK shade overhanging a glowing lens tucked underneath it.
+			#
+			# It was a box at `tip` and an arm box, which is why the head read as a
+			# floating orange rectangle in every delivered frame - there was no
+			# silhouette above the glow, so at night the only thing to see was the
+			# lit face. The shade is in the dark `pole` material and overhangs the
+			# lens by 0.12 m on the road side and 0.05 m at the back, so the head
+			# has an outline and the lens reads as *under* something.
+			var arm_yaw := atan2(-dir.x, -dir.y)
+			_add("poles", arm, Transform3D(Basis.from_euler(Vector3(0, arm_yaw, 0)),
+					tip + Vector3(0, -0.24, 0)).scaled_local(Vector3(0.11, 0.11, 1.5)),
+				"pole")
+			# Tilted 9 degrees so the lens face looks down at the road rather than
+			# out at the camera - a level cobra head is a bright disc to a driver.
+			var shade_tilt := Transform3D(Basis.from_euler(Vector3(0.16, arm_yaw, 0)),
+					tip + Vector3(0, 0.10, 0)).scaled_local(Vector3(0.58, 0.09, 1.06))
+			_add("poles", shade, shade_tilt, "pole")
+			_add("lamps", lamp, Transform3D(Basis.from_euler(Vector3(0.16, arm_yaw, 0)),
+					tip + Vector3(0, 0.015, 0)).scaled_local(Vector3(0.40, 0.07, 0.84)),
+				"lamp_glow")
 
 			var l := OmniLight3D.new()
 			l.light_color = MatLib.SODIUM
@@ -1715,7 +1739,48 @@ func _streetlights() -> void:
 			l.shadow_enabled = false   # hundreds of shadow-casting lights would melt a CPU raster
 			add_child(l)
 			count += 1
+	_junction_fill()
 	print("[World] %d streetlights" % count)
+
+
+## One light over every junction box, with no standard under it.
+##
+## The lamp loop above deliberately stands every standard clear of the junction
+## box (a pole in the box is a pole a car hits), and nothing was put back in its
+## place. Measured on the `junction` pose that left the busiest 20 m of the map
+## with road mean 7.875/255 and 72.4% of the band under the dark threshold -
+## already outside the 0.75 limit before this task touched a lamp, and *worse*
+## at every lower global energy tried (see the sweep table on
+## `Look.STREETLIGHT_ENERGY`). No single energy value fixes the arterial and the
+## junction at once because they need opposite moves.
+##
+## This is the fix that does not cost anything elsewhere: mounted at
+## `JUNCTION_FILL_HEIGHT`, throwing `JUNCTION_FILL_RANGE`, so it dies before it
+## can lift a mid-block pool. It adds no pole, so it cannot put a standard in a
+## traffic lane - the full measured clearance is in the report.
+func _junction_fill() -> void:
+	var count := 0
+	# `for n in graph.nodes` yields the node Dictionary itself, NOT an index -
+	# `graph.nodes[n]` with a Dictionary key is how the first attempt of this
+	# function died. Same shape as `_blocked_by_junction`.
+	for node_v in graph.nodes:
+		var node: Dictionary = node_v
+		if int(node["edges"].size()) < 3:
+			continue
+		var p: Vector2 = node["pos"]
+		var l := OmniLight3D.new()
+		l.light_color = Look.JUNCTION_FILL_COLOUR
+		l.light_energy = Look.JUNCTION_FILL_ENERGY
+		l.omni_range = Look.JUNCTION_FILL_RANGE
+		# Gentler falloff than a sodium standard on purpose: this is meant to be
+		# an even lift over the whole box, not a pool with a hot centre.
+		l.omni_attenuation = 1.1
+		l.light_volumetric_fog_energy = 0.0
+		l.position = Vector3(p.x, Look.JUNCTION_FILL_HEIGHT, p.y)
+		l.shadow_enabled = false
+		add_child(l)
+		count += 1
+	print("[World] %d junction fills" % count)
 
 
 func _power_lines() -> void:
@@ -1805,17 +1870,24 @@ func _car_meet() -> void:
 	car_meet.position = OSMLayout.car_meet_position()
 	add_child(car_meet)
 
+	# Kept on a short leash on purpose. The lot sits `car_meet_position()` =
+	# 70 m back from the arterial, so a 45 m flood still reached the carriageway:
+	# measured on the `street` pose it put a pure-white vertical down the middle
+	# of frame (the solid centre line lit head-on off `wet_asphalt`) and was
+	# responsible for most of the road band's clipping. A car-park flood lights
+	# its own lot, not the main road it is reached from - 24 m and 5.0 put the
+	# light back on the cars and off the arterial.
 	var m := OmniLight3D.new()
 	m.light_color = MatLib.MERCURY
-	m.light_energy = 9.0
-	m.omni_range = 45.0
+	m.light_energy = 5.0
+	m.omni_range = 24.0
 	m.position = Vector3(0, 9, 0)
 	car_meet.add_child(m)
 
 	var m2 := OmniLight3D.new()
 	m2.light_color = MatLib.SODIUM
-	m2.light_energy = 5.0
-	m2.omni_range = 32.0
+	m2.light_energy = 4.0
+	m2.omni_range = 20.0
 	m2.position = Vector3(9, 5, 6)
 	car_meet.add_child(m2)
 

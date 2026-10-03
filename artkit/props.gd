@@ -203,6 +203,7 @@ static func variant(name: String, variant_index: int = 0) -> Array:
 		"palm_fan": return palm_fan(variant_index)
 		"tree_rain_tree": return tree_rain_tree(variant_index)
 		"tree_cedar": return tree_cedar(variant_index)
+		"tree_paperbark": return tree_paperbark(variant_index)
 		"tree_fern": return tree_fern(variant_index)
 		"bush_scrub": return bush_scrub(variant_index)
 		"grass_tuft": return grass_tuft(variant_index)
