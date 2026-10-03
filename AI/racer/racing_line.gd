@@ -85,9 +85,29 @@ static func _resample(route: Array, is_closed: bool) -> Array:
 	if src.size() < 3:
 		return src
 
+	# How long the route is, and that DEPENDS on whether it is a ring.
+	#
+	# `(i + 1) % src.size()` is the right measurement for a closed ring and the wrong
+	# one for an open polyline, and taking it unconditionally added the
+	# last-to-first segment to a street: Hoare Street's 4-point open polyline measured
+	# 2809.0 m instead of 1407.5 m, the sample count came out 702 instead of 352, and
+	# the sampler then walked off the end of the polyline, wrapped to the first point,
+	# traversed the street a SECOND time and carried on along a 1401.5 m leg drawn
+	# straight across the map. The AI's driving line was twice the street it was
+	# supposed to follow.
+	#
+	# It hid because every route the suites use IS a closed ring - `find_loop` and
+	# `RaceDef.circuit` both produce one - so `(i + 1) % size` was correct in every
+	# test, and `line.closed` read `false` on the broken line, so reading the flag said
+	# it was fine. Only `follow_street()`, which builds a line from an OPEN polyline,
+	# could see it.
+	#
+	# A closed circuit keeps its closing segment deliberately. Dropping it would make
+	# every lap in the game one segment short.
 	var total := 0.0
-	for i in src.size():
-		total += src[i].distance_to(src[(i + 1) % src.size()])
+	var last := src.size() if is_closed else src.size() - 1
+	for i in last:
+		total += Vector2(src[i]).distance_to(Vector2(src[(i + 1) % src.size()]))
 	if total < 1.0:
 		return []
 	var count: int = maxi(4, int(round(total / SAMPLE_SPACING)))

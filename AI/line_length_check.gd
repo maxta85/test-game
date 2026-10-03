@@ -163,6 +163,37 @@ func _initialize() -> void:
 	print("    after it is the phantom closing leg, walked twice and piled at the start.")
 	print("")
 
+	# ---- THE PROOF t130 asked for, as assertions rather than prose.
+	#
+	# BOTH are required, and the reason is specific: the length alone can be satisfied
+	# by halving the sample count while leaving the double traversal in place - 351
+	# samples spread over 2809 m of arc still measures 2790 m. Asserting the sample
+	# count as well is what makes "walked the street once" distinguishable from "wrote
+	# the same wrong points more sparsely".
+	var expect_len := poly
+	var expect_samples := int(round(poly / RacingLine.SAMPLE_SPACING))
+	print("")
+	print("PROOF (open route built from a %.1f m polyline):" % poly)
+	var len_ok: bool = absf(line.length - expect_len) < 12.0
+	print("  [%s] line.length %.1f m vs street %.1f m (tolerance 12 m)" % [
+		"PASS" if len_ok else "FAIL", line.length, expect_len])
+	var samples_ok: bool = absi(n - expect_samples) <= 4
+	print("  [%s] sample count %d vs %d expected (tolerance 4)" % [
+		"PASS" if samples_ok else "FAIL", n, expect_samples])
+	# And the one that cannot be fudged: the on-street arc must be about ONE street,
+	# not 1.37 of one.
+	var on_street_arc := 0.0
+	for i in first_off if first_off > 0 else n - 1:
+		on_street_arc += Vector2(line.points[i]).distance_to(Vector2(line.points[i + 1]))
+	var arc_ok: bool = absf(on_street_arc - poly) < 40.0
+	print("  [%s] on-street arc %.1f m vs one street %.1f m (tolerance 40 m)" % [
+		"PASS" if arc_ok else "FAIL", on_street_arc, poly])
+	var off_ok: bool = off_road == 0
+	print("  [%s] samples more than 9 m off the street: %d of %d" % [
+		"PASS" if off_ok else "FAIL", off_road, n])
+	print("  LINE_PROOF=%s" % ("PASS" if (len_ok and samples_ok and arc_ok and off_ok) else "FAIL"))
+	print("")
+
 	print("SUMMARY LINE_LEN=%.1f STREET_LEN=%.1f RATIO=%.3f SAMPLES=%d LOOP=%s" % [
 		line.length, poly, line.length / maxf(poly, 0.001), n,
 		"yes" if gap < 5.0 else "no"])
