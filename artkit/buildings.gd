@@ -301,7 +301,7 @@ static func _build_qld_house(seed_value: int = 0) -> Array:
 
 ## A commercial shopfront unit. Three things make a strip read as a city at
 ## night, in this order: the lit shopfront, the awning over the footpath, and the
-## illuminated sign standing above the parapet. All three are here.
+## illuminated sign fascia on the parapet. All three are here.
 static func _build_qld_shop(seed_value: int = 0) -> Array:
 	var s := _rng(seed_value)
 	var w := s.randf_range(9.0, 16.0)
@@ -363,14 +363,51 @@ static func _build_qld_shop(seed_value: int = 0) -> Array:
 	parts.append(ArtKitPart.of(ArtKitMesh.panel(gw, gh, Vector3(-0.20, gy, front + 1.2)),
 			"interior_warm"))
 
-	# --- the sign: a vertical box on the pier, above the parapet ---------------
-	var sh := s.randf_range(3.5, 6.0)
-	var sx := w * 0.5 - 0.62
-	parts.append(ArtKitPart.of(ArtKitMesh.box_from(Vector3(0.16, sh + 0.26, 0.66),
-			Vector3(sx - 0.08, h + 0.63, front - 0.70)), "sign_face"))
-	var sign_mat: String = ["neon_cyan", "neon_magenta", "neon_red", "lamp_lens"][s.randi() % 4]
-	parts.append(ArtKitPart.of(ArtKitMesh.panel(0.52, sh,
-			Vector3(sx, h + 0.76 + sh * 0.5, front - 1.04)), sign_mat))
+	# --- the sign: a fascia on the parapet -------------------------------------
+	# This used to be a 0.52 m x 3.5-6.0 m emissive PANEL standing 1.04 m in
+	# front of the facade with nothing underneath it, in a colour rolled at
+	# random per building out of three saturated neons and `lamp_lens`.
+	#
+	# At night that is not signage. 0.52 m wide against up to 6 m tall is an
+	# aspect ratio of 7.0:1 to 11.3:1 (measured across the variant set: 3.64 m to
+	# 5.90 m tall), so it reads as a glowing bar standing NEXT to the shop rather
+	# than as a sign ON it - and because every shop on an arterial got one, the
+	# street carried dozens. That is the opposite of the art direction's "a few
+	# saturated signs doing the talking" and its "signage only, and sparingly".
+	# `lamp_lens` was the worst of the four: that is the luminaire lens role at
+	# emit 6.0, it was in four of the sixteen designs, and it was the brightest
+	# bar in the frame.
+	#
+	# A sign is a WIDE SHALLOW box sitting hard against the parapet. Proportion is
+	# the whole fix - 4.2 x 0.95 m cannot be read as a bar from any angle - and
+	# the lit face now stands 0.04 m proud of its own carcass instead of hanging
+	# in the air over the footpath.
+	var sw: float = minf(w - 1.6, 4.2)
+	var sh := 0.95
+	var sd := 0.34
+	# Centred over the glazing, which is at x = -0.20, and based on the parapet
+	# cap, whose top is h + 0.63.
+	var sx := -0.20
+	var sy := h + 0.63 + sh * 0.5
+	parts.append(ArtKitPart.of(ArtKitMesh.box_from(Vector3(sw + 0.16, sh + 0.14, sd),
+			Vector3(sx, sy, front - sd * 0.5 - 0.02)), "sign_face"))
+	# `sign_face_lit` is the doc's cool shopfront white - "Mercury / shopfront" is
+	# an emit_role and that is the material key that holds it - so that is what the
+	# general case is. It emits at 2.2 rather than reusing `lamp_lens_cool`'s 5.0
+	# because a fascia is a large flat face, not a small intense source; see the
+	# note in `materials.gd`. Three shops in sixteen get a saturated accent, one
+	# accent each: the old roll handed a different neon to every shop on the
+	# street, which is precisely what stopped them reading as accents. Three of the
+	# sixteen HOUSE_VARIANTS seeds (1, 7, 13) are accented; anything outside that
+	# range falls through to the unaccented default, which is the safe direction
+	# for a role that is meant to be rare.
+	var sign_mat := "sign_face_lit"
+	match posmod(seed_value, HOUSE_VARIANTS):
+		1: sign_mat = "neon_cyan"
+		7: sign_mat = "neon_magenta"
+		13: sign_mat = "neon_red"
+	parts.append(ArtKitPart.of(ArtKitMesh.panel(sw, sh,
+			Vector3(sx, sy, front - sd - 0.04)), sign_mat))
 	return ArtKitPart.weld(parts)
 
 
