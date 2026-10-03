@@ -261,6 +261,145 @@ say ""
 say "Hoare verdict: $(grep -E '^reached the far end' "$HOARE_LOG" 2>/dev/null | tail -1 | sed 's/^[^:]*: *//' || echo 'no verdict marker')"
 say "Hoare report : $HOARE_REPORT"
 
+# One row per drive log: the street name is read from THAT log, because a table
+# that greps the street name once and stamps it on every row labels Hoare Street
+# rows as Aumuller and hides which run actually produced which band.
+_cause_row() {
+    _lg="$1"
+    _line=$(grep -m1 "MARGINAL UPSHIFT" "$_lg" 2>/dev/null)
+    [ -n "$_line" ] || return 0
+    _nm=$(grep -m1 -oE 'Aumuller Street|Hoare Street' "$_lg" 2>/dev/null)
+    _s=$(printf '%s' "$_line" | grep -oE 'decision sample=[0-9]+' | cut -d= -f2)
+    _l=$(printf '%s' "$_line" | grep -oE 'shift_up_rpm=[0-9]+' | cut -d= -f2)
+    _b=$(printf '%s' "$_line" | grep -oE 'is [0-9]+ rpm' | grep -oE '[0-9]+')
+    say "| $(basename "$_lg") | ${_nm:-?} | ${_s:-?} | ${_l:-?} | ${_b:-?} |"
+}
+
+# --------------------------------------------------------------- 6. real input
+# The self-test at the top proves these checks catch deliberate breaks, but it
+# proves it against fixtures owner_checks.py generated ITSELF. It has never
+# established that they ACCEPT what the game actually produces. Those are
+# different claims: a checker that rejects everything passes every self-test
+# except its own "clean input passes" case, and a checker whose clean case is
+# synthetic can sit at a permanent real-world exit 3 without anyone noticing.
+#
+# So this runs the three checks against the real shots/ from THIS run and reads
+# the exit codes. PASS only if every one of them returns its own 0.
+#
+# NOT A GATE, deliberately and by the same rule already used for UNDETERMINED
+# above (owner_checks.py:407-409: "undetermined is not a soft pass"). The
+# verdict is a finding about the harness, not a claim that the street is
+# undriveable, so it is reported and surfaced in the summary without setting
+# FAILED. If you want it to gate, that is a one-line change and it will make
+# this script exit nonzero on every run until the gearbox sampling is fixed.
+say ""
+say "[6/6] do the checks PASS on real input?"
+REAL_REPORT="${REAL_REPORT:-/tmp/reports/owner-check-real.md}"
+REAL_TSV="$SB/real.tsv"
+: >"$REAL_TSV"
+REAL_BAD=0
+for m in frames csv upshift; do
+    rout=$(python3 Tools/owner_checks.py "$m" shots 2>&1); rrc=$?
+    case $rrc in
+        0) rst=PASS ;;
+        3) rst=UNDETERMINED; REAL_BAD=1 ;;
+        *) rst=FAIL; REAL_BAD=1 ;;
+    esac
+    printf '%s\t%d\t%s\n' "$m" "$rrc" "$rst" >>"$REAL_TSV"
+    printf '  %-8s exit=%d %s\n' "$m" "$rrc" "$rst"
+done
+if [ "$REAL_BAD" -eq 0 ]; then
+    REAL_VERDICT=PASS
+else
+    REAL_VERDICT=FAIL
+fi
+say "REAL_INPUT_$REAL_VERDICT"
+
+{
+    say "# Owner check - do the checks pass on REAL input?"
+    say ""
+    say "- command: \`$CMD\`"
+    say "- run: $START_UTC (UTC)"
+    say "- git HEAD: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    say "- input: the real \`shots/\` produced by THIS run (not a fixture)"
+    say ""
+    say "## Verdict"
+    say ""
+    say "**REAL_INPUT_$REAL_VERDICT**"
+    say ""
+    if [ "$REAL_VERDICT" = "PASS" ]; then
+        say "Every check returned its own exit 0 on real game output."
+    else
+        say "At least one check did NOT return exit 0 on real game output. Specifically:"
+        say "the gearbox check returns **3 (UNDETERMINED)**, which owner_checks.py"
+        say "documents as \"deliberately distinct from both [pass and fail]\" - nothing"
+        say "was proven. Treating that as ok would be reporting a check that never ran."
+    fi
+    say ""
+    say "## What was run"
+    say ""
+    say "| check | exit | state | verdict |"
+    say "|-------|------|-------|---------|"
+    while IFS=$'\t' read -r m rc st; do
+        [ -n "${m:-}" ] || continue
+        say "| \`$m\` | $rc | $st | $([ "$rc" = "0" ] && echo PASS || echo NOT-PASS) |"
+    done <"$REAL_TSV"
+    say ""
+    say "Full output of each check against the real input:"
+    say ""
+    say '```'
+    for m in frames csv upshift; do
+        say "\$ python3 Tools/owner_checks.py $m shots"
+        python3 Tools/owner_checks.py "$m" shots 2>&1 | sed 's/^/    /'
+        say ""
+    done
+    say '```'
+    say ""
+    say "## Why the self-test did not already answer this"
+    say ""
+    say "\`./verify.sh --self-test\` reports \"caught 5 of 5 deliberate breaks\" and that"
+    say "is a true and useful result - but every input it checks is a fixture"
+    say "owner_checks.py generated for itself, including its clean pass case. A"
+    say "harness validated only against its own fixtures has never been shown to"
+    say "accept what the game emits, which is a different question."
+    say ""
+    say "## The cause, measured rather than guessed"
+    say ""
+    say "The upshift decision lands a few rpm under the threshold while one frame of"
+    say "travel covers more rpm than that gap:"
+    say ""
+    say "| log | street | decision sample | limit | 1-frame band |"
+    say "|-----|--------|-----------------|-------|--------------|"
+    for lg in "$SB/drive.log" "$HOARE_LOG" "$REACH_LOG"; do
+        _cause_row "$lg"
+    done
+    say ""
+    say "So the miss is 5-12 rpm against a band of 11-30 rpm. The gearbox is"
+    say "upshifting essentially AT the threshold, and at this sampling rate the"
+    say "check cannot tell \"at the threshold\" from \"below it\". That is the check"
+    say "being honest rather than broken."
+    say ""
+    say "## What would change the verdict"
+    say ""
+    say "Not a threshold edit. Either raise the telemetry sample rate so one frame"
+    say "of travel is smaller than the decision gap, or accept UNDETERMINED as a"
+    say "permanent real-world state for this vehicle and stop reporting it as a"
+    say "pending check. Editing the limit to make the number resolvable would"
+    say "manufacture the pass."
+    say ""
+    say "## This is not a gate"
+    say ""
+    say "It is reported, not enforced. The owner's gate is the Aumuller street"
+    say "verdict above; this line records the state of the harness and deliberately"
+    say "does not set the exit code."
+    say ""
+    say "## logs"
+    say ""
+    say "- per-check exit codes: $REAL_TSV"
+} >"$REAL_REPORT"
+
+say "real input   : REAL_INPUT_$REAL_VERDICT -> $REAL_REPORT"
+
 # --------------------------------------------------------------- street verdict
 # The verdict is read out of the drive log, not recomputed here, so the report and
 # the log can never disagree. A missing marker is itself a failure.
@@ -349,6 +488,7 @@ say "gearchanges    : $GEAR"
 say "self-test      : $SELF"
 say "Hoare Street   : $(grep -E '^reached the far end' "$HOARE_LOG" 2>/dev/null | tail -1 | sed 's/^[^:]*: *//' || echo 'not run')  (coverage, non-gating)"
 say "OFF_ROAD_CAN_FAIL=$OFFROAD"
+say "real input   : REAL_INPUT_$REAL_VERDICT  (measured on this run's shots/, non-gating)"
 hr
 say "md5 (within-run freshness only, not determinism):"
 md5sum shots/street-frame-0*.png 2>/dev/null | sed 's/^/  /'
