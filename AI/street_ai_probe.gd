@@ -90,8 +90,6 @@ func _ready() -> void:
 	car.name = "AIProbeCar"
 	car.spec = CarDB.get_spec("kairo_s13")
 	main.add_child(car)
-	car.reset_to(_pose(SPAWN_S), Vector3(0.0, atan2(-_tangent(pts, SPAWN_S).x,
-		-_tangent(pts, SPAWN_S).y), 0.0))
 
 	racer = AIRacer.new()
 	racer.name = "AIProbeRacer"
@@ -108,6 +106,20 @@ func _ready() -> void:
 		get_tree().quit(2)
 		return
 	follower = racer.lane()
+
+	# Place the car ON THE DRIVER'S OWN LINE, not on the street polyline the line was
+	# built from. Those are not the same thing and the difference is not small:
+	# `RacingLine.from_route` resamples, smooths and apex-biases, so the driver's
+	# line is 2790 m where the street is 1407.5 m and the two diverge by metres at
+	# any given station. Spawning on the street put the car 8.24 m from the lane it
+	# was immediately asked to hold, at full lock from the first frame - and it then
+	# drove 0.1 m in 240 s while the projection walked 2778 m along the line and
+	# every downstream number read as a result.
+	var here0: Dictionary = follower.project(follower.aim_at(SPAWN_S, SPAWN_Y))
+	var tan0: Vector2 = here0["t"]
+	car.reset_to(follower.aim_at(SPAWN_S, SPAWN_Y),
+		Vector3(0.0, atan2(-tan0.x, -tan0.y), 0.0))
+
 	var street_len := 0.0
 	for i in pts.size() - 1:
 		street_len += pts[i].distance_to(pts[i + 1])
@@ -138,7 +150,17 @@ func _ready() -> void:
 
 	for f in SETTLE_FRAMES:
 		await get_tree().process_frame
-	print("[ai] settled: y=%.3f wheels down=%d" % [car.global_position.y, int(car.wheels_on_ground)])
+	print("[ai] placed on the driver's own line: lat %+.2f m (lane %+.2f), y=%.2f" % [
+		float(follower.project(car.global_position)["lat"]), lane_offset, car.global_position.y])
+	for f in SETTLE_FRAMES:
+		await get_tree().process_frame
+	var rl: Dictionary = car.get_wheel("RL")
+	print("[ai] settled: y=%.3f rear load=%.0f N contact=%s wheels down=%d" % [
+		car.global_position.y, float(rl.get("load", -1.0)), str(rl.get("contact", false)),
+		int(car.wheels_on_ground)])
+	_check("the car is on the carriageway before the driver is asked to drive",
+		float(rl.get("load", -1.0)) > 500.0,
+		"rear load %.0f N (a car spawned inside the surface has no tyre load and cannot move)" % float(rl.get("load", -1.0)))
 
 	await _drive()
 	_report()
@@ -148,72 +170,90 @@ func _ready() -> void:
 ## Does `LaneFollower.project()` find the right place on a line that passes close
 ## to itself? Pure geometry, no world, no physics, no driving.
 ##
-## This is the whole diagnosis of the circuit regression in a form that can be
-## checked by reading the answer.
+## THE TEST IS A ROUND TRIP, not a comparison of two implementations.
 ##
-## `RacingLine.project` searches a WINDOW either side of the last index and says
-## why: a street circuit passes close to itself, and a global nearest-point search
-## on one will return a point on a different leg of the lap. `LaneFollower.project`
-## is a global scan with no window and no hint, so it has exactly the failure its
-## caller already documented. An OPEN street cannot show it - Hoare's longest run
-## approaches nothing - which is why the street probe is green and the circuit is
-## not, and why the bug survived being measured twice on a straight.
+## The first version of this compared the follower's `s` against
+## `RacingLine.project`'s `s` and reported 4 of 36 in agreement both before and
+## after the window was added - which is what a person debugging that would call a
+## fix that did nothing. It was the TEST that was broken: the two use different
+## `s` scales. `RacingLine` derives `s` from a `spacing` that includes the closing
+## segment, so its `s` grows about 1.38x faster per sample than the follower's
+## sum of consecutive distances. Measured, the follower advanced 16.0 m per probe
+## where the line advanced 11.6 m - a constant ratio, not a search failure. Put a
+## point ON the lane and ask where it is: the follower's answer must be that same
+## point, which is scale-free and needs no second implementation to agree with.
 ##
-## The line below is a dogleg: a long leg, a U-turn, and a parallel leg 6 m back.
-## A car on the first leg is 3 m from it, and 6 m from the leg that runs alongside.
-## The windowed projection must say 3 m and the leg it is on; a global scan says
-## 3 m too, because it takes the nearest - so the test asks the question that
-## actually discriminates: with the window seeded at the car, do the two agree on
-## WHICH SAMPLE, and does the global one stay on the leg the car is on once the
-## car is past the U-turn and the parallel leg is nearer?
+## The window is what makes the round trip hold at all on a self-approaching line:
+## a global nearest-point scan returns the near point on the OTHER leg, which for
+## this dogleg is the pair of legs 6 m apart, and the round trip then reports the
+## wrong station while every number looks plausible.
 func _projection_selftest() -> void:
-	print("[selftest] LaneFollower.project vs RacingLine.project on a self-approaching line")
+	print("[selftest] LaneFollower.project on a self-approaching line (dogleg, two legs ~6 m apart)")
 	var pts := PackedVector2Array([
-		Vector2(0, 0), Vector2(100, 0), Vector2(160, 0),
-		Vector2(200, 8), Vector2(200, 60), Vector2(160, 68),
-		Vector2(100, 68), Vector2(0, 68), Vector2(-40, 68),
+		Vector2(0, 0), Vector2(100, 0), Vector2(160, 0), Vector2(200, 8),
+		Vector2(200, 60), Vector2(160, 68), Vector2(100, 68), Vector2(0, 68),
+		Vector2(-40, 68),
 	])
-	var g := RoadGraph.new()
-	g.build(OSMLayout.corridors())
-	var route: Array = []
-	for p in pts:
-		route.append(p)
-	var line := RacingLine.from_route(route, g, false)
 	var lane := LaneFollower.new()
-	var packed := PackedVector2Array()
-	for p in line.points:
-		packed.append(p)
-	lane.set_lane(packed, false)
+	lane.set_lane(pts, false)
+	lane.lane_offset = 0.0
+	print("  lane: %d points, %.1f m" % [pts.size(), lane.length()])
 
-	# Sample along the first leg and then the return leg, seeding the windowed
-	# search from the previous sample exactly as `AIRacer` does.
-	var idx := 0
+	# 1. WINDOWED, walking forward: every station must round-trip to itself.
+	#    Probed a whole segment at a time - much coarser than the window - so the
+	#    follower is genuinely out of the window at each probe and has to advance.
 	var worst := 0.0
-	var worst_at := ""
-	var agree := 0
+	var worst_s := 0.0
 	var probes := 0
-	for step in range(0, line.size(), 4):
-		var world: Vector2 = line.point_at(step, 0.0)
-		var here: Dictionary = line.project(world, idx, 2)
-		idx = int(here["i"])
-		var mine: float = float(here["s"])
-		var theirs: float = float(lane.project(Vector3(world.x, 0.0, world.y))["s"])
+	var s := 0.0
+	while s < lane.length() - 2.0:
+		var p: Vector3 = lane.aim_at(s, 0.0)
+		var got: float = float(lane.project(p)["s"])
 		probes += 1
-		var gap := absf(mine - theirs)
-		if gap < line.spacing * 2.0:
-			agree += 1
-		if gap > worst:
-			worst = gap
-			worst_at = "s=%.1f (windowed %.1f, global %.1f)" % [float(step) * line.spacing, mine, theirs]
-	print("  line samples            : %d, spacing %.2f m" % [line.size(), line.spacing])
-	print("  probes                  : %d" % probes)
-	print("  the two agree within 2 samples : %d of %d (%.0f%%)" % [
-		agree, probes, 100.0 * float(agree) / maxf(float(probes), 1.0)])
-	print("  worst disagreement      : %.1f m at %s" % [worst, worst_at])
-	print("")
-	_check("the follower's projection agrees with the line's windowed one on a self-approaching loop",
-		agree == probes, "%d of %d probes disagreed by more than two samples, worst %.1f m" % [
-			probes - agree, probes, worst])
+		if absf(got - s) > worst:
+			worst = absf(got - s)
+			worst_s = s
+		s += 16.0
+	print("  windowed round trip     : %d probes, worst %.2f m at s=%.1f" % [probes, worst, worst_s])
+	_check("a point on the lane projects back to where it is", worst < 1.0,
+		"%d probes walking forward in 16 m steps (wider than the %.0f m window), worst %.2f m at s=%.1f" % [
+			probes, 26.0, worst, worst_s])
+
+	# 2. GLOBAL, the control: the same question asked without a seed. On this line
+	#    it is expected to FAIL, and it is the whole point of the window.
+	var global_lane := LaneFollower.new()
+	global_lane.set_lane(pts, false)
+	global_lane.lane_offset = 0.0
+	# Re-seed it at each station so nothing carries over: this asks only about a
+	# single global scan from an arbitrary seed, which is what a fresh follower or
+	# a teleporting car does.
+	var g_worst := 0.0
+	var g_worst_s := 0.0
+	s = 0.0
+	while s < lane.length() - 2.0:
+		var g := LaneFollower.new()
+		g.set_lane(pts, false)
+		var p2: Vector3 = g.aim_at(s, 0.0)
+		var got2: float = float(g.project(p2)["s"])
+		if absf(got2 - s) > g_worst:
+			g_worst = absf(got2 - s)
+			g_worst_s = s
+		s += 16.0
+	print("  global, fresh follower  : worst %.2f m at s=%.1f  (the control)" % [g_worst, g_worst_s])
+	notes.append("global scan from a fresh follower is off by %.1f m on this line; the windowed one is off by %.2f m" % [g_worst, worst])
+
+	# 3. A point that genuinely lives on the OTHER leg must still be found there.
+	#    Not by magic: the window is bounded, so this is found only if it is
+	#    reachable - which it is not from an arbitrary seed, and should not be.
+	var near_second_leg := Vector3(100.0, 0.0, 65.0)
+	var seeded := LaneFollower.new()
+	seeded.set_lane(pts, false)
+	# Seed it ON that leg first, the way a driver that is already there would be.
+	seeded.project(near_second_leg)
+	var second: float = float(seeded.project(near_second_leg)["s"])
+	print("  a point on the second leg, follower already seeded there: s=%.1f" % second)
+	_check("a point on the second leg is found on the second leg once seeded there",
+		absf(second - 353.6) < 3.0, "s=%.1f, expected about 353.6 m" % second)
 
 
 func _wait_for_world() -> void:
@@ -327,8 +367,24 @@ func _drive() -> void:
 
 	_check("the AI held the lane: mean |lat| within 1.0 m of the target", absf(mean_lat - lane_offset) < 1.0,
 		"mean |lat| %.2f m against a %+.2f m target" % [mean_lat, lane_offset])
+	# Internal consistency, before any of the above is believed.
+	#
+	# A projection can ADVANCE ALONG THE LINE without the car moving, and then every
+	# number downstream reads as a result. This run reported 100% of a 2782 m line
+	# at a top speed of 19.9 km/h, which is 5.5 m/s: over 240 s that is at most
+	# 1327 m of car travel, so `s` was sliding roughly twice as fast as the car
+	# drove and the completion was the projection's, not the driver's. Caught only
+	# by dividing one measured number by another.
+	var travelled: float = path
+	var slide: float = (s - origin) - travelled
+	_check("progress along the line is the car actually moving, not the projection sliding",
+		absf(slide) < 0.35 * maxf(travelled, 1.0),
+		"line says %.1f m travelled, car drove %.1f m of path, difference %.1f m (%.0f%%)" % [
+			s - origin, travelled, slide, 100.0 * slide / maxf(travelled, 1.0)])
+
 	_check("the AI reached the far end of the street", arrived,
-		"%.1f m of %.1f m from s=%.1f" % [s - origin, total - SPAWN_S, origin])
+		"%.1f m of %.1f m from s=%.1f%s" % [s - origin, total - SPAWN_S, origin,
+			"" if absf(slide) < 0.35 * maxf(travelled, 1.0) else "  <- DO NOT TRUST, see the projection-slide claim"])
 
 
 func _half_width(p: Vector3) -> float:

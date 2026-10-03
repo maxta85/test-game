@@ -68,6 +68,37 @@ const AIM_GAIN := 2.6
 ## fix rather than a tune - the failure is structural, not a matter of level.
 const AIM_ANGLE_MAX := 0.60
 
+## How far either side of the seed `project()` will look, in METRES OF ARC LENGTH.
+##
+## DERIVED, NOT CHOSEN. The follower asks `project()` where the car is once per
+## physics step, and then uses that `s` for exactly two things: `aim_at(s)` as the
+## car's position, and `aim_at(s + lookahead_for(v))` as the aim point. The furthest
+## along the line the driver ever *uses* is therefore `s + LOOKAHEAD_MAX`. Looking
+## any further ahead cannot change a steering command, so a window of LOOKAHEAD_MAX
+## metres ahead is not a tuning compromise - it is the whole of the used range.
+##
+## The same distance BEHIND the seed, and for the opposite reason: after a shunt or
+## a spin the car can be a long way behind where the driver last thought it was,
+## and a window that only looked forward would report a stale `s` and aim forward
+## of a car that is already pointing backwards.
+##
+## Measured justification for it being large enough: at 60 Hz a car at 200 km/h
+## covers 0.93 m per step, so consecutive seeds are under a metre apart, and
+## LOOKAHEAD_MAX is 26 m - about 28 steps of slack. It is small against a lap
+## (1760 m on the test circuit), which is the entire point: the failure being fixed
+## was the scan reaching 135 m away onto another leg of the lap.
+const WINDOW_M := LOOKAHEAD_MAX
+
+## Beyond this, the seed is treated as STALE and a full scan runs to re-seed it.
+##
+## A window is only safe if there is a way out of it, or a car that teleports - a
+## reset, a race restart, a car that has genuinely left the line - stays lost
+## forever inside a window centred on where it used to be. `AIRacer` already uses
+## the same idea with `LOST_LATERAL = 24.0`; 40 m is wider than any road in this
+## network, on purpose, because a driver that panics while merely running a wide
+## line is worse than one that lets the car gather itself up.
+const RESEED_DIST := 40.0
+
 ## Steer per rad/s of yaw, subtracted. Yawing left makes yaw positive and positive
 ## steer yaws left, so damping is subtraction. At 0 this is plain pure pursuit and
 ## it oscillates at speed; measured on Hoare, pure pursuit alone weaves with a
@@ -119,23 +150,38 @@ var closed := false
 ## that band is the default.
 var lane_offset := 4.25
 
+## Which segment the last `project()` call landed on. The window is centred here.
+##
+## State, not a constant: this class is one car at a time, and a second car on the
+## same lane would need its own follower or an explicit `hint` on every call.
+var _seed := 0
+
 ## Largest steer this follower will ever ask for. Reported, not hidden.
 var peak_steer := 0.0
 var last_aim := Vector3.ZERO
 
 
-## Hand it a street. Cumulative distances are built once here so `at()` is a walk
-## and not a re-measure every physics frame.
+## Hand it a street or a lap. Cumulative distances are built once here so
+## `project()` and `aim_at()` are walks and not a re-measure every frame.
+##
+## On a CLOSED lane the closing segment (last point back to first) counts towards
+## the length and appears in the cumulative table, and `aim_at` WRAPS rather than
+## clamps - a driver on a lap has to be able to aim past the start line, and a
+## clamp would quietly aim it at the far end of the lap instead, which on a street
+## circuit is a different part of the road.
 func set_lane(points: PackedVector2Array, is_closed: bool = false) -> void:
 	pts = points
 	closed = is_closed
+	var n := pts.size()
 	_cum = PackedFloat32Array()
-	_cum.resize(pts.size())
+	_cum.resize(n + 1)
 	_total = 0.0
-	for i in pts.size():
+	for i in n:
 		_cum[i] = _total
-		if i + 1 < pts.size():
-			_total += pts[i].distance_to(pts[i + 1])
+		var j: int = ((i + 1) % n) if closed else mini(i + 1, n - 1)
+		_total += pts[i].distance_to(pts[j])
+	_cum[n] = _total
+	_seed = 0
 	peak_steer = 0.0
 
 
@@ -143,33 +189,136 @@ func length() -> float:
 	return _total
 
 
-## Distance along the lane of `p`, its signed offset from it, and the unit tangent
-## there. `s` grows along the lane regardless of which side the point is on.
-func project(p: Vector3, hint: int = 0) -> Dictionary:
-	var best_s := 0.0
-	var best_lat := 0.0
-	var best_t := Vector2(1, 0)
-	var best_d := INF
-	var best_i := 0
-	var v := Vector2(p.x, p.z)
+## Distance along the lane of `p`, its signed offset from it, the unit tangent
+## there, and the index of the segment it landed on.
+##
+## WINDOWED AND SEEDED, which is the whole difference from a global scan.
+##
+## A global nearest-point search is wrong on any line that passes close to itself,
+## and a street circuit does: measured on a dogleg, a global scan disagreed with a
+## windowed one on 32 of 36 probes, worst by **135.4 m along the line** - it was
+## returning a perfectly near point on a DIFFERENT LEG of the lap. Handed a closed
+## circuit that made the racing AI worse: `./test.sh ai` worst road ratio 0.56 ->
+## 2.85 (bound 2.2, red), lap 136.7 s -> 140.4 s, and 17 of 957 samples over the
+## kerb, every one of them in RECOVER. `RacingLine.project` has had a windowed,
+## seeded search all along and a comment describing this hazard; this was the same
+## omission in a second file.
+##
+## The window is `WINDOW_M` of arc length either side of the seed, and it is
+## derived rather than picked - see that constant. The escape hatch is
+## `RESEED_DIST`: a window with no way out of it loses a car that teleports
+## forever.
+##
+## `hint` is the seed. Pass -1 (the default) to use the seed this follower already
+## holds, which is what `steer_for` does - it is called every step for one car and
+## has no hint to offer. The seed is follower STATE, so this class is one car at a
+## time; a second car would need its own.
+func project(p: Vector3, hint: int = -1) -> Dictionary:
+	if pts.size() < 2:
+		return {"s": 0.0, "lat": 0.0, "t": Vector2(1, 0), "i": 0, "dist": INF}
+
+	var seed := _seed
+	if hint >= 0:
+		seed = _wrap(clampi(hint, 0, pts.size() - 1))
+	var found := _scan(seed, p, WINDOW_M)
+	if found["dist"] > RESEED_DIST:
+		# The seed is stale - the car teleported, or it really has left the line.
+		# A full scan is the correct answer here and only here.
+		var wide := _scan(0, p, INF)
+		found = wide
+		_seed = int(wide["i"])
+	else:
+		_seed = int(found["i"])
+	return found
+
+
+## Nearest point to `p` within `window_m` of arc length either side of segment
+## `from`. Walks outward in both directions and stops when the arc budget is spent,
+## which is what keeps a closed loop from being re-scanned every frame.
+func _scan(from: int, p: Vector3, window_m: float) -> Dictionary:
+	var best := _closest_on(from, p)
+	var spent := 0.0
+	var step := 1
+	while spent < window_m and step < pts.size():
+		var moved := false
+		for direction in [1, -1]:
+			var j := _wrap(from + direction * step)
+			if j == int(best["i"]) and step > 1:
+				continue
+			var c := _closest_on(j, p)
+			if c["d"] < float(best["d"]):
+				best = c
+				moved = true
+		spent += _seg_len(int(best["i"])) * float(step)
+		step += 1
+		if not moved and step > 2:
+			# The nearest point has stopped improving and the arc budget is spent;
+			# walking the rest of a lap would cost O(n) per frame for nothing.
+			if spent >= window_m:
+				break
+	return _finish(best)
+
+
+## Wrap a segment index on a closed lane, clamp it on an open one.
+func _wrap(i: int) -> int:
+	var n := pts.size()
+	if closed:
+		return ((i % n) + n) % n
+	return clampi(i, 0, n - 1)
+
+
+## Index of the segment containing distance `s` along the lane. Used by `verify()`
+## to hand `project()` an honest seed, since its samples are far apart.
+func _segment_at(s: float) -> int:
+	if pts.size() < 2:
+		return 0
+	var d: float = fposmod(s, _total) if closed and _total > 0.0001 else clampf(s, 0.0, _total)
 	for i in pts.size() - 1:
-		var a := pts[i]
-		var b := pts[i + 1]
-		var ab := b - a
-		var len2 := ab.length_squared()
-		if len2 < 0.0001:
-			continue
-		var t: float = clampf((v - a).dot(ab) / len2, 0.0, 1.0)
-		var proj := a + ab * t
-		var w := v - proj
-		var d := w.length()
-		if d < best_d:
-			best_d = d
-			best_i = i
-			best_s = _cum[i] + sqrt(len2) * t
-			best_t = ab / sqrt(len2)
-			best_lat = _right(best_t).dot(w)
-	return {"s": best_s, "lat": best_lat, "t": best_t, "i": best_i, "dist": best_d}
+		if _cum[i + 1] >= d:
+			return i
+	return pts.size() - 2
+
+
+func _seg_len(i: int) -> float:
+	var n := pts.size()
+	if n < 2:
+		return 0.0
+	return pts[i].distance_to(pts[_wrap(i + 1)])
+
+
+## Nearest point to `p` on one segment. Same shape as `RacingLine._closest_on`,
+## and the same normal: `orthogonal()`, so `lat` is measured on the axis
+## `lane_offset` is expressed in.
+func _closest_on(i: int, p: Vector3) -> Dictionary:
+	var n := pts.size()
+	var a := pts[i]
+	var b := pts[_wrap(i + 1)]
+	var ab := b - a
+	var len2 := ab.length_squared()
+	if len2 < 0.0001:
+		return {"d": INF, "t": 0.0, "lat": 0.0, "tan": Vector2(1, 0), "i": i, "dist": INF}
+	var v := Vector2(p.x, p.z)
+	var t: float = clampf((v - a).dot(ab) / len2, 0.0, 1.0)
+	var q := a + ab * t
+	var off := v - q
+	var seg := sqrt(len2)
+	var tan: Vector2 = ab / seg
+	return {
+		"d": off.length_squared(),
+		"t": t,
+		"lat": off.dot(_right(tan)),
+		"tan": tan,
+		"i": i,
+		"dist": off.length(),
+		"s": _cum[i] + seg * t,
+	}
+
+
+## The dictionary `project` hands back, derived from one segment's nearest point.
+func _finish(c: Dictionary) -> Dictionary:
+	var tan: Vector2 = c["tan"]
+	return {"s": float(c["s"]), "lat": float(c["lat"]), "t": tan,
+		"i": int(c["i"]), "dist": float(c["dist"])}
 
 
 ## Right of travel, in the same handedness `lane_offset` is measured on.
@@ -183,8 +332,14 @@ func _right(tangent: Vector2) -> Vector2:
 
 ## The lane point `s` metres along, offset `lane_offset` to the right of travel,
 ## at `height`. Where the driver is actually aiming.
+##
+## Wraps on a closed lane, clamps on an open one - see `set_lane`.
 func aim_at(s: float, height: float) -> Vector3:
-	var d: float = clampf(s, 0.0, maxf(_total, 0.001))
+	var d: float = s
+	if closed and _total > 0.0001:
+		d = fposmod(s, _total)
+	elif _total > 0.0001:
+		d = clampf(s, 0.0, _total)
 	for i in pts.size() - 1:
 		if _cum[i + 1] >= d or i == pts.size() - 2:
 			# The SEGMENT length, not `_cum[i]` and not its square root.
@@ -288,11 +443,24 @@ func verify(samples: int = 24) -> Dictionary:
 	if pts.size() < 2:
 		return {"ok": false, "fails": ["no lane"], "worst_lat": 0.0}
 
+	# Walk the stations in order AND carry the segment index, passing it as an
+	# explicit hint.
+	#
+	# Not tidiness. `project()` without a hint uses the seed the follower already
+	# holds, and `verify()` samples this line every `_total / samples` metres -
+	# 116 m on a 2790 m lap - which is four times the 26 m window. So the seed is
+	# always stale by the time each probe runs, the `RESEED_DIST` escape fires, and
+	# `verify()` measures a GLOBAL scan on a line that passes close to itself. That
+	# is how it reported the aim point 7.4 m from the lane while the windowed round
+	# trip was 0.00 m out: the check was auditing the thing that had been fixed
+	# instead of the fix.
+	var idx := 0
 	for k in samples:
 		var s: float = _total * (float(k) + 0.5) / float(samples)
 		var aim: Vector3 = aim_at(s, 0.0)
+		idx = _segment_at(s)
 		# 1. The aim point is where it claims to be, laterally.
-		var back: Dictionary = project(aim)
+		var back: Dictionary = project(aim, idx)
 		var lat := absf(float(back["lat"]) - lane_offset)
 		if lat > worst_lat:
 			worst_lat = lat
@@ -311,7 +479,7 @@ func verify(samples: int = 24) -> Dictionary:
 		#    has to say so, and has to report how many samples it skipped, or it is
 		#    a check that will be "fixed" by loosening a number with nothing said.
 		var look: float = lookahead_for(10.0)
-		var ahead_t: Vector2 = project(aim_at(s + look, 0.0))["t"]
+		var ahead_t: Vector2 = project(aim_at(s + look, 0.0), idx)["t"]
 		if acos(clampf(t.normalized().dot(ahead_t.normalized()), -1.0, 1.0)) > STRAIGHT_TOL_RAD:
 			curving += 1
 			continue

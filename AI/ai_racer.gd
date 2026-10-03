@@ -64,12 +64,12 @@ var graph: RoadGraph
 ## Separate from skill: how much it wants a gap, and how late it will defend.
 @export var aggression := 0.7
 ## Metres from the line to the lane actually driven, positive to the right of
-## travel. Only consulted on an OPEN line - see `_steer_along_lane`.
+## travel.
 ##
 ## DEFAULT 0.0, and that default is a decision with a reason rather than a shrug:
-## the racing circuit is a closed loop whose `RacingLine` already carries an inside
-## bias (`APEX_BUDGET`), so its centre IS the racing line, and offsetting it would
-## move the car off the fast line and onto the inside verge at every corner.
+## the racing circuit's `RacingLine` already carries an inside bias
+## (`APEX_BUDGET`), so its centre IS the racing line, and offsetting it would move
+## the car off the fast line and onto the inside verge at every corner.
 ##
 ## It is not zero for a STREET, and that is where the measurement belongs. On a
 ## named street the line is the street's centreline, and on these streets the
@@ -499,29 +499,28 @@ func _drive_race(delta: float, here: Dictionary) -> void:
 
 
 ## Pure pursuit, by way of `Systems/race/lane_follower.gd`: aim at the lane a
-## little way ahead and steer at it, damped by yaw rate.
+## little way ahead and steer at it, damped by yaw rate. Used for BOTH open lines
+## and closed circuits.
 ##
-## ONLY ON AN OPEN LINE, and that restriction is measured rather than cautious.
-## Handing a CLOSED lap to `LaneFollower` sent `./test.sh ai` from worst road ratio
-## 0.56 to 2.85, lap 136.7 s to 140.4 s, and 17 samples over the kerb - all of them
-## in RECOVER. The cause is `LaneFollower.project()`: it is a global
-## nearest-point scan with no window and no hint, and a street circuit passes close
-## to itself, so it returns a point on a DIFFERENT LEG of the lap and the driver
-## steers at it. `AI/street_ai_probe.gd --selftest` measures exactly that on a
-## dogleg line: the two projections disagree on 32 of 36 probes, worst by 135.4 m
-## along the line. `RacingLine` has a windowed search and a comment explaining why
-## this is a hazard; the follower does not, and it is not mine to change here.
+## It was NOT safe on a circuit until t124 gave `LaneFollower.project()` a windowed,
+## seeded search. Before that it was a global nearest-point scan, and handing it a
+## closed lap sent `./test.sh ai` from worst road ratio 0.56 to **2.85** (bound 2.2,
+## red), lap 136.7 s to 140.4 s, and 0 of 932 samples over the kerb to 17 of 957 -
+## every one of them in RECOVER - because on a street circuit that passes close to
+## itself it returned a point on a DIFFERENT LEG of the lap. `AI/street_ai_probe.gd
+## --selftest` measures the fix and its control on a dogleg: the windowed round trip
+## is 0.00 m out over 31 probes walked in 16 m steps, and a fresh global scan of the
+## same line is 32.00 m out.
 ##
-## So: an open line gets the follower, a closed circuit keeps the windowed aim it
-## always had. Recovery also keeps `_steer_at`, because it aims at a PLACE (the
-## nearest point on the line, or two samples ahead of it) and a speed-scaled
-## look-ahead cannot express "the nearest point, please".
+## Recovery keeps `_steer_at`, because it aims at a PLACE - the nearest point on the
+## line, or two samples ahead of it - and a speed-scaled look-ahead cannot express
+## "the nearest point, please".
 ##
 ## `_target_lateral` carries traffic and defending through unchanged, and it is the
 ## same number as `LaneFollower.lane_offset` - see `_sync_lane` on why there is no
 ## sign flip between them.
 func _steer_along_lane(here: Dictionary) -> void:
-	if _lane == null or _line.closed:
+	if _lane == null:
 		var fallback := _idx + maxi(int(round(_lookahead / _line.spacing)), 2)
 		_steer_at(_line.point_at(fallback, _target_lateral))
 		return
@@ -531,27 +530,21 @@ func _steer_along_lane(here: Dictionary) -> void:
 		car.angular_velocity.y, car.speed_mps)
 
 
-## Whether this driver is actually steering with the follower, and why not if it
-## is not. A harness asks this instead of assuming, because "it consumes
-## LaneFollower" is true for a street and false for a circuit and the difference is
-## the entire point.
+## Whether this driver is actually steering with the follower. True for streets and
+## circuits alike since t124 gave the follower's projection a window.
 func steering_with_follower() -> bool:
-	return _lane != null and not _line.closed
+	return _lane != null
 
 
 ## How far apart the two projections of the same car are, and how often they
-## disagree. OFF BY DEFAULT because it costs a second full scan of the line.
+## disagree. OFF BY DEFAULT because it costs a second scan of the line.
 ##
-## `RacingLine.project` searches a WINDOW around the last index, deliberately: a
-## street circuit passes close to itself, and a global nearest-point search on one
-## will happily return a point on a different leg of the lap. That is the failure
-## `RacingLine` documents, and it is why the driver reseeds `_idx` when it loses
-## the plot. `LaneFollower.project` is a global scan with no window and no hint,
-## so when it is handed a CLOSED lap it can disagree with the line the driver has
-## been tracking, and it will steer at the wrong part of the circuit.
-##
-## This exists to measure that rather than assume it. Worst disagreement and the
-## frame count are public; a harness reads them.
+## Both are windowed now, but they are separate implementations with separate
+## scales - `RacingLine` derives `s` from a `spacing` that includes the closing
+## segment, so its `s` grows about 1.38x faster per sample than the follower's sum
+## of consecutive distances. Compare their `s` values and you will measure THAT,
+## not the search. What is worth watching is a disagreement that GROWS, which is
+## what a lost window looks like; a constant offset is a scale, not a fault.
 func _audit_projection(here: Dictionary) -> void:
 	if not audit_projections or _lane == null:
 		return
