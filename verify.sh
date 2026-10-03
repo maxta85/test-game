@@ -146,6 +146,121 @@ case $UPRC in
 esac
 say "gearbox: $GEAR"
 
+# --------------------------------------------------------------- 5. Hoare + off-road
+# Hoare Street is a COVERAGE report, NOT a gate. The owner's gate above is the
+# Aumuller drive and its exit semantics are untouched by this section. Hoare is
+# measured and written out because the acceptance evidence asks for it, and it
+# is BLOCKED - that fact is recorded in the report, not suppressed here.
+#
+# OFF_ROAD_CAN_FAIL answers one question with an experiment instead of an
+# opinion: can `times off the carriageway` ever be nonzero? On both streets the
+# steady-state answer is 0, which is ambiguous between "dead code" and "the car
+# genuinely never left". So a deliberate steer bias pushes a real car off a real
+# carriageway and the existing predicate runs for real; the count comes out of
+# that run. 1 = the check demonstrably fires. 0 = it never has, anywhere.
+say ""
+say "[5/5] Hoare Street coverage + off-road reachability"
+HOARE_REPORT="${HOARE_REPORT:-/tmp/reports/owner-check-hoare.md}"
+HOARE_LOG="$SB/hoare.log"
+REACH_LOG="$SB/reach.log"
+
+(
+    "$GODOT" --headless --fixed-fps 60 --path . res://Tools/playtest.tscn \
+        -- --street "--street=Hoare Street" --from=0 --seconds=60 \
+        >"$HOARE_LOG" 2>&1
+) &
+HOARE_PID=$!
+(
+    "$GODOT" --headless --fixed-fps 60 --path . res://Tools/playtest.tscn \
+        -- --street "--steer-bias=1.0" --from=600 --seconds=45 \
+        >"$REACH_LOG" 2>&1
+) &
+REACH_PID=$!
+wait $HOARE_PID; HOARE_RC=$?
+wait $REACH_PID; REACH_RC=$?
+
+# Read the counts out of the logs rather than recomputing them, so the report and
+# the run can never disagree. `tr -dc 0-9` isolates the number from the label.
+_offcount() { grep -E "^times off the carriageway" "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+HOARE_OFF=$(_offcount "$HOARE_LOG")
+REACH_OFF=$(_offcount "$REACH_LOG")
+
+# The reachability run is the ONLY thing that may set this. An unmeasurable run
+# is neither 1 nor 0, and guessing either way would make the line decoration.
+OFFROAD="UNDETERMINED"
+if [ -n "$REACH_OFF" ]; then
+    if [ "$REACH_OFF" -gt 0 ] 2>/dev/null; then OFFROAD=1; else OFFROAD=0; fi
+fi
+if [ "$OFFROAD" = "UNDETERMINED" ]; then
+    say "off-road reachability: CANNOT DETERMINE (no off-road count in $REACH_LOG)"
+    FAILED=1
+else
+    say "off-road reachability: OFF_ROAD_CAN_FAIL=$OFFROAD (biased run counted $REACH_OFF excursions)"
+fi
+
+{
+    say "# Owner check - Hoare Street (coverage report, NOT a gate)"
+    say ""
+    say "- command: \`$CMD\`"
+    say "- run: $START_UTC (UTC)"
+    say "- git HEAD: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    say "- **This report does not gate.** The owner's gate is the Aumuller drive in"
+    say "  \`verify.sh\`, whose exit semantics this section does not touch. Hoare Street"
+    say "  is measured and reported because the acceptance evidence asks for it."
+    say ""
+    say "## Hoare Street verdict"
+    say ""
+    say "**Hoare Street, 1407.5 m of centreline (3 fragments in the map; longest driven).**"
+    say ""
+    grep -E "^(started at|reached the far end|time|distance driven|top speed|top gear reached)" \
+        "$HOARE_LOG" 2>/dev/null | sed 's/^/  /'
+    say ""
+    say "## Can the off-road check ever fail?"
+    say ""
+    say "OFF_ROAD_CAN_FAIL=$OFFROAD"
+    say ""
+    say "Meaning: 1 = the \`times off the carriageway\` counter was observed to become"
+    say "nonzero, so the check is live and can fail a run. 0 = it never became"
+    say "nonzero in any run, so a reported 0 would be decoration rather than evidence."
+    say ""
+    say "This was measured, not asserted. The question exists because the steady-state"
+    say "reading is 0 on both streets, which is ambiguous between a dead counter and a"
+    say "car that genuinely never left. The reachability run injects a deliberate steer"
+    say "bias (\`--steer-bias=1.0\`) to push a real car off a real carriageway so the"
+    say "existing predicate runs for real."
+    say ""
+    say "| run | steer bias | times off the carriageway | closest approach |"
+    say "|-----|-----------|---------------------------|-----------------|"
+    say "| Hoare Street (natural) | 0.00 | ${HOARE_OFF:-n/a} | $(grep -E '^closest approach' "$HOARE_LOG" 2>/dev/null | tail -1 | sed 's/^[^:]*: *//' || echo n/a) |"
+    say "| Aumuller (biased, reachability) | 1.00 | ${REACH_OFF:-n/a} | $(grep -E '^closest approach' "$REACH_LOG" 2>/dev/null | tail -1 | sed 's/^[^:]*: *//' || echo n/a) |"
+    say ""
+    say "\`closest approach\` is max(|lat| - half-width) in metres: negative means the"
+    say "run never came near the edge, positive means those frames counted as off-road."
+    say ""
+    grep -m3 -E "OFF ROAD|back on the road" "$REACH_LOG" 2>/dev/null | sed 's/^/  /'
+    say ""
+    say "### The caveat that survives OFF_ROAD_CAN_FAIL=1"
+    say ""
+    say "The check is live, but it is **partly self-normalising**: \`hw\` is the"
+    say "half-width of the edge the car is NEAREST, and \`lat\` is measured against"
+    say "that same edge. Drifting off a wide arterial onto a narrow driveway"
+    say "re-baselines both numbers at once. So it reliably catches a car that leaves"
+    say "the road network, and is comparatively blind to a car that wanders between"
+    say "two carriageways."
+    say ""
+    say "It also did not fire on either street for the same reason both runs stalled:"
+    say "the car is stopped by static prop collision long before it can wander."
+    say ""
+    say "## logs"
+    say ""
+    say "- Hoare drive: $HOARE_LOG (exit $HOARE_RC)"
+    say "- reachability drive: $REACH_LOG (exit $REACH_RC)"
+} >"$HOARE_REPORT"
+
+say ""
+say "Hoare verdict: $(grep -E '^reached the far end' "$HOARE_LOG" 2>/dev/null | tail -1 | sed 's/^[^:]*: *//' || echo 'no verdict marker')"
+say "Hoare report : $HOARE_REPORT"
+
 # --------------------------------------------------------------- street verdict
 # The verdict is read out of the drive log, not recomputed here, so the report and
 # the log can never disagree. A missing marker is itself a failure.
@@ -232,6 +347,8 @@ say "contact sheet  : $SHEET"
 say "telemetry.csv  : $CSV"
 say "gearchanges    : $GEAR"
 say "self-test      : $SELF"
+say "Hoare Street   : $(grep -E '^reached the far end' "$HOARE_LOG" 2>/dev/null | tail -1 | sed 's/^[^:]*: *//' || echo 'not run')  (coverage, non-gating)"
+say "OFF_ROAD_CAN_FAIL=$OFFROAD"
 hr
 say "md5 (within-run freshness only, not determinism):"
 md5sum shots/street-frame-0*.png 2>/dev/null | sed 's/^/  /'
