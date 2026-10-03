@@ -258,9 +258,9 @@ func _experiment_a_the_boot() -> void:
 		var off := Vector2(uv.x - cx, uv.y - cy).length()
 		var diag := sz.length()
 		on_screen = off < diag * 0.35
-		why = "unprojected to (%.0f, %.0f), frame centre is (%.0f, %.0f): %.1f%% of the" \
-			% [uv.x, uv.y, cx, cy, 100.0 * off / maxf(diag, 1.0)] \
-			+ "diagonal off centre (the limit is 35%)"
+		why = ("unprojected to (%.0f, %.0f), frame centre is (%.0f, %.0f): %.1f%% of "
+			+ "the diagonal off centre (the limit is 35%)") % [
+			uv.x, uv.y, cx, cy, 100.0 * off / maxf(diag, 1.0)]
 	_check("the road ahead is at the CENTRE of the frame, not in a corner", on_screen, why)
 
 

@@ -441,8 +441,13 @@ func _report(r: Dictionary) -> void:
 			n, float(e["first_s"]), float(e["last_s"]), int(e["stations"])])
 	print("")
 	var worst := float(r["worst"])
-	print("NARROWEST CLEAR CORRIDOR : %.2f m at s=%.1f m" % [
-		999.0 if worst == INF else worst, float(r["worst_s"])])
+	# worst_s is -1.0 when no station was worse than CAR_CLEAR, because the scan
+	# seeds `worst` with that threshold. Printing "at s=-1.0 m" turns a sentinel
+	# into a location, which is the same class of lie as a header that describes a
+	# format the rows do not emit.
+	var where := "at no station" if float(r["worst_s"]) < 0.0 else "at s=%.1f m" % float(r["worst_s"])
+	print("NARROWEST CLEAR CORRIDOR : %.2f m %s" % [
+		999.0 if worst == INF else worst, where])
 	if worst >= CAR_CLEAR:
 		print("VERDICT: DRIVABLE. Every station leaves at least %.1f m of lane, so the" % worst)
 		print("         street can be driven end to end without leaving the carriageway.")
@@ -491,8 +496,15 @@ func _lane_report(r: Dictionary) -> void:
 			best = off
 	print("")
 	if best_w >= CAR_HALF * 2.0:
-		print("BEST CONSTANT LINE: %+.1f m off the centreline, %.2f m of room at its" % [best, best_w])
-		print("worst station. A driver who holds that line can drive the street end to end.")
+		var span: Array = []
+		for row in rows:
+			if float(row[1]) >= CAR_HALF * 2.0:
+				span.append(float(row[0]))
+		print("CLEAR LINE BAND        : %+.1f .. %+.1f m off the centreline (all of it" % [
+			span[0], span[span.size() - 1]])
+		print("                         fits a whole %.2f m car at every one of the" % (CAR_HALF * 2.0))
+		print("                         %d stations on the street)" % int(r["stations"]))
+		print("BEST CONSTANT LINE      : %+.1f m, %.2f m of room at its worst station." % [best, best_w])
 		print("Report line: LANE=%+.1f LANE_WORST_M=%.2f" % [best, best_w])
 	else:
 		print("NO CONSTANT LINE: the best offset (%+.1f m) only ever has %.2f m of room." % [best, best_w])
