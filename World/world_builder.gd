@@ -248,16 +248,37 @@ func _terrain() -> void:
 	# four times the area does not quietly quadruple the triangle count and the
 	# collision mesh with it.
 	var step: float = maxf(16.0, s / 55.0)
+	# The road corridor has to come out level across whole terrain cells, not just
+	# at the corners nearest the road. This map's extent is ~3135 m, so `step` is
+	# 57 m, while `_terrain_height` flattened toward zero only within 26 m of a
+	# centreline - less than half a cell. A terrain quad is the linear
+	# interpolation of its four corners, so the corridor is only level where all
+	# four corners are, and a cell the road crosses still rose to a good fraction
+	# of the raw tilt (up to ~2 m) in between them - putting the tarmac, a flat
+	# plane at `LookDev.TARMAC_Y` = 0.015, *underneath* the ground it is supposed
+	# to sit on. Measured 2026-10-03 (tag vf-before / vf-after, six look-dev
+	# poses): 500 m back along the anchor street the road band was bare terrain -
+	# detail 0.79 and 0.04 against 4.69 on the `street` pose - and the camera at
+	# eye height stood on a sand-coloured field with the street 100 m away.
+	#
+	# So the flat core has to reach the FAR corner of any cell the road crosses,
+	# which is `step * 1.5` (85.5 m here), and the ease then runs out to 1.6x that
+	# so the level part does not end in a visible crease. Only `_terrain` knows
+	# how big the cell is, which is why the radius is passed in rather than
+	# defaulted here - and why the default keeps the old shape for
+	# `Tests/test_water.gd`.
+	var level_m: float = step * 1.5
+	var flat_m: float = level_m * 1.6
 	for gz in range(-int(s / step), int(s / step)):
 		for gx in range(-int(s / step), int(s / step)):
 			var x0 := float(gx) * step
 			var z0 := float(gz) * step
 			var x1 := x0 + step
 			var z1 := z0 + step
-			var h00 := _terrain_height(x0, z0)
-			var h10 := _terrain_height(x1, z0)
-			var h01 := _terrain_height(x0, z1)
-			var h11 := _terrain_height(x1, z1)
+			var h00 := _terrain_height(x0, z0, flat_m, level_m)
+			var h10 := _terrain_height(x1, z0, flat_m, level_m)
+			var h01 := _terrain_height(x0, z1, flat_m, level_m)
+			var h11 := _terrain_height(x1, z1, flat_m, level_m)
 			# Corners walked counter-clockwise seen from above, so _quad reads
 			# +Y as the outward normal. Walked the other way it reads -Y, which
 			# is the ground lit from underneath - black at any exposure.
@@ -311,7 +332,21 @@ func _terrain() -> void:
 
 ## Flat flood-prone plain with a shallow dish, a creek line to the west, and a
 ## gentle rise toward the hills. The creek is what stops it reading as a table.
-func _terrain_height(x: float, z: float) -> float:
+##
+## `road_flat_m` / `road_level_m` are the corridor half-width and its flat core.
+## With `road_level_m` at 0 (the default) this is bit-for-bit the original
+## quadratic ease, and it has to stay that way: `Tests/test_water.gd` samples this
+## function with two arguments to place the water plane against the ground, and
+## quietly re-shaping the default made that suite measure a different terrain
+## than the one the world builds (3 water failures on 2026-10-03, gap -0.219 m).
+##
+## `_terrain` passes a cell-sized core instead, because a terrain quad is the
+## linear interpolation of its four corners: the corridor is only flat where all
+## four corners are, so the core has to reach the far corner of any cell the road
+## crosses - `step * 1.5`, which is 85.5 m on this map. Below that the ground
+## rises above the tarmac plane at `LookDev.TARMAC_Y` and buries it.
+func _terrain_height(x: float, z: float, road_flat_m: float = 26.0,
+		road_level_m: float = 0.0) -> float:
 	var h := 0.0
 	# Broad, very gentle tilt: this suburb is flat but it is not level.
 	h += 1.4 * sin(x * 0.0016) * cos(z * 0.0019)
@@ -323,9 +358,16 @@ func _terrain_height(x: float, z: float) -> float:
 		h -= 2.4 * (1.0 - d / 46.0)
 	# Keep the roads themselves level: flatten toward 0 near any road.
 	var near: Dictionary = graph.nearest_road(Vector3(x, 0, z))
-	if float(near["lateral"]) < 26.0:
-		var w: float = 1.0 - float(near["lateral"]) / 26.0
-		h = lerpf(h, 0.0, w * w)
+	var lateral := float(near["lateral"])
+	if lateral < road_flat_m:
+		if road_level_m <= 0.0:
+			var w: float = 1.0 - lateral / road_flat_m
+			h = lerpf(h, 0.0, w * w)
+		else:
+			# Level outright through the core, then ease back to the raw height.
+			var e: float = clampf((lateral - road_level_m)
+				/ maxf(road_flat_m - road_level_m, 0.001), 0.0, 1.0)
+			h = lerpf(0.0, h, e * e)
 	return h
 
 
