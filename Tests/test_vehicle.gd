@@ -85,6 +85,7 @@ func run(t: TestHarness) -> void:
 	await _untuned_cars_are_untouched(t)
 	await _traction_limits(t)
 	await _stability(t)
+	await _per_axle_slip(t)
 	await _spec_numbers(t)
 	await _exterior(t)
 	await _car_models(t)
@@ -206,10 +207,20 @@ func _car_models(t: TestHarness) -> void:
 		return
 	t.ok(model.get_child_count() > 0, "the model is instanced, not an empty node")
 
-	# The scans have their wheels baked in. Leaving the procedural wheels on as
-	# well would draw two sets, one inside the other.
-	t.eq(vis.wheel_nodes().size(), 0,
-		"a modelled car drops its procedural wheels rather than doubling them up")
+	# A modelled car's wheels are lifted back out of the scan and put on the
+	# steer/spin rig - see CarVisual._rig_scanned_wheels - so this used to be
+	# zero, and it being zero was the bug: the wheels were baked into the body
+	# and never turned. Four rigs, and none of them a pair of cylinders sitting
+	# inside the ones the scan already drew.
+	t.eq(vis.wheel_nodes().size(), 4,
+		"a modelled car rigs four wheels instead of leaving them baked in")
+	for w in vis.wheel_nodes():
+		var spin := w["spin"] as Node3D
+		var cylinders := 0
+		for child in spin.get_children():
+			if child is MeshInstance3D and (child as MeshInstance3D).mesh is CylinderMesh:
+				cylinders += 1
+		t.eq(cylinders, 0, "%s %s uses scanned wheel geometry, not a cylinder" % [vis.spec.id, String(w["name"])])
 
 	# The car's origin sits at hub height, so a model fitted to stand on y=0 has
 	# to be lifted by a tyre radius or it sinks into the road.
@@ -586,6 +597,28 @@ func _stability(t: TestHarness) -> void:
 ## The helper below is that grid, so the numbers quoted in these tests are
 ## directly comparable to the ones the tuning came from.
 
+## Mean |slip angle| in degrees for one axle, averaged over its two wheels.
+## `slip_angle_body` is a single number for the whole car and is computed from
+## `linear_velocity` alone (car_body.gd:271), so it physically cannot say WHICH
+## END of the car is sliding. Every balance question - is the front out-pulling
+## the rear, does the handbrake break the rear away, does countersteer unload the
+## front - needs the axles separated, and that is what this reads.
+static func _axle_slip_deg(car: CarBody, front: bool) -> float:
+	var l: Dictionary = car.get_wheel("FL" if front else "RL")
+	var r: Dictionary = car.get_wheel("FR" if front else "RR")
+	return 0.5 * (absf(rad_to_deg(float(l["slip_angle"])))
+		+ absf(rad_to_deg(float(r["slip_angle"]))))
+
+
+## Worst single wheel on an axle, not the mean, so one wheel spinning up while
+## its partner still bites shows up instead of averaging away.
+static func _axle_slip_max(car: CarBody, front: bool) -> float:
+	var l: Dictionary = car.get_wheel("FL" if front else "RL")
+	var r: Dictionary = car.get_wheel("FR" if front else "RR")
+	return maxf(absf(rad_to_deg(float(l["slip_angle"]))),
+		absf(rad_to_deg(float(r["slip_angle"]))))
+
+
 ## Injects a slide the way a handbrake flick would, then holds the given
 ## countersteer and throttle and measures what the car settles into.
 ## Returns mean |body slip| in degrees over the last second, the speed, and the
@@ -593,6 +626,11 @@ func _stability(t: TestHarness) -> void:
 ## flicked to. A car being held sideways stays there; the snap-through that used
 ## to make this one undriveable ping-ponged across neutral and spent half its
 ## time on the wrong side.
+##
+## t72: also returns the per-axle split (mean and worst wheel, front and rear)
+## over the same window, plus the mean body slip. The first three keys are
+## unchanged and byte-identical to what they returned before, so every drift
+## assertion above keeps measuring what it was written to measure.
 static func _hold_slide(t: TestHarness, car: CarBody, lock: float, throttle: float) -> Dictionary:
 	car.throttle = 0.0
 	car.steer = 0.0
@@ -608,6 +646,10 @@ static func _hold_slide(t: TestHarness, car: CarBody, lock: float, throttle: flo
 	var n := 0
 	var on_side := 0
 	var side := 0.0
+	var front_sum := 0.0
+	var rear_sum := 0.0
+	var front_max := 0.0
+	var rear_max := 0.0
 	for i in 480:
 		await t.ticks(1)
 		car.auto_shift()
@@ -618,12 +660,18 @@ static func _hold_slide(t: TestHarness, car: CarBody, lock: float, throttle: flo
 			sum += rad_to_deg(absf(car.slip_angle_body))
 			kph += car.speed_kph
 			n += 1
+			front_sum += _axle_slip_deg(car, true)
+			rear_sum += _axle_slip_deg(car, false)
+			front_max = maxf(front_max, _axle_slip_max(car, true))
+			rear_max = maxf(rear_max, _axle_slip_max(car, false))
 			if side == 0.0 and not is_zero_approx(slip):
 				side = signf(slip)
 			elif side != 0.0 and signf(slip) == side:
 				on_side += 1
 	n = maxi(n, 1)
-	return {"angle": sum / n, "kph": kph / n, "on_side": float(on_side) / n}
+	return {"angle": sum / n, "kph": kph / n, "on_side": float(on_side) / n,
+		"front": front_sum / n, "rear": rear_sum / n,
+		"front_max": front_max, "rear_max": rear_max}
 
 
 ## The headline: a rear-drive car that is tuned to drift can be *held* sideways.
@@ -707,3 +755,166 @@ func _untuned_cars_are_untouched(t: TestHarness) -> void:
 		else:
 			t.eq(spec.diff_lock, 0.0, "%s keeps an open diff" % car_id)
 			t.eq(spec.rear_slide_tail, TyreModel.LATERAL_TAIL, "%s keeps the stock rear tyre" % car_id)
+
+
+## t72: per-axle slip visibility. t70's table reported one number per car and
+## called it "griped up (understeer)" on all seven tail pairs, which cannot be
+## argued with because nothing in it was ever asserted. `slip_angle_body` is
+## computed from `linear_velocity` alone (car_body.gd:271), so it is a statement
+## about the centre-of-mass velocity vector and says NOTHING about which axle is
+## sliding. Front-versus-rear is the whole balance question, and this makes it
+## readable.
+##
+## Every assertion below is an instrument-integrity property, not a taste
+## judgement: each one collapses if the tyre telemetry stops being per-wheel, if
+## the chassis-rotation term `v + w x r` is dropped from the slip velocity again
+## (the regression documented on _steering_response), or if the reported body slip
+## stops matching the formula it claims to implement. None of them say which car
+## SHOULD drift - that is a tuning decision, and _untuned_cars_are_untouched
+## still guards it.
+func _per_axle_slip(t: TestHarness) -> void:
+	# 1. Straight line, both axles at rest. If slip telemetry were stale, stuck at
+	#    a constant, or wired to the wrong axle, a car rolling dead straight would
+	#    still report something. This is the "is the instrument plugged in" floor.
+	var world := make_world(t)
+	var car := spawn(world, "kairo_s13")
+	await t.ticks(6)
+	_place_at_speed(car, 80.0)
+	await t.ticks(90)
+	var straight_front := _axle_slip_deg(car, true)
+	var straight_rear := _axle_slip_deg(car, false)
+	t.between(straight_front, 0.0, 1.0,
+		"straight line, front axle reports no slip (%.2f deg)" % straight_front)
+	t.between(straight_rear, 0.0, 1.0,
+		"straight line, rear axle reports no slip (%.2f deg)" % straight_rear)
+
+	# 2. The two axles must DISAGREE under cornering. This is the load-bearing
+	#    one. The slip velocities are `v + w x r`; strip the `w x r` term and
+	#    every wheel reports the same number as the centre of mass, both axles
+	#    collapse onto each other, and the gap goes to zero. It measured 0.00 deg
+	#    that way. Direction is deliberately NOT asserted - which axle is deeper
+	#    depends on lock and throttle, which is tuning.
+	_place_at_speed(car, 80.0)
+	await t.ticks(60)
+	car.throttle = 0.35
+	car.steer = 0.35
+	var front_sum := 0.0
+	var rear_sum := 0.0
+	var body_sum := 0.0
+	var n := 0
+	for i in 180:
+		await t.ticks(1)
+		if i < 120:
+			continue
+		front_sum += _axle_slip_deg(car, true)
+		rear_sum += _axle_slip_deg(car, false)
+		body_sum += absf(rad_to_deg(car.slip_angle_body))
+		n += 1
+	n = maxi(n, 1)
+	var front_deg := front_sum / n
+	var rear_deg := rear_sum / n
+	var body_deg := body_sum / n
+	var gap := absf(front_deg - rear_deg)
+	t.gt(gap, 0.20,
+		"front and rear axles read different slip in the same corner, so the yaw term reaches the tyres (front %.2f, rear %.2f, gap %.2f deg)"
+			% [front_deg, rear_deg, gap])
+
+	# 3. Body slip is not just the tyres echoing it back. car_body.gd:271 derives
+	#    it from `linear_velocity` alone; the wheels derive theirs from
+	#    `v + w x r`. While the car is rotating the two MUST part company, and
+	#    that difference is the entire reason per-wheel telemetry is needed.
+	var moved := maxf(absf(front_deg - body_deg), absf(rear_deg - body_deg))
+	t.gt(moved, 0.10,
+		"wheel slip is not an echo of body slip while the car yaws (body %.2f vs wheels %.2f/%.2f deg)"
+			% [body_deg, front_deg, rear_deg])
+
+	# 4. slip_angle_body honours the formula it is documented to implement. Read
+	#    the number straight off the car and recompute it from linear_velocity and
+	#    the body basis independently; if the formula is ever "fixed" to fold yaw
+	#    in, or to use a stale axis, this fails instead of every drift number in
+	#    the suite silently shifting.
+	var recomputed := atan2(
+		car.linear_velocity.dot(car.global_transform.basis.x.normalized()),
+		maxf(absf(car.linear_velocity.dot(car.global_transform.basis.z.normalized())), 0.8))
+	t.near(rad_to_deg(car.slip_angle_body), rad_to_deg(recomputed), 0.01,
+		"slip_angle_body matches its own documented formula from linear_velocity (%.3f deg reported, %.3f deg recomputed)"
+			% [rad_to_deg(car.slip_angle_body), rad_to_deg(recomputed)])
+	await t.drop(world)
+
+	# 5. The handbrake is the one input that must break a SPECIFIC axle away, and
+	#    t72 measured which channel it actually shows up in. It is NOT the slip
+	#    ANGLE: with the rear locked at omega 0.0 and slip_ratio -57.3 deg, a full
+	#    handbrake at 0.8 lock produced front slip angle 25-59 deg against rear
+	#    11-54 deg - the FRONT reads deeper, because the car is yawing at over
+	#    2 rad/s and the locked rear's signature is longitudinal, not lateral.
+	#    Asserting "handbrake raises rear slip angle above front" was false on
+	#    this build and would have been a taste claim dressed as a measurement.
+	#    The per-axle separation that IS real and physical: the rear stops
+	#    turning while the front keeps rolling, and only the rear's slip ratio
+	#    saturates. Both collapse if the two axles share one number.
+	var hb_world := make_world(t)
+	var hb := spawn(hb_world, "kairo_s13")
+	await t.ticks(6)
+	_place_at_speed(hb, 70.0)
+	await t.ticks(60)
+	hb.throttle = 0.2
+	hb.steer = 0.8
+	hb.handbrake = 1.0
+	var hb_front_om := 0.0
+	var hb_rear_om := 0.0
+	var hb_front_sr := 0.0
+	var hb_rear_sr := 0.0
+	for i in 60:
+		await t.ticks(1)
+		if i < 20:
+			continue
+		var hfl: Dictionary = hb.get_wheel("FL")
+		var hrl: Dictionary = hb.get_wheel("RL")
+		hb_front_om = maxf(hb_front_om, absf(float(hfl["omega"])))
+		hb_rear_om = maxf(hb_rear_om, absf(float(hrl["omega"])))
+		hb_front_sr = maxf(hb_front_sr, absf(rad_to_deg(float(hfl["slip_ratio"]))))
+		hb_rear_sr = maxf(hb_rear_sr, absf(rad_to_deg(float(hrl["slip_ratio"]))))
+	t.gt(hb_front_om, 1.0,
+		"the handbrake leaves the front axle rolling (|omega| %.1f rad/s)" % hb_front_om)
+	t.between(hb_rear_om, 0.0, 1.0,
+		"while the rear axle is locked (|omega| %.2f rad/s)" % hb_rear_om)
+	t.gt(hb_rear_sr, hb_front_sr,
+		"and only the rear's slip ratio saturates - the handbrake's signature is longitudinal (rear %.1f deg, front %.1f deg)"
+			% [hb_rear_sr, hb_front_sr])
+	await t.drop(hb_world)
+
+	# 6. The table t70 could not assert: the same held slide, per car, with the
+	#    front and rear split out. Printed, not asserted - it is the instrument
+	#    for deciding which cars get the drift tuning, and that decision belongs
+	#    to whoever owns the handling, not to this test. What IS asserted is that
+	#    the instrument produces finite, separated numbers for every car in the
+	#    roster, so this table can never again be a wall of identical green.
+	var rows: Array[String] = []
+	print("\n  -- t72 per-axle slip, held slide at 55% lock / 60% throttle --")
+	print("     %-14s %7s %7s %7s %7s %8s  %s"
+		% ["car", "body", "front", "rear", "gap", "kph", "verdict"])
+	var instrumented := 0
+	for car_id in CarDB.ALL_IDS:
+		var w2 := make_world(t)
+		var c := spawn(w2, car_id)
+		await t.ticks(6)
+		var r := await _hold_slide(t, c, 0.55, 0.60)
+		var f: float = r["front"]
+		var rr: float = r["rear"]
+		var g := absf(f - rr)
+		var verdict := "grips up" if g < 0.20 else ("rear leads" if rr > f else "front leads")
+		rows.append("     %-14s %7.2f %7.2f %7.2f %7.2f %8.1f  %s"
+			% [car_id, r["angle"], f, rr, g, r["kph"], verdict])
+		# Instrument integrity, per car: the numbers must be finite and the two
+		# axles must not be the same number, or this row proves nothing.
+		t.ok(is_finite(f) and is_finite(rr),
+			"%s per-axle slip is a real number (front %.2f, rear %.2f deg)" % [car_id, f, rr])
+		t.gt(g, 0.05,
+			"%s front and rear slip are separately readable in a held slide (%.2f vs %.2f deg)" % [car_id, f, rr])
+		instrumented += 1
+		await t.drop(w2)
+	t.eq(instrumented, CarDB.ALL_IDS.size(),
+		"the per-axle table covered every car in the roster")
+	for row in rows:
+		print(row)
+	print("  -- end t72 per-axle table --\n")

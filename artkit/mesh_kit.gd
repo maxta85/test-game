@@ -322,6 +322,101 @@ static func fan(radius: float, ribs: int, spread: float, droop: float,
 	return commit(st)
 
 
+## ## Why a frond is not a blade
+##
+## `blade()` is a straight tapering strip. That is right for a grass blade and a
+## fern pinna and wrong for a palm frond, because a frond's *outline* is the
+## entire read. A frond leaves the crown on a narrow petiole, is widest at about
+## a third of its length, arcs over, and finishes in a fine point. Built from
+## `blade()`'s straight spine with a monotonic taper, that outline is a wedge -
+## and a ring of wedges is exactly the "floating green rhombus grid" the owner
+## photographed on 2026-10-02, where eleven fronds closed into a solid faceted
+## disc that read as a toy prop.
+##
+## Three things change here and all three are free or cheaper than what they
+## replace:
+##
+## 1. The spine is a real curve. A quadratic bezier through (base, apex, tip),
+##    sampled at `segments` spans, so the arch is smooth instead of three
+##    straight chords.
+## 2. The width profile is lanceolate (see `frond_half_width`), widest at t=0.33
+##    instead of at the base. Narrow at the base is what leaves sky between
+##    fronds, which is what makes a canopy read as leaves rather than as a lid.
+## 3. The blade *rolls* along its length. A perfectly planar blade presents one
+##    flat facet to a streetlight; rolling it means each span catches the key at
+##    a different angle, which is most of the difference between "lit" and
+##    "shaped".
+##
+## ## One quad per span, not two
+##
+## Every foliage material is `CULL_DISABLED` (see `materials.gd`), so a span
+## needs no back face to be visible from behind. The span this replaced emitted
+## the front quad and then `quad_flip`ped *the same four vertices in the same
+## order* - a bit-identical duplicate, which z-fights and costs 50% of the
+## crown's triangles for nothing. Dropping it is what pays for the extra
+## segments: 7 spans single-sided costs 14 triangles against 12 for 3 spans
+## doubled, so the crown gains resolution for two triangles per frond.
+static func frond(st: SurfaceTool, base: Vector3, horiz: Vector3, reach: float,
+		lift: float, tip_drop: float, half_width: float, segments: int,
+		roll: float = 0.0) -> void:
+	if segments < 1 or reach <= 0.0:
+		return
+	# Quadratic bezier: base, an apex up-and-out, then the tip. The tangents at
+	# both ends are horizontal-ish and down-ish respectively, which is what makes
+	# a palm frond leave the crown rising and end hanging.
+	var apex := base + horiz * (reach * 0.46) + Vector3.UP * (lift * 0.58)
+	var tip := base + horiz * reach - Vector3.UP * tip_drop
+	var axis := horiz.cross(Vector3.UP).normalized()
+	if axis.length_squared() < 0.001:
+		axis = Vector3.RIGHT
+	var prev_l := Vector3.ZERO
+	var prev_r := Vector3.ZERO
+	var have_prev := false
+	for i in segments + 1:
+		var t := float(i) / float(segments)
+		var centre := _bezier2(base, apex, tip, t)
+		# Roll the width axis about the spine tangent. Rolling about `horiz`
+		# rather than the true tangent is a small approximation and costs no
+		# extra maths; at these segment counts it is not visible.
+		var w := frond_half_width(t, half_width)
+		var dir := axis.rotated(horiz, roll * (t - 0.5) * 2.0)
+		var l := centre - dir * w
+		var r := centre + dir * w
+		if have_prev:
+			quad(st, prev_l, l, r, prev_r)
+		prev_l = l
+		prev_r = r
+		have_prev = true
+
+
+## The lanceolate half-width of a frond at `t` in 0..1, as a multiple of
+## `half_width` (which is the *maximum*, not the base width).
+##
+## The three factors, and why each exists:
+##   - `sin(pi * t^0.55)` is zero at the base and at the tip and peaks where
+##     `t^0.55 = 0.5`, i.e. t = 0.327. That is the widest point, and it is the
+##     whole difference between a leaf and a dart.
+##   - the `root` term fills the first 18% of the length in from the petiole, so
+##     the base is a narrow stalk rather than a degenerate zero-width vertex.
+##   - the `tip` term runs the last third down to a fine point, so the frond ends
+##     in a tip instead of a chopped-off edge.
+##
+## 0.03 of the maximum is the floor. Without it the first and last spans collapse
+## to zero-area triangles, which still rasterise and still cost a triangle.
+static func frond_half_width(t: float, half_width: float) -> float:
+	var u := clampf(t, 0.0, 1.0)
+	var blade := pow(maxf(sin(PI * pow(u, 0.55)), 0.0), 0.75)
+	var root := 0.34 + 0.66 * clampf(u / 0.18, 0.0, 1.0)
+	var tip := 1.0 - 0.94 * pow(clampf((u - 0.66) / 0.34, 0.0, 1.0), 1.5)
+	return half_width * maxf(blade * root * tip, 0.03)
+
+
+static func _bezier2(a: Vector3, b: Vector3, c: Vector3, t: float) -> Vector3:
+	var u := 1.0 - t
+	return a * (u * u) + b * (2.0 * u * t) + c * (t * t)
+
+
+
 ## A thin square strand swept along a polyline. The overhead wires: 3000 spans as
 ## one batched mesh, which is why this exists instead of drawing lines.
 static func strand(points: PackedVector3Array, radius: float) -> ArrayMesh:

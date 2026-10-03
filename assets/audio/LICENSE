@@ -1,0 +1,90 @@
+# Audio assets - licence and attribution
+
+Every file under `assets/audio/` is **CC0 1.0 Universal (public domain dedication)**.
+No attribution is legally required. This file records it anyway, because a licence
+nobody can trace back to a source is a licence nobody can check, and because the
+rpm -> layer table in `Audio/engine_samples.gd` is derived from measurements of
+these exact files rather than from their filenames.
+
+The synthesiser in `Audio/engine_synth.gd` is original game content and is the
+fallback when any of the files below is missing; it is not covered by this file.
+
+---
+
+## Files
+
+| File in this tree | Original file | Source | Author | Licence |
+|---|---|---|---|---|
+| `engine/idle.wav` | `loop_0.wav` | [OpenGameArt - racing car engine sound loops](https://opengameart.org/content/racing-car-engine-sound-loops) | domasx2 | CC0 1.0 |
+| `engine/cruise.wav` | `loop_1_0.wav` | same submission | domasx2 | CC0 1.0 |
+| `engine/pull.wav` | `loop_3_0.wav` | same submission | domasx2 | CC0 1.0 |
+| `engine/redline.wav` | `loop_5_0.wav` | same submission | domasx2 | CC0 1.0 |
+| `turbo/blowoff.ogg` | `sfx100v2_air_03.ogg` | [OpenGameArt - 100 CC0 SFX 2](https://opengameart.org/content/100-cc0-sfx-2) | rubberduck | CC0 1.0 |
+
+CC0 1.0 text: <https://creativecommons.org/publicdomain/zero/1.0/legalcode>
+
+## What the source author said
+
+domasx2, on the racing-loop submission:
+
+> These are engine sound loops i made for www.banditracer.eu. Made by cutting out
+> a piece from http://www.pdsounds.org/sounds/start_up_car_with_seat_belt_warning_beep
+> (public domain), editing to loop semi-smoothly and adjusting pitch. Difference
+> between the files is pitch only.
+
+That last sentence is the reason the four engine loops here are renamed by *role*
+rather than kept by source name, and it is also a limitation of this pack rather
+than a property of the engine voice: **all four are the same recording at four
+pitches.** Crossfading between them therefore produces a small change of character
+but no new timbre, because there is no second recording to crossfade to. See
+"measured properties" below and the note in `Audio/engine_samples.gd`.
+
+rubberduck, on the 100 CC0 SFX 2 pack:
+
+> another pack with 100 CC0 sfx ... Included are: air flowing, door, various
+> footstep, glass, hit, item, loops (ambient, machine, construction site,
+> highway / street, flowing water), metal / metal hit, misc, stones, switch,
+> thunder and wood / wood hit - sounds
+
+`sfx100v2_air_03.ogg` is the pack's "air flowing" sound, 0.285 s. It is used here
+as the wastegate voice on a throttle lift. It is a stand-in, not a recording of a
+specific turbo, and the file is named for what it is *used for* rather than for
+what it was recorded as.
+
+The pack ships three air sounds. Measured in Godot, they are 2.638 s, 1.105 s and
+0.285 s; the shortest is the one used, because a lift is a burst and the other two
+are a sustained hiss - a turbo that is bleeding off boost for two and a half
+seconds sounds like a puncture. `Vehicles/car_db.gd` puts `turbo_blowoff_time` at
+0.14..0.20 s across the roster, and 0.285 s is the closest of the three to that.
+
+## Measured properties (not from the filenames)
+
+Measured 2026-10-02 on the files as they sit in this tree, from the PCM itself:
+
+| File | Format | Length | Peak | RMS | Fundamental | Loop seam |
+|---|---|---|---|---|---|---|
+| `engine/idle.wav` | 16-bit mono 44.1 kHz WAV | 0.864 s | 0.718 | 0.397 | **43.1 Hz** | 0.012 |
+| `engine/cruise.wav` | 16-bit mono 44.1 kHz WAV | 0.667 s | 0.709 | 0.393 | **60.3 Hz** | 0.012 |
+| `engine/pull.wav` | 16-bit mono 44.1 kHz WAV | 0.616 s | 0.703 | 0.395 | **70.8 Hz** | 0.007 |
+| `engine/redline.wav` | 16-bit mono 44.1 kHz WAV | 0.630 s | 0.709 | 0.395 | **76.7 Hz** | 0.023 |
+
+*Fundamental* is the peak of an autocorrelation over the middle third of the file,
+searched 40..400 Hz. *Loop seam* is `|first sample - last sample|` as a fraction of
+the file's peak amplitude; anything under about 0.03 is a seam you cannot hear when
+the loop is played back to back, which is why these four are used as loops.
+
+**Spectral content:** 99% of the energy of both ends of the ladder is below 689 Hz
+(16 x 43.1 Hz), and 90% is below 516 Hz. That is the number that licenses the
+`pitch_scale` clamp in `Audio/engine_samples.gd`: playing this material at up to
+4x keeps all of it below 2.8 kHz, so nothing aliases and the whole rev range can
+be covered by pitch-shifting one recording rather than by a bank.
+
+**SHA-256**, so a future edit to any of these is visible in a diff:
+
+```
+0bc6bf7e1ad33d347ed805b4f2b55d1f79e38f892006f98acbe85a3177ff77a2  engine/cruise.wav
+69d74b106509037ce547429e4c3f9ae906b0fffe88d0bb8b3b5a8b0cfc239048  engine/idle.wav
+015aee5cd2dec394b28ff0994360c780cfbe29c3cddfb16dba8df81b4a68eea2  engine/pull.wav
+e0c65476764931770e46308dec744a196d8ecf996f8c7675f125805d28609b34  engine/redline.wav
+df32019155c3a8b5fc77244126261695f762ba7018a4fc4c6d9ad201cedeb985  turbo/blowoff.ogg
+```
