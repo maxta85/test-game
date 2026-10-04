@@ -68,6 +68,11 @@ var _telemetry_tick := 0
 func _ready() -> void:
 	if spec == null:
 		spec = CarSpec.new()
+	# Whatever this car was configured to do about sleeping, remembered so
+	# `_stay_awake_if_driven` can hand it back. Read HERE rather than assumed: a car
+	# built with sleep already off must not have it turned back on when the driver
+	# lets go.
+	_can_sleep_configured = can_sleep
 	# Cars collide with the world and with each other. Ground contact itself comes
 	# from the suspension rays, not this shape - the shape's job is car-to-car
 	# contact AND, critically, giving the solver a real inertia tensor. Without a
@@ -256,11 +261,69 @@ func _axle_share(front: bool) -> float:
 func _physics_process(delta: float) -> void:
 	if delta <= 0.0:
 		return
+	_stay_awake_if_driven()
 	_update_telemetry()
 	_update_suspension()
 	_update_engine(delta)
 	_update_tyres(delta)
 	_apply_aero()
+
+
+# ------------------------------------------------------------------ sleeping
+## A car that is being driven must not be allowed to fall asleep.
+##
+## THE DEFECT, MEASURED. `can_sleep` is Godot's default `true` and a body that stops
+## moving is put to sleep. A sleeping `RigidBody3D` ignores applied force entirely,
+## so throttle, brake and steer all become no-ops with nothing on screen to say so.
+## Measured on an AI car: `is_sleeping() == true` with four wheels down and 3409 N
+## on the rear tyres, while the rear wheels were turning at 61 rad/s with a slip
+## ratio of 15.37 and 2.9-3.3 kN of longitudinal force. The force was real and the
+## car did not move, and the only reason was that nobody had woken the body.
+##
+## WHY IT LIVES HERE AND NOT IN THE DRIVER. The command surface is these four fields,
+## and BOTH drivers write them - `PlayerController` from the input map and `AIRacer`
+## directly. Putting this in `AIRacer` would cover only the AI and leave a player
+## able to fall asleep mid-corner with the wheel turned. Putting it in `Game/main.gd`
+## would mean polling every car from outside and would miss every car a test harness
+## creates for itself. The car knows when it is being commanded; that is its business.
+##
+## WHY IT IS SCOPED RATHER THAN BLANKET. `can_sleep = false` on every car forever
+## would cost the broadphase the sleeping optimisation for cars that are parked, and
+## would mean a settled car never rests. So the property is toggled on the COMMAND, and
+## the configured value is restored when the command goes away - a car at a light with
+## the driver's foot down stays awake because it is being driven, and falls asleep when
+## it is left alone, which is what "scoped to a driven car" has to mean for the
+## sleeping optimisation to still be worth anything.
+##
+## What was waking driven cars before, since a fix that makes the symptom vanish
+## without that answered is a fix nobody can trust: nothing. A car under power
+## accelerates, motion keeps the sleep timer at zero, and it never sleeps. The case
+## that bit is a car that is commanded and stationary - throttle against the brakes at
+## a light, or full lock with the wheels spinning against something - which is exactly
+## when the timer runs out.
+
+func _stay_awake_if_driven() -> void:
+	var driven: bool = throttle > 0.0 or brake > 0.0 or absf(steer) > 0.0 or handbrake > 0.0
+	if driven == _driven_last:
+		return
+	_driven_last = driven
+	if driven:
+		can_sleep = false
+		sleeping = false
+	else:
+		can_sleep = _can_sleep_configured
+
+
+## Whether the car is being commanded right now. A driver's feet and hands, as far as
+## the physics is concerned.
+var _driven_last := false
+## The `can_sleep` value this car was built with, so toggling the property for a
+## driven car can be undone rather than guessed at.
+var _can_sleep_configured := true
+
+
+func is_being_driven() -> bool:
+	return throttle > 0.0 or brake > 0.0 or absf(steer) > 0.0 or handbrake > 0.0
 
 
 # ----------------------------------------------------------------- telemetry
