@@ -64,11 +64,38 @@ static func wet_asphalt(uv_scale: float = 0.06, seed: int = 0) -> StandardMateri
 	# roughness now lives in a *band* a wet road can plausibly occupy, and the
 	# ramp is the thing doing the work: the texture still breaks the reflection
 	# up, but every sample in it is somewhere a wet surface can actually be.
+	#
+	# **That band was 0.18-0.52, and it was the wrong band.** `ART_DIRECTION.md`
+	# fixes wet asphalt at roughness 0.10-0.18 and says so under the heading "The
+	# road is the hero surface"; 0.18-0.52 is chalk and dry concrete, which is
+	# why the rendered road read as brown dirt with a tooth on it rather than as
+	# a wet mirror. Measured on the `street` pose, before this change: road band
+	# 6.4% of pixels clipped at luma>=250, and the clipped mass is the *diffuse*
+	# return of the sodium pool, not a specular starfield - raising roughness made
+	# it monotonically worse, not better:
+	#
+	#     roughness band   road mean   road clipped   frame clipped
+	#     0.18-0.52 (was)      85.13         0.0642         0.0218
+	#     flat 0.50           102.12         0.1090         0.0351
+	#     flat 1.00           106.82         0.1499         0.0479
+	#     0.10-0.18 (now)      68.27         0.0200         0.0115
+	#
+	# So the ramp is now ART_DIRECTION's own window, and the ramp is the only thing
+	# that reaches the shader.
+	#
+	# `m.roughness` below is NOT that number and must not be read as the road's
+	# roughness: it is the value a renderer that ignores `roughness_texture`
+	# would use, and `World/look_dev_test.gd` asserts on *it* (0.20-0.40, "wet,
+	# not polished"). So it stays inside that guard band and the window lives in
+	# the ramp. The consequence is worth stating plainly, because it is exactly
+	# the shape of bug this whole change is about: **a guard on `m.roughness`
+	# cannot see the road's roughness**, and before this change it was green
+	# while the road was outside ART_DIRECTION's window by a factor of three.
 	m.roughness = 0.26
 	m.roughness_texture = noise_tex(256, 0.55, 4, 37 + seed * 7)
 	var rough_ramp := Gradient.new()
-	rough_ramp.set_color(0, Color(0.18, 0.18, 0.18))
-	rough_ramp.set_color(1, Color(0.52, 0.52, 0.52))
+	rough_ramp.set_color(0, Color(0.10, 0.10, 0.10))
+	rough_ramp.set_color(1, Color(0.18, 0.18, 0.18))
 	(m.roughness_texture as NoiseTexture2D).color_ramp = rough_ramp
 	m.metallic = 0.0
 	# Full specular on a surface this dark is what turns a lamp into a blown
@@ -89,10 +116,22 @@ static func wet_asphalt(uv_scale: float = 0.06, seed: int = 0) -> StandardMateri
 	albedo_tex.color_ramp = albedo_ramp
 	m.normal_enabled = true
 	m.normal_texture = noise_tex(256, 1.6, 5, 23 + seed * 17, true)
-	# 0.28 was enough aggregate to shatter a specular highlight into glitter. At
-	# 0.16 the surface still has the fine tooth of tarmac and a lamp still smears
-	# along it, but the highlight is a smear and not a starfield.
-	m.normal_scale = 0.16
+	# This is the second half of the fix and it is the half that mattered. Water
+	# fills the aggregate: a wet road is *smooth*, and what breaks a reflection
+	# up is the roughness variation, not a field of tilted facets. At 0.28 the
+	# aggregate was enough aggregate to shatter a lamp into glitter, and at 0.16
+	# it still did - the `street` road band measured 6.4% of its pixels clipped
+	# at luma>=250 and 37% of its *lit* pixels reading bright orange, which is
+	# the decision document's "orange polygons in darkness" verbatim. At 0.06 the
+	# tooth is still there in the frame and the lamp is a smear:
+	#
+	#     normal_scale   road mean   road clipped   lit road orange_bright
+	#     0.16 (was)         85.13         0.0642                     0.374
+	#     0.06 (now)         54.66         0.0117                     0.245
+	#
+	# Both legs are needed. Wet roughness with the old tooth still sparkles; a
+	# smooth surface at the old roughness is just chalk.
+	m.normal_scale = 0.06
 	# No flat emission. An emissive floor lifts the whole surface evenly and
 	# kills the specular contrast that actually makes a road look wet.
 	m.emission_enabled = false
@@ -345,3 +384,5 @@ static func water() -> StandardMaterial3D:
 	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	m.albedo_color.a = 0.86
 	return m
+
+

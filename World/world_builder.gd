@@ -37,6 +37,28 @@ const PALM_SPACING := 17.0
 ## Grid resolution of the mapped-footprint coverage test. Coarse on purpose: it
 ## answers plot-sized questions, and a fine grid costs 16x the marks for nothing.
 const OSM_CELL := 16.0
+
+## The terrain carve. The ground under a street is held at CARVE_Y, which is
+## below LookDev.TARMAC_Y (0.015) and below the -0.06 the terrain mesh is
+## dropped by, so the tarmac is what a wheel or a raycast finds first. Deep
+## enough to survive a coarse grid interpolating across it, shallow enough that
+## the 6 cm step where the carve meets natural ground is not a visible lip.
+const CARVE_Y := -0.14
+
+## How far past the back of the footpath the carve still holds, so the verge
+## between the path and the first building is ground rather than a trench.
+const CARVE_MARGIN := 3.0
+
+## Width of the smooth blend from CARVE_Y back to natural ground. Squared-and-
+## doubled (`u*u*(3-2u)`) so the join has no slope discontinuity - a linear
+## blend leaves a visible crease running the length of every street.
+const CARVE_BLEND := 18.0
+
+## Subdivisions applied to a grid cell that could contain part of a street
+## corridor. The base grid is ~27.5 m and the widest carriageway is 14 m, so a
+## cell can be wider than the thing being carved and a vertex-only carve is a
+## coin flip. 4 puts a sample every ~7 m, which resolves a 12 m corridor.
+const CARVE_SUBDIV := 4
 ## How far back from the back of the footpath a frontage building stands. Wide
 ## enough that the carport does not hang over the verge.
 const FRONTAGE_OFFSET := 3.0
@@ -263,54 +285,38 @@ func _terrain_extent() -> float:
 	return maxf(800.0, reach + 120.0)
 
 
+## The terrain grid's cell size. The cell count is held roughly constant as the
+## extent grows, so covering four times the area does not quietly quadruple the
+## triangle count and the collision mesh with it. Split out so the subgrade suite
+## can ask the builder for the real step instead of re-deriving it and drifting.
+func _terrain_step() -> float:
+	return maxf(16.0, _terrain_extent() / 55.0)
+
+
 func _terrain() -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var s := _terrain_extent()
-	# The cell count is held roughly constant as the extent grows, so covering
-	# four times the area does not quietly quadruple the triangle count and the
-	# collision mesh with it.
-	var step: float = maxf(16.0, s / 55.0)
-	# The road corridor has to come out level across whole terrain cells, not just
-	# at the corners nearest the road. This map's extent is ~3135 m, so `step` is
-	# 57 m, while `_terrain_height` flattened toward zero only within 26 m of a
-	# centreline - less than half a cell. A terrain quad is the linear
-	# interpolation of its four corners, so the corridor is only level where all
-	# four corners are, and a cell the road crosses still rose to a good fraction
-	# of the raw tilt (up to ~2 m) in between them - putting the tarmac, a flat
-	# plane at `LookDev.TARMAC_Y` = 0.015, *underneath* the ground it is supposed
-	# to sit on. Measured 2026-10-03 (tag vf-before / vf-after, six look-dev
-	# poses): 500 m back along the anchor street the road band was bare terrain -
-	# detail 0.79 and 0.04 against 4.69 on the `street` pose - and the camera at
-	# eye height stood on a sand-coloured field with the street 100 m away.
-	#
-	# So the flat core has to reach the FAR corner of any cell the road crosses,
-	# which is `step * 1.5` (85.5 m here), and the ease then runs out to 1.6x that
-	# so the level part does not end in a visible crease. Only `_terrain` knows
-	# how big the cell is, which is why the radius is passed in rather than
-	# defaulted here - and why the default keeps the old shape for
-	# `Tests/test_water.gd`.
-	var level_m: float = step * 1.5
-	var flat_m: float = level_m * 1.6
-	for gz in range(-int(s / step), int(s / step)):
-		for gx in range(-int(s / step), int(s / step)):
+	var step := _terrain_step()
+	var n := int(s / step)
+	for gz in range(-n, n):
+		for gx in range(-n, n):
 			var x0 := float(gx) * step
 			var z0 := float(gz) * step
-			var x1 := x0 + step
-			var z1 := z0 + step
-			var h00 := _terrain_height(x0, z0, flat_m, level_m)
-			var h10 := _terrain_height(x1, z0, flat_m, level_m)
-			var h01 := _terrain_height(x0, z1, flat_m, level_m)
-			var h11 := _terrain_height(x1, z1, flat_m, level_m)
-			# Corners walked counter-clockwise seen from above, so _quad reads
-			# +Y as the outward normal. Walked the other way it reads -Y, which
-			# is the ground lit from underneath - black at any exposure.
-			var p00 := Vector3(x0, h00, z0)
-			var p10 := Vector3(x1, h10, z0)
-			var p01 := Vector3(x0, h01, z1)
-			var p11 := Vector3(x1, h11, z1)
-			_quad(st, p00, p01, p11, p10)
-			_quad(st, p00, p11, p10, p01)
+			# A cell that could contain any part of a street corridor gets
+			# subdivided, so the carve is resolved by a sample rather than
+			# interpolated across. Everywhere else stays one quad - the far
+			# field is most of the area and none of it is paved.
+			var sub := _cell_subdivisions(Vector2((x0 + x0 + step) * 0.5, (z0 + z0 + step) * 0.5), step)
+			var fine := step / float(sub)
+			for iz in range(sub):
+				for ix in range(sub):
+					var cx0 := x0 + float(ix) * fine
+					var cz0 := z0 + float(iz) * fine
+					var cx1 := cx0 + fine
+					var cz1 := cz0 + fine
+					_terrain_quad(st, cx0, cz0, cx1, cz1)
+
 	var mesh: ArrayMesh = st.commit()
 	var mi := MeshInstance3D.new()
 	mi.name = "Terrain"
@@ -353,23 +359,39 @@ func _terrain() -> void:
 	print("[World] terrain collision: %d triangles" % int(cs.shape.get_faces().size() / 3))
 
 
+## One cell of terrain, as two triangles from four sampled corners.
+##
+## Corners walked counter-clockwise seen from above, so `_quad` reads +Y as the
+## outward normal. Walked the other way it reads -Y, which is the ground lit from
+## underneath - black at any exposure.
+func _terrain_quad(st: SurfaceTool, x0: float, z0: float, x1: float, z1: float) -> void:
+	var p00 := Vector3(x0, _terrain_height(x0, z0), z0)
+	var p10 := Vector3(x1, _terrain_height(x1, z0), z0)
+	var p01 := Vector3(x0, _terrain_height(x0, z1), z1)
+	var p11 := Vector3(x1, _terrain_height(x1, z1), z1)
+	_quad(st, p00, p01, p11, p10)
+	_quad(st, p00, p11, p10, p01)
+
+
+## How finely to divide one base-grid cell. 1 unless the cell's footprint could
+## reach into a street corridor, in which case CARVE_SUBDIV.
+##
+## The half-diagonal is in the reach test because what matters is not the cell
+## CENTRE's distance to the road but whether any corner of the cell is inside
+## the corridor - a road clipping the corner of an otherwise distant cell still
+## buries the carriageway.
+func _cell_subdivisions(centre: Vector2, step: float) -> int:
+	var near := graph.nearest_road(Vector3(centre.x, 0.0, centre.y))
+	var reach := _carve_half_width(near) + CARVE_BLEND + step * 0.70711
+	if float(near["lateral"]) >= reach:
+		return 1
+	return CARVE_SUBDIV
+
+
 ## Flat flood-prone plain with a shallow dish, a creek line to the west, and a
 ## gentle rise toward the hills. The creek is what stops it reading as a table.
 ##
-## `road_flat_m` / `road_level_m` are the corridor half-width and its flat core.
-## With `road_level_m` at 0 (the default) this is bit-for-bit the original
-## quadratic ease, and it has to stay that way: `Tests/test_water.gd` samples this
-## function with two arguments to place the water plane against the ground, and
-## quietly re-shaping the default made that suite measure a different terrain
-## than the one the world builds (3 water failures on 2026-10-03, gap -0.219 m).
-##
-## `_terrain` passes a cell-sized core instead, because a terrain quad is the
-## linear interpolation of its four corners: the corridor is only flat where all
-## four corners are, so the core has to reach the far corner of any cell the road
-## crosses - `step * 1.5`, which is 85.5 m on this map. Below that the ground
-## rises above the tarmac plane at `LookDev.TARMAC_Y` and buries it.
-func _terrain_height(x: float, z: float, road_flat_m: float = 26.0,
-		road_level_m: float = 0.0) -> float:
+func _terrain_height(x: float, z: float) -> float:
 	var h := 0.0
 	# Broad, very gentle tilt: this suburb is flat but it is not level.
 	h += 1.4 * sin(x * 0.0016) * cos(z * 0.0019)
@@ -379,19 +401,55 @@ func _terrain_height(x: float, z: float, road_flat_m: float = 26.0,
 	var d := absf(x - creek_x)
 	if d < 46.0:
 		h -= 2.4 * (1.0 - d / 46.0)
-	# Keep the roads themselves level: flatten toward 0 near any road.
+	# Keep the roads themselves clear of the ground. This used to be a flatten
+	# toward 0.0 over 26 m, which is wrong twice over, and both halves of the
+	# wrongness showed up as the terrain burying the street:
+	#
+	# 1. Flattening *toward* 0.0 leaves the ground at 0.0, which is 15 mm BELOW
+	#    the tarmac (LookDev.TARMAC_Y), so the road wins - but only just, and only
+	#    exactly on the centreline where the flatten is complete. A grid vertex
+	#    20 m out is barely flattened at all (w*w = 0.053), so it keeps its full
+	#    +/-2.0 m of undulation.
+	# 2. It only ever moved the SURFACE at a sampled vertex. The grid is
+	#    `step` = 27.5 m across and the widest carriageway here is 14 m, so the
+	#    quad spanning a road interpolates between a flattened vertex and an
+	#    unflattened one and ramps straight back up over the carriageway. There
+	#    was no guarantee any vertex landed inside the road at all.
+	#
+	# So: a hard carve to a level safely under the tarmac, across the full
+	# lateral width the builder actually paves, then a smooth blend back out to
+	# natural ground so the carve does not leave a trench wall at its edge.
+	# 3. Assigning the carve height outright also FILLS. Where the natural
+	#    ground is already below the road - the creek depression is -2.4 m, the
+	#    broad tilt bottoms out near -1.3 m - forcing h = CARVE_Y built a 1.3 m
+	#    earthwork and put the ground through the creek's water surface, which is
+	#    the only thing the `water` suite holds over this function. A carve
+	#    removes material; it never creates it. So both branches take the minimum
+	#    of the natural ground and the ramp: high ground gets cut down to
+	#    CARVE_Y, hollows are left exactly as they were. That also bounds the
+	#    height the blend ever has to cross at 2.0 m, which keeps the surface
+	#    gentle enough that a water triangle's chord cannot dip under it.
 	var near: Dictionary = graph.nearest_road(Vector3(x, 0, z))
 	var lateral := float(near["lateral"])
-	if lateral < road_flat_m:
-		if road_level_m <= 0.0:
-			var w: float = 1.0 - lateral / road_flat_m
-			h = lerpf(h, 0.0, w * w)
-		else:
-			# Level outright through the core, then ease back to the raw height.
-			var e: float = clampf((lateral - road_level_m)
-				/ maxf(road_flat_m - road_level_m, 0.001), 0.0, 1.0)
-			h = lerpf(0.0, h, e * e)
+	var corridor := _carve_half_width(near)
+	if lateral < corridor:
+		h = minf(h, CARVE_Y)
+	elif lateral < corridor + CARVE_BLEND:
+		var u: float = (lateral - corridor) / CARVE_BLEND
+		h = minf(h, lerpf(CARVE_Y, h, u * u * (3.0 - 2.0 * u)))
 	return h
+
+
+## How far out from the centreline the terrain is held clear, on the widest road
+## this map has. Derived from the same lateral budget the builder paves with
+## (`LookDev.channel_to_back_of_footpath`) plus a margin for the verge, so adding
+## a section to the street cannot silently leave it buried.
+func _carve_half_width(near: Dictionary) -> float:
+	var eid := int(near["edge"])
+	if eid < 0 or eid >= graph.edges.size():
+		return 0.0
+	var w: float = float(graph.edges[eid]["width"])
+	return w * 0.5 + LookDev.channel_to_back_of_footpath() + CARVE_MARGIN
 
 
 ## One quad, two triangles, from four corners walked in order around the patch.
@@ -1643,14 +1701,23 @@ func _too_close_to_road(p: Vector2, min_offset: float = -1.0) -> bool:
 func _vegetation() -> void:
 	var trunk_mesh := _palm_trunk_mesh(0.34, 1.0)
 	var frond_mesh := _frond_mesh()
-	var bush_mesh := _icosphere(rng.randf_range(1.4, 2.6), 0)
 
 	_materials["palm_trunk"] = MatLib.palm_bark()
 	_materials["palm_frond"] = MatLib.foliage(Color(0.10, 0.24, 0.09))
-	_materials["bush"] = MatLib.foliage(Color(0.075, 0.17, 0.06))
 
 	var palms := 0
 	var bushes := 0
+	var big_trees := 0
+	# Verge scrub and the street paperbarks go through `ArtKitBatch`, not
+	# `_add`, for two reasons that were both measured in the before frames. The
+	# old scrub was a single `_icosphere(randf_range(1.4, 2.6))` shared by all
+	# 1234 bushes, and under sodium light a 2.4 m green dome reads as a brown
+	# tent - it was in every frame. And the kerb had nothing above 13 m on it, so
+	# a 4-lane divided arterial read as a corridor of equal-height boxes. The
+	# batched path costs 3 draw calls for the scrub (one per variant) instead of
+	# one, and gets real silhouettes plus a 15-20 m canopy for free.
+	var scrub := ArtKitBatch.new()
+	var canopy := ArtKitBatch.new()
 	for e in graph.edges:
 		var a: Vector2 = graph.node_pos(int(e["a"]))
 		var b: Vector2 = graph.node_pos(int(e["b"]))
@@ -1690,26 +1757,54 @@ func _vegetation() -> void:
 						.scaled_local(Vector3(1.0, 1.0, 1.0)), "palm_frond")
 			palms += 1
 
-		# Low scrub along the verges.
-		for i in int(length / 22.0):
-			var mid2: Vector2 = a.lerp(b, (float(i) + rng.randf() * 0.8) / float(maxi(int(length / 22.0), 1)))
+		# Low scrub along the verges. Variant comes from the edge id, not the
+		# placement index, so it is stable per run - the memo is keyed on
+		# (name, variant), and the batch needs the same resource every time.
+		var scrub_n := maxi(int(length / 22.0), 1)
+		for i in scrub_n:
+			var mid2: Vector2 = a.lerp(b, (float(i) + rng.randf() * 0.8) / float(scrub_n))
 			var p2: Vector2 = mid2 + nrm * (float(graph.edges[e["id"]]["width"]) * 0.5 + 3.5) * (1.0 if rng.randf() < 0.5 else -1.0)
-			_add("bushes", bush_mesh,
-				Transform3D(Basis.from_euler(Vector3(0, rng.randf() * TAU, 0)), Vector3(p2.x, 0.4, p2.y)),
-				"bush")
+			scrub.add_array(ArtKitProps.variant("bush_scrub", posmod(i, ArtKitProps.VARIANTS)),
+				Transform3D(Basis.from_euler(Vector3(0, rng.randf() * TAU, 0)), Vector3(p2.x, 0.4, p2.y)))
 			bushes += 1
-	print("[World] %d palms, %d bushes" % [palms, bushes])
+
+		# Street paperbarks. Offset is half the carriageway plus 2.2-3.4 m, and
+		# the crown reaches 2.6-4.1 m out, so on a 14 m road the canopy edge
+		# lands ~1.5 m inside the far kerb line. That overhang is the point: it
+		# is what a 4-lane divided arterial under paperbarks actually looks like,
+		# and it is what the reference frames show.
+		var tree_n := maxi(int(length / 34.0), 1)
+		for i in tree_n:
+			var mid3: Vector2 = a.lerp(b, (float(i) + 0.35 + rng.randf() * 0.3) / float(tree_n))
+			var side3: float = 1.0 if (i % 2) == 0 else -1.0
+			var p3: Vector2 = mid3 + nrm * (float(graph.edges[e["id"]]["width"]) * 0.5 + rng.randf_range(2.2, 3.4)) * side3
+			if _blocked_by_junction(Vector3(p3.x, 0, p3.y)):
+				continue
+			canopy.add_array(ArtKitProps.variant("tree_paperbark", posmod(i + int(e["id"]), ArtKitProps.VARIANTS)),
+				ArtKitBatch.place(Vector3(p3.x, 0.0, p3.y), rng.randf() * TAU))
+			big_trees += 1
+
+	if scrub.instances() > 0:
+		scrub.build(self)
+	if canopy.instances() > 0:
+		canopy.build(self)
+	print("[World] %d palms, %d bushes, %d paperbarks" % [palms, bushes, big_trees])
 
 
 func _streetlights() -> void:
 	## Sodium lamps. Warm orange, spaced the way a suburban council actually
 	## spaces them - alternating sides, at the kerb, every ~34 m.
 	var pole := _tapered_cylinder_mesh(0.09, 0.13, 1.0, 6)
-	var arm := _box_mesh(Vector3(1, 1, 1), Vector3.ZERO)
+	var arm := _tapered_cylinder_mesh(0.11, 0.085, 1.0, 6)
+	var shade := _box_mesh(Vector3(1, 1, 1), Vector3.ZERO)
 	var lamp := _box_mesh(Vector3(1, 1, 1), Vector3.ZERO)
 	_materials["pole"] = MatLib.wall(Color(0.16, 0.17, 0.17))
 	if not _materials.has("lamp_glow"):
-		_materials["lamp_glow"] = MatLib.emissive(MatLib.SODIUM, 1.15)
+		# 1.15 blew the lens to pure white, which is a second, smaller version of
+		# the same defect the energy cut fixed on the road: a clipped highlight
+		# with no detail left in it. 0.85 keeps the lens clearly the brightest
+		# thing in frame while still having a visible surface.
+		_materials["lamp_glow"] = MatLib.emissive(MatLib.SODIUM, 0.85)
 
 	var count := 0
 	for ei in graph.edges.size():
@@ -1757,8 +1852,27 @@ func _streetlights() -> void:
 			# so it is something you clip a mirror on rather than drive through.
 			_solid_post(_solid_prop, p, 0.15, KERB_HEIGHT + h * 0.5)
 			var tip: Vector3 = base + Vector3(nrm.x * -1.4 * side, h, nrm.y * -1.4 * side)
-			_add("poles", arm, Transform3D(Basis.from_euler(Vector3(0, atan2(-dir.x, -dir.y), 0)), tip + Vector3(0, -0.2, 0)).scaled_local(Vector3(0.12, 0.12, 1.5)), "pole")
-			_add("lamps", lamp, Transform3D(Basis(), tip).scaled_local(Vector3(0.42, 0.16, 0.75)), "lamp_glow")
+			# Cobra double-arm luminaire: a tapered arm out to the head, then a
+			# DARK shade overhanging a glowing lens tucked underneath it.
+			#
+			# It was a box at `tip` and an arm box, which is why the head read as a
+			# floating orange rectangle in every delivered frame - there was no
+			# silhouette above the glow, so at night the only thing to see was the
+			# lit face. The shade is in the dark `pole` material and overhangs the
+			# lens by 0.12 m on the road side and 0.05 m at the back, so the head
+			# has an outline and the lens reads as *under* something.
+			var arm_yaw := atan2(-dir.x, -dir.y)
+			_add("poles", arm, Transform3D(Basis.from_euler(Vector3(0, arm_yaw, 0)),
+					tip + Vector3(0, -0.24, 0)).scaled_local(Vector3(0.11, 0.11, 1.5)),
+				"pole")
+			# Tilted 9 degrees so the lens face looks down at the road rather than
+			# out at the camera - a level cobra head is a bright disc to a driver.
+			var shade_tilt := Transform3D(Basis.from_euler(Vector3(0.16, arm_yaw, 0)),
+					tip + Vector3(0, 0.10, 0)).scaled_local(Vector3(0.58, 0.09, 1.06))
+			_add("poles", shade, shade_tilt, "pole")
+			_add("lamps", lamp, Transform3D(Basis.from_euler(Vector3(0.16, arm_yaw, 0)),
+					tip + Vector3(0, 0.015, 0)).scaled_local(Vector3(0.40, 0.07, 0.84)),
+				"lamp_glow")
 
 			var l := OmniLight3D.new()
 			l.light_color = MatLib.SODIUM
@@ -1774,7 +1888,48 @@ func _streetlights() -> void:
 			l.shadow_enabled = false   # hundreds of shadow-casting lights would melt a CPU raster
 			add_child(l)
 			count += 1
+	_junction_fill()
 	print("[World] %d streetlights" % count)
+
+
+## One light over every junction box, with no standard under it.
+##
+## The lamp loop above deliberately stands every standard clear of the junction
+## box (a pole in the box is a pole a car hits), and nothing was put back in its
+## place. Measured on the `junction` pose that left the busiest 20 m of the map
+## with road mean 7.875/255 and 72.4% of the band under the dark threshold -
+## already outside the 0.75 limit before this task touched a lamp, and *worse*
+## at every lower global energy tried (see the sweep table on
+## `Look.STREETLIGHT_ENERGY`). No single energy value fixes the arterial and the
+## junction at once because they need opposite moves.
+##
+## This is the fix that does not cost anything elsewhere: mounted at
+## `JUNCTION_FILL_HEIGHT`, throwing `JUNCTION_FILL_RANGE`, so it dies before it
+## can lift a mid-block pool. It adds no pole, so it cannot put a standard in a
+## traffic lane - the full measured clearance is in the report.
+func _junction_fill() -> void:
+	var count := 0
+	# `for n in graph.nodes` yields the node Dictionary itself, NOT an index -
+	# `graph.nodes[n]` with a Dictionary key is how the first attempt of this
+	# function died. Same shape as `_blocked_by_junction`.
+	for node_v in graph.nodes:
+		var node: Dictionary = node_v
+		if int(node["edges"].size()) < 3:
+			continue
+		var p: Vector2 = node["pos"]
+		var l := OmniLight3D.new()
+		l.light_color = Look.JUNCTION_FILL_COLOUR
+		l.light_energy = Look.JUNCTION_FILL_ENERGY
+		l.omni_range = Look.JUNCTION_FILL_RANGE
+		# Gentler falloff than a sodium standard on purpose: this is meant to be
+		# an even lift over the whole box, not a pool with a hot centre.
+		l.omni_attenuation = 1.1
+		l.light_volumetric_fog_energy = 0.0
+		l.position = Vector3(p.x, Look.JUNCTION_FILL_HEIGHT, p.y)
+		l.shadow_enabled = false
+		add_child(l)
+		count += 1
+	print("[World] %d junction fills" % count)
 
 
 func _power_lines() -> void:
@@ -1864,17 +2019,24 @@ func _car_meet() -> void:
 	car_meet.position = OSMLayout.car_meet_position()
 	add_child(car_meet)
 
+	# Kept on a short leash on purpose. The lot sits `car_meet_position()` =
+	# 70 m back from the arterial, so a 45 m flood still reached the carriageway:
+	# measured on the `street` pose it put a pure-white vertical down the middle
+	# of frame (the solid centre line lit head-on off `wet_asphalt`) and was
+	# responsible for most of the road band's clipping. A car-park flood lights
+	# its own lot, not the main road it is reached from - 24 m and 5.0 put the
+	# light back on the cars and off the arterial.
 	var m := OmniLight3D.new()
 	m.light_color = MatLib.MERCURY
-	m.light_energy = 9.0
-	m.omni_range = 45.0
+	m.light_energy = 5.0
+	m.omni_range = 24.0
 	m.position = Vector3(0, 9, 0)
 	car_meet.add_child(m)
 
 	var m2 := OmniLight3D.new()
 	m2.light_color = MatLib.SODIUM
-	m2.light_energy = 5.0
-	m2.omni_range = 32.0
+	m2.light_energy = 4.0
+	m2.omni_range = 20.0
 	m2.position = Vector3(9, 5, 6)
 	car_meet.add_child(m2)
 
