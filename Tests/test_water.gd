@@ -1,5 +1,5 @@
 extends RefCounted
-## The Barron is in the world: 5 mapped water bodies, on the real terrain.
+## The Barron is in the world: the mapped water bodies, on the real terrain.
 ## Run with: ./test.sh water
 ##
 ## The failure this exists to catch is water on a carriageway. Every other number
@@ -16,14 +16,70 @@ extends RefCounted
 ##
 ## Set the ground, not a constant: `ground` is the same Callable the world
 ## builder passes in, so a change to the terrain moves this test with it.
+##
+## ---------------------------------------------------------------------------
+## WHAT IS ASSERTED ABOUT CLEARANCE, AND WHY IT IS NOT "the map is clean"
+## ---------------------------------------------------------------------------
+## t180 attributed all seven failures here to one commit, `bc7efef` ("stop RDP
+## collapsing road centrelines into straight chords"), and it was right about the
+## cause and wrong about which of the two things had to move. The map did not
+## get worse. What changed is that this suite could finally SEE the road.
+##
+## Before bc7efef a corridor was a straight chord between its endpoints - the
+## measured median was 2 points per corridor across 247 corridors - so the old
+## assertions were satisfied by construction. A chord cannot pass closer to the
+## water than the straight line it replaced, and cannot find a road that bends
+## under a ring it no longer follows. On the true centrelines one mapped ring
+## really is inside a carriageway. Measured here, by this suite's own index and
+## by the production solver, agreeing to 0.0000 m:
+##
+##   ring 18504432  14112.5 m2  tarmac -0.2648  kerb -0.7648   NOT CLEAR -> dropped
+##   ring 18504432   7185.7 m2  tarmac +2.2133  kerb +1.7133   clear     -> built
+##   ring 1137583098  255.5 m2  no road edge in the ring's bbox          clear -> built
+##   ring 1300217516   32.6 m2  tarmac +29.2762 kerb +28.7762   clear     -> built
+##   ring 1300217520   87.0 m2  tarmac +51.1643 kerb +50.6643   clear     -> built
+##
+## That is not a defect in this system, because `WaterSurface._build()` states
+## what it does about it, and the statement is the design:
+##
+##   "Water on the carriageway is a disagreement between two layers of the same
+##    extraction, not a thing to clip away quietly. It goes in the report and out
+##    of the world."
+##
+## and `WaterClearance.report()` returns `clear = swallowed == 0 and
+## d >= hw + KERB_SETBACK` for exactly that decision. So the guarantee this suite
+## owes the player is NOT "no mapped ring is ever near a road". It is:
+##
+##   1. the builder DROPS exactly the rings that are not clear, and keeps every
+##      ring that is - checked here against an index this suite built itself;
+##   2. what reaches the world is therefore clear of the tarmac AND of the kerb
+##      - checked on the BUILT mesh, which is the thing a car can hit;
+##   3. every ring that IS kept keeps its kerb margin - so the drop rule cannot
+##      quietly become "drop everything near a road" and still pass.
+##
+## A suite that asserted `overlaps == 0` and `built == read` was asserting a
+## property of the MAP, in a file whose stated job is to test the SYSTEM. Those
+## two numbers were 0 and 5 only because the clearance index was blind. Every
+## count downstream of them - triangles, draw calls, materials, covered area -
+## was then a hardcoded copy of "all five were built", so one invisible ring took
+## seven assertions with it. The counts are now derived from the KEPT set, which
+## is what they were always a proxy for.
 
 ## Grid step for the independent clearance index. It has to exceed the widest
-## half width (9.0 m) so a 3x3 neighbourhood cannot miss a carriageway.
+## half width (7.0 m) so a 3x3 neighbourhood cannot miss a carriageway.
 const CELL := 60.0
 ## Sampling step across a water triangle, in metres, for the poke-through check.
 const PROBE := 1.5
 ## WorldBuilder draws the terrain mesh at its own height minus this.
 const TERRAIN_DROP := 0.06
+## How close a built vertex may sit to a source ring and still be "built from
+## that ring". Ear clipping only ever emits ring vertices, so this is slack, not
+## a tolerance that hides a displaced surface.
+const RING_SLACK := 0.01
+## Step of the sampled clearance walk, in metres. It bounds how wrong the sampled
+## side of the cross-check can be about a distance, so it is also the tolerance
+## the sampled margin is allowed to differ from the exact one by.
+const SAMPLE_STEP := 2.0
 
 var _graph: RoadGraph
 var _wb: WorldBuilder
@@ -32,6 +88,12 @@ var _node: Node3D
 var _plan: Dictionary = {}
 var _segs: Array = []
 var _grid: Dictionary = {}
+## Measured here, asserted against the builder's plan in `_surface()`.
+var _clear_rings: Array = []
+var _not_clear := 0
+var _kept_area := 0.0
+var _kerb_margin := INF
+var _kerb_road := ""
 
 
 func run(t: TestHarness) -> void:
@@ -130,6 +192,11 @@ func _index() -> void:
 				_grid[key].append(id)
 
 
+## The nearest road edge to `p`, searched by SAMPLING: `d` is the SQUARED
+## distance (`WaterClearance.pt_seg_d2` returns d2) and `hw` is that road's half
+## width in metres. Every caller has to sqrt() `d` before comparing it against a
+## length. It used to not, which is how a 2.74 m clearance passed as a 7.0 m one
+## for the life of the suite - see `_built_clearance()`.
 func _nearest(p: Vector2) -> Dictionary:
 	var best := {"d": INF, "hw": 0.0, "name": ""}
 	for cx in range(floori((p.x - CELL) / CELL), floori((p.x + CELL) / CELL) + 1):
@@ -155,6 +222,9 @@ func _inside(p: Vector2, ring: PackedVector2Array) -> bool:
 
 
 ## The overlap measurement, on the source rings, independently of the builder.
+##
+## This establishes the set the builder is supposed to act on, and says nothing
+## about whether that set is empty. `_surface()` is where the two are compared.
 func _carriageway(t: TestHarness) -> void:
 	_graph = RoadGraph.new()
 	_graph.build(OSMLayout.corridors())
@@ -162,10 +232,21 @@ func _carriageway(t: TestHarness) -> void:
 
 	t.gt(_segs.size(), 300, "the clearance index is against the real network (%d edges)" % _segs.size())
 
+	# The production index, built once, only so the two independent methods can be
+	# compared below. Every decision this function records is the SAMPLED one.
+	var roads := WaterClearance.road_index(_graph)
+
 	var tightest := INF
+	var tightest_hw := 0.0
 	var tightest_name := ""
-	var overlaps := 0
+	var exact_tightest := INF
 	var swallowed := 0
+	var disagree := 0
+	_clear_rings = []
+	_not_clear = 0
+	_kept_area = 0.0
+	_kerb_margin = INF
+	_kerb_road = ""
 	for b in OSMWater.bodies():
 		var ring: PackedVector2Array = b["ring"]
 		# Sampled, not solved: deliberately a different method to
@@ -173,7 +254,7 @@ func _carriageway(t: TestHarness) -> void:
 		var body_tightest := INF
 		var body_road := ""
 		var body_hw := 0.0
-		for p in _sample_ring(ring, 2.0):
+		for p in _sample_ring(ring, SAMPLE_STEP):
 			var n := _nearest(p)
 			if float(n["d"]) < body_tightest:
 				body_tightest = float(n["d"])
@@ -183,19 +264,64 @@ func _carriageway(t: TestHarness) -> void:
 		body_tightest = sqrt(body_tightest)
 		if body_tightest < tightest:
 			tightest = body_tightest
+			tightest_hw = body_hw
 			tightest_name = body_road
-		if body_tightest < body_hw:
-			overlaps += 1
+		var ex: Dictionary = WaterClearance.report(ring, roads)
+		if float(ex["tarmac"]) < exact_tightest:
+			exact_tightest = float(ex["tarmac"])
+
+		# The rule, applied to this suite's own measurement: a ring survives only
+		# if it clears its nearest road by the kerb setback. WaterClearance says so
+		# in code, so the two have to agree on the DECISION and not only on the
+		# distance - a sampled index that cleared a ring the exact solver rejected
+		# would make the builder look wrong for a reason that is not the builder.
+		var sampled_clear: bool = body_tightest - body_hw - WaterClearance.KERB_SETBACK >= 0.0
+		if sampled_clear != bool(ex["clear"]):
+			disagree += 1
+		if sampled_clear:
+			_clear_rings.append(ring)
+			_kept_area += float(b["area"])
+			var km := body_tightest - body_hw - WaterClearance.KERB_SETBACK
+			if km < _kerb_margin:
+				_kerb_margin = km
+				_kerb_road = body_road
+		else:
+			_not_clear += 1
+
 		for j in _segs.size():
 			var s: Dictionary = _segs[j]
 			if _inside((s["a"] + s["b"]) * 0.5, ring):
 				swallowed += 1
 
-	t.eq(overlaps, 0, "no water polygon reaches inside a carriageway (%d of 5)" % OSMWater.bodies().size())
+	# The suite's whole premise is two implementations of one question, so the
+	# first thing they owe each other is agreement about which rings are bad.
+	t.eq(disagree, 0,
+		"the sampled index and the exact solver agree on every ring (%d disagreements)" % disagree)
 	t.eq(swallowed, 0, "no road is swallowed whole by a water polygon (%d)" % swallowed)
-	t.gt(tightest - 7.0, 0.0,
-		"tightest gap to a centreline is %.2f m, which clears a 14 m arterial's tarmac" % tightest)
+	# ...and agreement about the NUMBER, which is the part a broken index cannot
+	# fake by declining to count. `disagree == 0` is only as good as the counter
+	# behind it, so the tightest margin each method found is compared directly:
+	# the two may differ by at most the sampling step, because that is the worst
+	# a 2 m walk along a ring can be wrong about a distance. Measured on this map
+	# the tightest tarmac margin is -0.2648 m both ways, and the widest
+	# per-ring disagreement is 1.4044 m (Mulgrave Road, 56.7599 sampled against
+	# 58.1643 exact) - inside the bound, but not by a margin worth trusting blind.
+	var sampled_tarmac := tightest - tightest_hw
+	t.between(sampled_tarmac, exact_tightest - SAMPLE_STEP, exact_tightest + SAMPLE_STEP,
+		"the sampled index puts the tightest tarmac margin within the sampling step of the exact solver"
+			+ " (%+.4f m sampled on %s vs %+.4f m exact, step %.1f m)"
+			% [sampled_tarmac, tightest_name, exact_tightest, SAMPLE_STEP])
+	# NOT `tightest > 7.0`. One constant standing in for every road's width is
+	# what let this suite stay green through a whole map revision it could not
+	# see. What has to hold is the rule the builder applies: a ring is kept only
+	# if it clears its OWN road by the kerb setback, so every kept ring has to
+	# show that margin - which is what makes the counts in `_surface()` correct.
+	t.gt(_kerb_margin, 0.0,
+		"every ring that survives the drop rule keeps its kerb clear (%+.2f m on %s)"
+			% [_kerb_margin, _kerb_road])
 	print("      tightest water-to-centreline: %.2f m on %s" % [tightest, tightest_name])
+	print("      %d ring(s) are not clear and must be dropped, %d must be built"
+		% [_not_clear, _clear_rings.size()])
 
 
 func _sample_ring(ring: PackedVector2Array, step: float) -> Array:
@@ -218,9 +344,41 @@ func _surface(t: TestHarness) -> void:
 	_plan = _node.plan
 
 	t.eq(int(_plan["read"]), 5, "all 5 mapped water bodies reached the builder")
-	t.eq(int(_plan["built"]), 5, "and 5 were surfaced (%d dropped for the carriageway)" % int(_plan["dropped"]))
-	t.gt(int(_plan["faces"]), 100, "the surfaces are real geometry (%d triangles)" % int(_plan["faces"]))
-	t.eq(int(_plan["nodes"]), 5, "one draw call per water body (%d)" % int(_plan["nodes"]))
+
+	# ---- THE DROP RULE, which is the invariant, and the only way these counts
+	# can be checked without hardcoding them. `WaterSurface._build()` drops a row
+	# whose ring is not clear and keeps the rest; `_carriageway()` measured that
+	# set from outside, with its own index. If the builder kept a ring that is on
+	# the tarmac, or dropped one that is not, this is where it shows.
+	t.eq(int(_plan["dropped"]), _not_clear,
+		"the builder dropped exactly the rings that are not clear (%d)" % _not_clear)
+	t.eq(int(_plan["built"]), _clear_rings.size(),
+		"and surfaced every ring that is (%d)" % _clear_rings.size())
+	t.eq(int(_plan["built"]) + int(_plan["dropped"]), int(_plan["read"]),
+		"built and dropped account for every ring that was read")
+
+	# Real geometry, per body, and not a count of bodies. The old `faces > 100`
+	# was a proxy for "not a placeholder" that went stale the moment a body was
+	# dropped, and it says nothing about a builder that emits one triangle per
+	# body and calls it done. What is checkable without knowing how many bodies
+	# there are: every body that was built carries geometry, and every vertex of
+	# that geometry is a vertex of a ring that was kept - so the surfaces cannot
+	# be a rectangle, an empty mesh, or a body built from the wrong ring.
+	var stubs := 0
+	for mesh in _meshes():
+		if mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size() < 3:
+			stubs += 1
+	t.eq(stubs, 0, "every surfaced body carries geometry, none is a stub (%d bodies, %d triangles)"
+		% [_meshes().size(), int(_plan["faces"])])
+
+	var off_ring := 0
+	for mesh in _meshes():
+		var verts: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+		for v in verts:
+			if not _on_a_kept_ring(Vector2(v.x, v.z)):
+				off_ring += 1
+	t.eq(off_ring, 0,
+		"every built vertex comes from a ring that was kept (%d off-ring vertices)" % off_ring)
 
 	# Every triangle of every surface has to face the sky. Ear clipping hands
 	# back the ring's own winding, and a surface facing down is a hole in the
@@ -241,12 +399,11 @@ func _surface(t: TestHarness) -> void:
 	t.eq(up, faces, "no water triangle is inverted, all %d face up" % faces)
 	t.eq(faces, int(_plan["faces"]), "the mesh holds every triangle the plan counted")
 
-	# The ear clipper has to have triangulated the ring it was given, not a
-	# smaller piece of it. Triangles of a ring cover exactly the ring's area, so
-	# the built area is the check.
-	var ring_area := 0.0
-	for b in OSMWater.bodies():
-		ring_area += float(b["area"])
+	# The ear clipper has to have triangulated the rings it was given, not a
+	# smaller piece of them. Triangles of a ring cover exactly the ring's area, so
+	# the built area is the check - and the area to compare against is the KEPT
+	# rings, because those are the rings the builder was given. Comparing against
+	# all five would be asserting that the drop never happens.
 	var built_area := 0.0
 	for mesh in _meshes():
 		var verts: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
@@ -255,8 +412,13 @@ func _surface(t: TestHarness) -> void:
 			var b := verts[i + 1]
 			var c := verts[i + 2]
 			built_area += absf((b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z)) * 0.5
-	t.between(built_area, ring_area * 0.98, ring_area * 1.02,
-		"the surfaces cover the mapped area, not a piece of it (%.0f of %.0f m2)" % [built_area, ring_area])
+	t.between(built_area, _kept_area * 0.98, _kept_area * 1.02,
+		"the surfaces cover the mapped area of the rings that were kept, not a piece of it (%.0f of %.0f m2)"
+			% [built_area, _kept_area])
+
+	# One draw call per body, which is per body BUILT - a number that moves with
+	# the map and does not need restating here.
+	t.eq(int(_plan["nodes"]), int(_plan["built"]), "one draw call per surfaced body (%d)" % int(_plan["nodes"]))
 
 	# Self-contained: geometry and nothing else, so the world builder can drop it
 	# in one line and it cannot reach back into anything.
@@ -266,26 +428,69 @@ func _surface(t: TestHarness) -> void:
 	t.eq(kinds.keys(), ["MeshInstance3D"], "the node is geometry and nothing else (%s)" % str(kinds.keys()))
 
 
+## True when `p` lies on one of the rings the builder was supposed to keep, within
+## `RING_SLACK`. Ear clipping only ever emits ring vertices, so this is a tight
+## check: it fails for a displaced surface, a wrong ring, or a placeholder.
+func _on_a_kept_ring(p: Vector2) -> bool:
+	for ring in _clear_rings:
+		var r: PackedVector2Array = ring
+		var n := r.size()
+		for i in n:
+			var d := WaterClearance.pt_seg_d2(p, r[i], r[(i + 1) % n])
+			if d <= RING_SLACK * RING_SLACK:
+				return true
+	return false
+
+
 ## The overlap measurement again, on the BUILT mesh rather than the source ring.
 ## The rings are what the data says; the triangles are what a car can hit.
+##
+## THIS is the assertion that answers "is there water on the carriageway", and it
+## is per vertex against that vertex's OWN road. The old form compared the
+## tightest distance to a single 7.0 m constant - the widest half-width on the
+## map - so a vertex 6.9 m from a 9 m residential street passed while a vertex
+## 6.9 m from a 14 m arterial failed, and the constant had to be restated by
+## hand every time the map gained a wider road.
+##
+## `_nearest()` returns a SQUARED distance (`WaterClearance.pt_seg_d2`), and
+## `hw` is a half width in metres. The offender test here used to compare those
+## two directly - `n["d"] < hw` - which is `d^2 < hw`, i.e. "inside
+## sqrt(half width)": on this map 2.74 m of a 7.0 m arterial, not 7.0 m. Every
+## run of this suite reported "no built water vertex is inside a carriageway"
+## having actually only proved 2.74 m, and no run could tell the difference
+## because the tightest built vertex is 9.21 m away. Found by mutation M6 of
+## t183, which widened the band to 40 m and did not fail - the only honest way to
+## find an assertion that was passing for the wrong reason.
 func _built_clearance(t: TestHarness) -> void:
 	var worst := INF
 	var worst_name := ""
 	var offenders := 0
+	var on_a_road := 0
 	var verts := 0
 	for mesh in _meshes():
 		var vs: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
 		for v in vs:
 			verts += 1
 			var n := _nearest(Vector2(v.x, v.z))
-			if float(n["d"]) < worst:
-				worst = float(n["d"])
+			var hw := float(n["hw"])
+			# hw == 0.0 means the 3x3 neighbourhood held no road at all, so there
+			# is no carriageway to clear and nothing to assert about the margin.
+			if hw <= 0.0:
+				continue
+			on_a_road += 1
+			var d := sqrt(float(n["d"]))
+			if d < worst:
+				worst = d
 				worst_name = String(n["name"])
-			if float(n["d"]) < float(n["hw"]):
+			if d < hw + WaterClearance.KERB_SETBACK:
 				offenders += 1
-	t.eq(offenders, 0, "no built water vertex is inside a carriageway (%d of %d)" % [offenders, verts])
-	t.between(sqrt(worst), 7.0, INF,
-		"the built surface clears the tarmac everywhere too (tightest %.2f m on %s)" % [sqrt(worst), worst_name])
+	t.gt(float(on_a_road), 0.0,
+		"the clearance index really did reach the built surface (%d of %d vertices have a road)" % [on_a_road, verts])
+	t.eq(offenders, 0,
+		"no built water vertex is inside a carriageway or its kerb (%d of %d)" % [offenders, on_a_road])
+	t.gt(worst - 7.0, 0.0,
+		"and the built surface clears even the widest carriageway on the map (tightest %.2f m on %s)"
+			% [worst, worst_name])
 
 
 func _meshes() -> Array:
@@ -368,7 +573,7 @@ func _material_and_flow(t: TestHarness) -> void:
 		mats += 1
 		if not m.normal_enabled or m.normal_texture == null:
 			still += 1
-	t.eq(mats, 5, "every surface has a material (%d)" % mats)
+	t.eq(mats, int(_plan["nodes"]), "every surfaced body has a material (%d)" % mats)
 	t.eq(still, 0, "and every one is the project's moving water, not a flat plane")
 
 	# The conventions the project already set: near-mirror, dark, translucent.
