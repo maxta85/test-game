@@ -76,11 +76,70 @@ func run(t: TestHarness) -> void:
 ## A minimap that draws its own picture of the city instead of the one the car is
 ## driving on is worse than no minimap, so the first thing checked is that its
 ## geometry is the graph the world was built from.
+##
+## NOT `nodes == 359` and `edges == 401`. Those two were the only assertions in
+## this function that named an absolute size, and they are the two that went red
+## on `bc7efef`, "fix(map): stop RDP collapsing road centrelines into straight
+## chords". 359 junctions and 401 edges was the network at the map revision that
+## collapsed every corridor to a straight chord between its endpoints - a
+## measured median of 2 points per corridor across 247 corridors, which is not a
+## road, it is the line between two places a road passes through. `bc7efef` put
+## the real polylines back (356 corridors, 2393 centreline points) and the counts
+## moved to 1872 junctions and 2021 edges, 50.8 km instead of 31.7.
+##
+## The map did not get worse. It stopped being a diagram of itself, and a test
+## that pinned a count to the diagram reported the improvement as a regression.
+## Everything in this function that is a RELATIONSHIP kept passing through that
+## map revision untouched - including the one three lines below, `drawn == in
+## graph` - which is the tell that the product was consistent and the expectation
+## was not.
+##
+## The rule this function already states for itself, further down and unchanged,
+## is a FLOOR plus a relationship: "A rectangle placeholder would be four
+## segments. This is the assertion that makes 'real Manunda geometry, not a
+## placeholder' checkable." So that is what is asserted - the floor that rules out
+## the authored block and a placeholder rectangle, plus three properties of the
+## graph that no map revision can invalidate. Measured on the map that replaced
+## the chords, by `Tests/t183_probe.gd` on this tree:
+##   nodes=1872  edges=2021  length=50.8 km  streets=116
+##   out-of-range edges=0   orphan junctions=0   degenerate edges=0
 func _the_map_is_the_real_network(t: TestHarness) -> void:
 	var stats := g.stats()
-	t.eq(int(stats["nodes"]), 359, "the real network is 359 junctions")
-	t.eq(int(stats["edges"]), 401, "and 401 edges")
-	t.gt(float(stats["length_m"]), 31000.0, "of %.1f km of street" % (float(stats["length_m"]) / 1000.0))
+	# The floor carries the "this is the real network and not ManundaLayout"
+	# claim on its own. It was already here, it already passed, and it is the one
+	# size check in this function that was never a magic constant - it is the
+	# 31.7 km complaint from `run()` written down as a number.
+	t.gt(float(stats["length_m"]), 31000.0,
+		"the real network is %.1f km of street, not the authored block"
+			% (float(stats["length_m"]) / 1000.0))
+
+	# Invariants, not revision numbers. Each of these is a thing that can be true
+	# or false about any road graph at any scale, so none of them can go stale the
+	# way a count does - and each one is a defect the map being bigger did not
+	# cause and does not excuse.
+	#
+	# An edge naming a junction that does not exist reads past the end of the
+	# position array; a junction no edge reaches is a dot the minimap would draw
+	# with nothing attached to it, from a piece of the map the streets were never
+	# built from; a zero-length edge is a corridor that degenerated.
+	var oob := 0
+	var degenerate := 0
+	var used := {}
+	var n_nodes: int = int(stats["nodes"])
+	for e in g.edges:
+		var a := int(e["a"])
+		var b := int(e["b"])
+		if a < 0 or b < 0 or a >= n_nodes or b >= n_nodes:
+			oob += 1
+			continue
+		used[a] = true
+		used[b] = true
+		if g.node_pos(a).distance_squared_to(g.node_pos(b)) < 0.01:
+			degenerate += 1
+	var orphans: int = n_nodes - used.size()
+	t.eq(oob, 0, "every edge names a junction the graph has (%d do not)" % oob)
+	t.eq(orphans, 0, "and every junction is reached by at least one edge (%d orphans)" % orphans)
+	t.eq(degenerate, 0, "and no edge is a zero-length stub (%d)" % degenerate)
 
 	var m := await _map()
 	t.eq(m._road_segments.size(), int(stats["edges"]),
