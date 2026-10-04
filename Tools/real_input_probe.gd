@@ -55,6 +55,20 @@ const CORRIDOR_ALT_M := 2.0
 ## not an argument because `_drive` is already nine parameters and one more would
 ## make every call site a chance to swap them.
 var graph_ref: RoadGraph = null
+## Set from `--wake=1`. See the note at the sleep branch in `_drive`.
+var wake := false
+
+
+## Whether the TREE this runs on carries t127's no-sleep fix. Read from the source at
+## run time rather than from a chain name, because the question is about the code that
+## is actually driving the car and a branch can be renamed or rebased under you.
+func car_body_has_sleep_fix() -> bool:
+	var f := FileAccess.open("res://Systems/vehicle/car_body.gd", FileAccess.READ)
+	if f == null:
+		return false
+	var txt := f.get_as_text()
+	f.close()
+	return txt.contains("_stay_awake_if_driven")
 
 
 func _initialize() -> void:
@@ -63,6 +77,11 @@ func _initialize() -> void:
 	for a in args:
 		if a.begins_with("--seconds="):
 			seconds = a.substr(10).to_float()
+		elif a.begins_with("--wake="):
+			wake = a.substr(7) == "1"
+			print("[real] --wake=1 given: the probe will set car.sleeping = false each frame")
+	print("[real] SLEEP_FIX_PRESENT=%d  (car_body.gd has _stay_awake_if_driven: %s)" % [
+		1 if car_body_has_sleep_fix() else 0, str(car_body_has_sleep_fix())])
 
 	print("[real] building the world")
 	var graph := RoadGraph.new()
@@ -256,8 +275,17 @@ func _drive(root: Node3D, car: Node3D, pts: PackedVector2Array, total: float,
 			ended = "far end"
 			break
 		if car.is_sleeping():
-			ended = "BODY ASLEEP at s=%.1f" % s
-			break
+			if wake:
+				# The probe waking the body. NOT A PRODUCTION FIX and not a claim that
+				# the game is fine - it is the measuring instrument removing a known
+				# confound (t127's defect, fixed on chain A at 052f723, absent here)
+				# so the steering numbers are not truncated at 47 m. `Systems/vehicle/**`
+				# is outside this task's scope, so the defect cannot be fixed here and
+				# the probe stops being the thing that is confounded.
+				car.sleeping = false
+			else:
+				ended = "BODY ASLEEP at s=%.1f" % s
+				break
 	Input.action_release("throttle")
 	Input.action_release("steer_left")
 	Input.action_release("steer_right")
