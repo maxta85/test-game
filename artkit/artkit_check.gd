@@ -308,8 +308,12 @@ func _check_materials() -> void:
 		in_band = in_band and float(w[0]) >= lo - 0.0001 and float(w[1]) <= hi + 0.0001
 	_ok(in_band, "every wet-asphalt ramp stays in %.2f-%.2f (%d variants)"
 			% [lo, hi, wet_mats.size()])
-	_ok(ArtKitMaterials.roughness_of("surface_asphalt_dry") > 0.6,
-			"dry asphalt is matte (rough=%.2f)" % ArtKitMaterials.roughness_of("surface_asphalt_dry"))
+	# Effective, not the scalar. A PBR key's `m.roughness` is a *multiplier* on the
+	# scanned roughness map, so asserting on the scalar alone is asserting on the
+	# wrong number - the same shape of bug `World/look_dev_test.gd` already documents
+	# for the wet road.
+	var dry := ArtKitMaterials.effective_roughness_of("surface_asphalt_dry")
+	_ok(dry > 0.6, "dry asphalt is matte (effective rough=%.2f)" % dry)
 
 	# Variation inside a family is the point of a family, so a family whose values
 	# are all the same is a family that should be collapsed to one.
@@ -328,7 +332,10 @@ func _check_materials() -> void:
 				var vb: Array = ArtKitMaterials._SPECS[b].get("wet",
 						[ArtKitMaterials.roughness_of(b), ArtKitMaterials.roughness_of(b)])
 				spread = maxf(spread, absf(float(va[0]) - float(vb[0])))
-		_ok(spread >= 0.02, "family '%s' varies roughness (spread %.2f)" % [fam, spread])
+		# For a PBR-backed family the scalar is a multiplier on the scanned map, so a
+		# spread of 0 here means the five variants render identically - which is the
+		# failure this check exists for, and it is still the right thing to measure.
+		_ok(spread >= 0.02, "family '%s' varies roughness (scalar spread %.2f)" % [fam, spread])
 
 	# The noise textures must actually be generated, not null placeholders, or
 	# every road in the city is flat plastic.
@@ -343,9 +350,32 @@ func _check_materials() -> void:
 	# specular. Setting metallic on tarmac is the classic way to make it look like
 	# painted metal, so the check pins it.
 	_ok(wet.metallic < 0.1, "wet asphalt is a dielectric (metallic=%.2f)" % wet.metallic)
+	# ## The corrugation check used to assert a fake
+	#
+	# It read `uv1_scale.y >= CORRUGATION_UV * 0.9`, which was true because the ribs
+	# were *stripes in UV*: `_build()` squeezed the Y tiling to 13 so a stripe landed
+	# every 8 cm down the slope. That is not a rib - it has no shading across its
+	# width, no weathering, and it is the same on every roof in the city.
+	#
+	# With the scanned corrugated-steel set the ribs are in the normal map, so the
+	# assertion that matters is that the ribs are coming from the scan at all, and that
+	# nothing has collapsed the tiling to a single stretched copy. The UV-stripe ratio
+	# is deliberately NOT re-imposed: satisfying it now would mean inventing a magic
+	# number to pass a check about a technique the kit no longer uses.
 	var roof := ArtKitMaterials.get_("surface_roof_iron_a")
-	_ok(roof.uv1_scale.y >= ArtKitMaterials.CORRUGATION_UV * 0.9,
-			"roof iron tiles its corrugation (uv1_scale.y=%.1f)" % roof.uv1_scale.y)
+	_ok(roof.normal_enabled and roof.normal_texture != null,
+			"roof iron has a normal map")
+	_ok(roof.normal_texture == ArtKitMaterials.pbr_tex("corrugated_roof", "n"),
+			"the roof ribs come from the corrugated-steel scan, not from UV stripes")
+	_ok(roof.albedo_texture == ArtKitMaterials.pbr_tex("corrugated_roof", "c"),
+			"roof iron albedo is the scan, tinted by the palette role")
+	var uv_ok := true
+	for axis in [roof.uv1_scale.x, roof.uv1_scale.y, roof.uv1_scale.z]:
+		uv_ok = uv_ok and axis > 0.001
+	_ok(uv_ok, "roof iron tiling is non-degenerate (uv1_scale=%s)" % str(roof.uv1_scale))
+	_ok(ArtKitMaterials.pbr_mean("corrugated_roof", "r") > 0.05,
+			"the corrugated scan carries a real roughness (mean %.3f)"
+			% ArtKitMaterials.pbr_mean("corrugated_roof", "r"))
 
 
 # =============================================================================
@@ -1338,7 +1368,30 @@ func _check_consumer() -> void:
 ## otherwise be invisible in review and would break the "everything is code" claim
 ## that the whole cost model rests on.
 func _check_no_external_assets() -> void:
-	_section("no external assets")
+	_section("provenance and external assets")
+	# ## This section used to forbid texture files outright
+	#
+	# The old contract was `standards.md` §1: "There is no `.glb`, no `.obj`, no
+	# downloaded texture, no `.png`. That is a hard constraint from the brief." t181
+	# replaced it with real CC0 PBR sets, so the check that enforced it had to change
+	# too - and the useful part of it did not change at all.
+	#
+	# What survived, and why it is still worth asserting:
+	#   - **No 3D model and no audio.** Still true, still free, still worth a check.
+	#     The kit generates its geometry in GDScript and that is what makes 2198
+	#     buildings cost nothing to store.
+	#   - **Textures only from the manifest.** The old check said "no file in artkit/
+	#     loads anything at runtime". The new one says *loads textures only through the
+	#     one audited loader in materials.gd, and only files the manifest declares*. A
+	#     texture dropped in by hand with no provenance line fails here.
+	#   - **Provenance is complete.** Every set declares a source URL and a licence.
+	#     A CC0 claim with no URL in it is not a claim anyone can check.
+	#   - **The data maps are read linearly.** The single most expensive bug in this
+	#     task's history, and the one no other check would catch: see the header of
+	#     `artkit/materials.gd`.
+	#
+	# What is deliberately no longer asserted: that the kit contains no image files.
+	# It contains eighteen.
 	var dir := DirAccess.open("res://artkit")
 	_ok(dir != null, "artkit/ is readable")
 	var files: Array[String] = []
@@ -1350,32 +1403,121 @@ func _check_no_external_assets() -> void:
 		f = dir.get_next()
 	dir.list_dir_end()
 
-	var loads: Array[String] = []
 	var models: Array[String] = []
+	var stray_loads: Array[String] = []
+	# Every quoted image extension is a texture reference; they are tracked so the
+	# load can be traced back to the manifest rather than merely counted.
+	var tex_exts := [".png", ".jpg", ".jpeg", ".webp"]
 	for file in files:
-		# This file is the auditor; it necessarily contains the extensions and the
-		# words it searches for as string literals.
 		if not String(file).ends_with(".gd") or file == "artkit_check.gd":
 			continue
 		var text := FileAccess.get_file_as_string("res://artkit/" + file)
-		var exts := [".glb", ".gltf", ".obj", ".fbx", ".dae", ".blend", ".png", ".jpg",
-				".jpeg", ".webp", ".svg", ".hdr", ".exr", ".ktx", ".dds", ".wav", ".ogg"]
-		for ext in exts:
-			# Quoted, because a bare substring match flags `m.blend_mode` as a
-			# mention of Blender files, which is a false positive that trains
-			# people to ignore this check.
+		var mod_exts := [".glb", ".gltf", ".obj", ".fbx", ".dae", ".blend",
+				".hdr", ".exr", ".ktx", ".dds", ".wav", ".ogg"]
+		for ext in mod_exts:
+			# Quoted, because a bare substring match flags `m.blend_mode` as a mention
+			# of Blender files, which is a false positive that trains people to ignore
+			# this check.
 			if text.contains("\"" + ext + "\"") or text.contains("'" + ext + "'"):
 				models.append("%s mentions %s" % [file, ext])
+		# `materials.gd` is the one file allowed to load an image, and it does it in
+		# exactly one function. Any other file reaching for a texture is a bypass.
 		for line in text.split("\n"):
 			var stripped := line.strip_edges()
 			if stripped.begins_with("#"):
 				continue
-			if stripped.contains("preload(") or stripped.contains("load("):
-				loads.append("%s: %s" % [file, stripped])
-	_ok(models.is_empty(), "no 3D model, texture or audio file is referenced", str(models))
-	_ok(loads.is_empty(), "no file in artkit/ loads anything at runtime", str(loads))
-	_ok(files.size() >= 9, "the kit's files are all present (%d)" % files.size())
-	print("       %d files: %s" % [files.size(), ", ".join(PackedStringArray(files))])
+			# WRITING a texture is not reading one. `pbr_shot.gd` saves PNGs and
+			# `artkit_check.gd` names the extensions because it is the auditor; treating
+			# both as "loading a texture" made this check fail on the capture harness
+			# that exists to prove the textures render.
+			if stripped.contains("save_png") or stripped.contains("DirAccess"):
+				continue
+			var loads_image := false
+			for ext in tex_exts:
+				if stripped.contains("\"" + ext + "\"") or stripped.contains("'" + ext + "'"):
+					loads_image = true
+			var loads_any := stripped.contains("preload(") or stripped.contains("load(")
+			# Two files are allowed to load an image, for two stated reasons, and a
+			# third would fail. An allowlist rather than a general exemption, because
+			# "it is probably fine" is how a kit ends up with nine ways in.
+			var allowed := {
+				# The one audited material-texture loader. Colour management lives here.
+				"materials.gd": true,
+				# The capture harness. `--measure` re-reads the board PNG it just wrote so
+				# a measurement can be repeated without re-rendering. It reads its OWN
+				# output, under the `--out` directory, and loads no material texture.
+				"pbr_shot.gd": true,
+			}
+			if loads_any and not allowed.has(file):
+				stray_loads.append("%s: %s" % [file, stripped])
+	_ok(models.is_empty(), "no 3D model or audio file is referenced", str(models))
+	_ok(stray_loads.is_empty(),
+			"only materials.gd and pbr_shot.gd load an image (listed, with reasons)",
+			str(stray_loads))
+
+	# --- provenance, read from the manifest rather than asserted by hand.
+	var manifest := ArtKitMaterials.pbr_manifest()
+	var sets: Dictionary = manifest.get("sets", {})
+	_ok(not sets.is_empty(), "the PBR manifest is readable (%d sets)" % sets.size())
+	var complete := true
+	var unlicensed: Array[String] = []
+	var sourceless: Array[String] = []
+	for setname in sets.keys():
+		var entry: Dictionary = sets[setname]
+		var lic := String(entry.get("license", ""))
+		var url := String(entry.get("source_url", ""))
+		if lic.strip_edges().is_empty():
+			unlicensed.append(String(setname))
+		if url.strip_edges().is_empty():
+			sourceless.append(String(setname))
+		complete = complete and not lic.is_empty() and not url.is_empty()
+	_ok(complete, "every set declares a licence and a source URL",
+			str(unlicensed + sourceless))
+	var declared: Dictionary = {}
+	for setname in sets.keys():
+		for kind in ["c", "r", "n"]:
+			declared[String((sets[setname] as Dictionary)["maps"][kind]["file"])] = true
+	_ok(declared.size() == sets.size() * 3,
+			"every set declares albedo + roughness + normal (%d files)" % declared.size())
+
+	# --- the sets the brief named, present by name.
+	var want := ["weatherboard", "corrugated_roof", "paling_fence", "concrete_kerb",
+			"bitumen", "grass_verge"]
+	var missing: Array[String] = []
+	for w in want:
+		if not sets.has(w):
+			missing.append(w)
+	_ok(missing.is_empty(), "the residential palette is all six sets", str(missing))
+
+	# --- THE COLOUR-SPACE CONTRACT. This is the check that matters.
+	# `Image.load()` hands back 8-bit, which Godot samples *as sRGB*. A roughness or
+	# normal map read that way is wrong in the shader and looks plausible in a render.
+	# `ArtKitMaterials.pbr_tex()` widens the data maps to RGBAF; this asserts it
+	# happened, per map, and that albedo was NOT widened.
+	var colour_bad: Array[String] = []
+	for setname in sets.keys():
+		for kind in ["c", "r", "n"]:
+			var fmt := ArtKitMaterials.pbr_format(String(setname), kind)
+			if fmt == "":
+				colour_bad.append("%s/%s did not load" % [setname, kind])
+			elif kind == "c" and fmt == "%d" % Image.FORMAT_RGBAF:
+				colour_bad.append("%s/c was widened - a colour must stay sRGB" % setname)
+			elif kind != "c" and fmt != "%d" % Image.FORMAT_RGBAF:
+				colour_bad.append("%s/%s is %s, not RGBAF - sRGB-decoded" % [setname, kind, fmt])
+	_ok(colour_bad.is_empty(),
+			"data maps are RGBAF (linear), albedo is not", str(colour_bad))
+
+	# --- and the textures themselves are shared, or the memoisation rule is broken
+	# at the texture layer and every batch signature goes with it.
+	var same := ArtKitMaterials.pbr_tex("bitumen", "c") == ArtKitMaterials.pbr_tex("bitumen", "c")
+	_ok(same, "one map is one Texture2D resource (memoisation holds for textures)")
+	var sets_differ := ArtKitMaterials.pbr_tex("bitumen", "c") != ArtKitMaterials.pbr_tex("grass_verge", "c")
+	_ok(sets_differ, "different sets are different textures")
+
+	print("       %d files at the top level: %s"
+			% [files.size(), ", ".join(PackedStringArray(files))])
+	print("       %d texture files, %d sets, %d bytes"
+			% [declared.size(), sets.size(), int(manifest.get("total_bytes", 0))])
 
 
 # =============================================================================

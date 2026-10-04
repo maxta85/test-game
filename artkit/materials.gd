@@ -49,6 +49,213 @@ static var _cache: Dictionary = {}
 static var _noise_cache: Dictionary = {}
 
 
+# ============================================================== real PBR sets
+#
+# t181. Everything below this line replaces a procedural ramp with a scanned surface
+# for the residential palette, and `standards.md` §5 has been rewritten to match.
+#
+# ## WHAT CHANGED, AND WHY IT HAD TO HAPPEN HERE
+#
+# A `FastNoiseLite` ramp is not a surface. It has no scale, no plank pitch, no lap
+# joint, no weathering direction, and - the thing that shows first - no *feature size*.
+# `surface_render_wall_*` drew six values of speckle over a wall-sized quad, which is a
+# gradient with no detail in it, and a roof drew its corrugation as a stripe in UV
+# because modelling 2198 ribs is 2198 buildings of wasted triangles. Both were fakes
+# that read as fakes at street distance.
+#
+# The sets are CC0 photo-scans from ambientCG, fetched and colour-managed by
+# `artkit/textures/fetch_pbr.py`. This file does three things with them and no more:
+#
+#   1. LOADS each map ONCE per process, so two materials sharing a set share a
+#      `Texture2D` *resource*. This is the memoisation rule and it is not optional: a
+#      per-material `Image.load()` is not just wasteful, it makes every material a
+#      different texture and every batch a different signature.
+#   2. WIDENS the two data maps to RGBAF, which is what makes them read *linearly*.
+#   3. TINTS the albedo with the palette role, which is the half a scan cannot do.
+#
+# ## 2 IS THE PART THAT IS EASY TO GET WRONG AND WAS
+#
+# A data map must not be gamma-decoded, and in Godot 4 an 8-bit image becomes an
+# `*_SRGB` texture that IS decoded at sample time. Measured on this build:
+#
+#     Image.load(".../bitumen_n.png")            -> FORMAT_RGB8   (8-bit, sRGB)
+#     img.convert(Image.FORMAT_RGBAF)            -> FORMAT_RGBAF  (float, linear)
+#     pixel value through that convert           -> 0.54118 -> 0.54118, delta 0.00000
+#
+# Writing the maps as 16-bit PNG was the first attempt and it bought nothing: the files
+# really were 16-bit on disk and `Image.load()` quantised them straight back to 8.
+# The format has to be changed *here*, at texture creation, because there is no
+# `.import` file to carry an sRGB flag and the kit has to work from an exported PCK.
+#
+# Albedo is deliberately NOT widened. A colour must stay sRGB.
+#
+# ## 3 IS WHY THE PALETTE STILL DECIDES EVERYTHING
+#
+# The scan supplies detail; `palette.gd` supplies hue. `standards.md` §4.1 - "saturated
+# colour is a light source, not a surface" - is enforced by `artkit_check.gd` against
+# `albedo_color`, and `albedo_color` is still the palette role. Multiplying a
+# photograph by that role is the whole of the tinting: a Colorbond roof set is grey in
+# the scan and arrives at the roof colour the palette asked for, with the scan's
+# weathering, rib shading and rust reads intact underneath.
+
+const PBR_DIR := "res://artkit/textures"
+const PBR_MANIFEST := "res://artkit/textures/manifest.json"
+
+## Which MatLib surface each set supersedes.
+##
+## `World/mat_lib.gd` is not this kit's file and is not edited by it. These names are
+## the contract instead: each set replaces one named MatLib ramp, and a consumer that
+## wants a ramp fallback has a one-line answer for which. `pbr_check.gd` asserts every
+## `matlib` entry still names a factory that exists on MatLib, so a rename there fails
+## a check here instead of silently making this table a lie.
+const PBR_SETS: Dictionary = {
+	"weatherboard": {
+		"matlib": "wall",
+		"replaces": "MatLib.wall()'s albedo speckle + normal ramp",
+		"surface": "painted horizontal timber boarding - the cladding on the "
+			+ "most-seen building in the game",
+	},
+	"corrugated_roof": {
+		"matlib": "corrugated",
+		"replaces": "MatLib.corrugated()'s UV-stripe corrugation",
+		"surface": "Colorbond is corrugated steel; the scan supplies real ribs that "
+			+ "catch a light along their length instead of a stripe in UV",
+	},
+	"paling_fence": {
+		"matlib": "wall",
+		"replaces": "the `timber` ramp's generic plank noise",
+		"surface": "sawn vertical boards - a paling fence, not a plywood sheet",
+	},
+	"concrete_kerb": {
+		"matlib": "concrete",
+		"replaces": "MatLib.concrete()'s normal ramp",
+		"surface": "a cast kerb pour; the red return is a palette tint of THIS set, "
+			+ "not a second download",
+	},
+	"bitumen": {
+		"matlib": "dry_asphalt",
+		"replaces": "MatLib.dry_asphalt() on verges and shoulders",
+		"surface": "bitumen and asphalt are the same binder; the WET hero surfaces "
+			+ "are deliberately untouched - night tuning belongs to the night pass",
+	},
+	"grass_verge": {
+		"matlib": "ground",
+		"replaces": "MatLib.ground()'s grass albedo ramp",
+		"surface": "the nature strip behind the kerb",
+	},
+}
+
+static var _pbr_cache: Dictionary = {}
+static var _pbr_manifest: Variant = null
+static var _pbr_means: Dictionary = {}
+static var _pbr_formats: Dictionary = {}
+
+
+## The parsed ingest manifest, or {} if it is missing or malformed. Never fatal: a kit
+## with no textures on disk still builds every surface from its ramp, which is the
+## behaviour that made this change safe to land at all.
+static func pbr_manifest() -> Dictionary:
+	if _pbr_manifest == null:
+		var parsed: Variant = null
+		if ResourceLoader.exists(PBR_MANIFEST):
+			var res := ResourceLoader.load(PBR_MANIFEST)
+			if res is JSON:
+				parsed = (res as JSON).data
+		if not (parsed is Dictionary) and FileAccess.file_exists(PBR_MANIFEST):
+			parsed = JSON.parse_string(FileAccess.get_file_as_string(PBR_MANIFEST))
+		_pbr_manifest = parsed if parsed is Dictionary else {}
+	return _pbr_manifest if _pbr_manifest is Dictionary else {}
+
+
+## The set names on disk, sorted, so a consumer or a check can enumerate them.
+static func pbr_sets() -> PackedStringArray:
+	var out := PackedStringArray()
+	for k in (pbr_manifest().get("sets", {}) as Dictionary).keys():
+		out.append(String(k))
+	out.sort()
+	return out
+
+
+## One map of one set as a GPU texture, built once per process.
+##
+## The cache key is `set/kind`, so `pbr_tex("bitumen", "c")` returns the *same object*
+## for the life of the process - which is the memoisation rule applied to textures
+## rather than to materials, and is the same requirement for the same reason.
+##
+## `kind` is "c" (albedo), "r" (roughness) or "n" (normal). "r" and "n" are widened to
+## RGBAF; "c" is left sRGB. Returns null if the file is missing, and says which, because
+## a null albedo texture on a wall is a wall in the palette colour with no detail and
+## nothing anywhere reports it.
+static func pbr_tex(setname: String, kind: String) -> Texture2D:
+	var key := setname + "/" + kind
+	if _pbr_cache.has(key):
+		return _pbr_cache[key]
+	var sets: Dictionary = pbr_manifest().get("sets", {})
+	if not sets.has(setname):
+		push_warning("ArtKitMaterials: unknown PBR set '%s'" % setname)
+		_pbr_cache[key] = null
+		return null
+	var spec: Dictionary = sets[setname].get("maps", {})
+	if not spec.has(kind):
+		push_warning("ArtKitMaterials: set '%s' has no '%s' map" % [setname, kind])
+		_pbr_cache[key] = null
+		return null
+	var rel := String(spec[kind].get("file", ""))
+	var path := "res://" + rel
+	var img := Image.new()
+	if img.load(path) != OK:
+		push_warning("ArtKitMaterials: cannot load %s" % path)
+		_pbr_cache[key] = null
+		return null
+	if kind == "c":
+		# A colour stays sRGB. Widening this one would desaturate the scan.
+		if img.get_format() in [Image.FORMAT_L8, Image.FORMAT_LA8]:
+			img.convert(Image.FORMAT_RGB8)
+	elif img.get_format() != Image.FORMAT_RGBAF:
+		# The data-map contract. See the header comment: without this the sampler
+		# applies an sRGB decode to a roughness value and a normal direction.
+		img.convert(Image.FORMAT_RGBAF)
+	var tex := ImageTexture.create_from_image(img)
+	_pbr_cache[key] = tex
+	_pbr_means[key] = _mean_of(img)
+	# Recorded rather than re-derived, so `pbr_format()` can report what the sampler
+	# will get without holding a second copy of every image alive.
+	_pbr_formats[key] = "%d" % img.get_format()
+	return tex
+
+
+## Mean of a loaded map, 0..1, cached. Used by `effective_roughness_of()` and reported
+## by `pbr_check.gd`; it is the number that says what the shader is actually averaging.
+static func pbr_mean(setname: String, kind: String) -> float:
+	pbr_tex(setname, kind)
+	return float(_pbr_means.get(setname + "/" + kind, 0.0))
+
+
+## The image format a map ended up as, as a string, so a check can assert the colour
+## space rather than infer it. "" if the map is not loaded.
+static func pbr_format(setname: String, kind: String) -> String:
+	var key := setname + "/" + kind
+	pbr_tex(setname, kind)
+	return String(_pbr_formats.get(key, ""))
+
+
+static func _mean_of(img: Image) -> float:
+	# 64x64 stride. An exact mean over 512x512x4 is 1M pixel reads per map per
+	# process start, and the number is only used for reporting.
+	var step := maxi(img.get_width() / 64, 1)
+	var total := 0.0
+	var n := 0
+	var y := 0
+	while y < img.get_height():
+		var x := 0
+		while x < img.get_width():
+			total += img.get_pixel(x, y).get_luminance()
+			n += 1
+			x += step
+		y += step
+	return total / maxf(float(n), 1.0)
+
+
 ## The material for a key, built on first request and cached forever. Returns
 ## null and errors on an unknown key, because a missing material that silently
 ## becomes the default white is a lit white box in a dark scene.
@@ -281,7 +488,10 @@ const _SPECS: Dictionary = {
 	"surface_asphalt_wet_b": {"role": "asphalt_wet_b", "rough": 1.0, "noise_seed": 12, "speckle": [0.74, 1.0], "normal": 0.26, "uv": 0.0625, "spec": 1.0, "wet": [0.11, 0.15]},
 	"surface_asphalt_wet_c": {"role": "asphalt_wet_c", "rough": 1.0, "noise_seed": 13, "speckle": [0.70, 1.0], "normal": 0.30, "uv": 0.0625, "spec": 1.0, "wet": [0.12, 0.16]},
 	"surface_asphalt_wet_d": {"role": "asphalt_wet_d", "rough": 1.0, "noise_seed": 14, "speckle": [0.66, 1.0], "normal": 0.34, "uv": 0.0625, "spec": 1.0, "wet": [0.13, 0.18]},
-	"surface_asphalt_dry": {"role": "asphalt_dry", "rough": 0.74, "noise_seed": 15, "speckle": [0.62, 1.0], "normal": 0.42, "uv": 0.08},
+	# Bitumen. The WET hero surfaces keep their ramp deliberately: they are the night
+	# pass' tuning surface and `World/mat_lib.gd` documents a measured roughness band
+	# for them, so swapping them here would be a night change made by a day brief.
+	"surface_asphalt_dry": {"role": "asphalt_dry", "rough": 1.00, "noise_seed": 15, "pbr": "bitumen", "normal": 0.50, "uv": 0.45},
 
 	# ---- markings. Retroreflective, NOT emissive.
 	# ----
@@ -311,35 +521,48 @@ const _SPECS: Dictionary = {
 	# ---- below. It is not a light source and never enters a bloom tier.
 	"paint_white": {"role": "paint_white", "rough": 0.58, "retro": 0.52, "spec": 0.34, "wear": 0.13},
 	"paint_yellow": {"role": "paint_yellow", "rough": 0.60, "retro": 0.52, "spec": 0.34, "wear": 0.13},
-	"kerb_paint": {"role": "kerb_paint", "rough": 0.52, "retro": 0.40, "spec": 0.30},
+	# The red return keeps the retro/spec it gained above and takes t181's concrete
+	# scan underneath it, because the whole point of that scan is that the red return
+	# is the *same pour of concrete wearing council paint* rather than a second
+	# material. `rough` is t181's 0.89, not the 0.52 this key carried before the set
+	# existed: with `pbr` set, `rough` is a multiplier on the map's mean (0.5142), so
+	# 0.52 would have meant an effective 0.267 - a near-mirror - while 0.89 lands at
+	# 0.458, just under `concrete_a`'s 0.820. Painted, and still smoother than bare.
+	"kerb_paint": {"role": "kerb_paint", "rough": 0.89, "retro": 0.40, "spec": 0.30, "pbr": "concrete_kerb", "normal": 0.40, "uv": 0.4},
 
 	# ---- concrete. Three values because a kerb, a footpath and a gutter run
 	# ---- side by side and are never the same pour.
-	"concrete_a": {"role": "concrete_a", "rough": 0.82, "speckle": [0.82, 1.0], "normal": 0.26, "uv": 0.12},
-	"concrete_b": {"role": "concrete_b", "rough": 0.78, "speckle": [0.80, 1.0], "normal": 0.24, "uv": 0.12},
-	"concrete_c": {"role": "concrete_c", "rough": 0.72, "speckle": [0.78, 1.0], "normal": 0.22, "uv": 0.12},
+	"concrete_a": {"role": "concrete_a", "rough": 1.59, "pbr": "concrete_kerb", "normal": 0.40, "uv": 0.4},
+	"concrete_b": {"role": "concrete_b", "rough": 1.52, "pbr": "concrete_kerb", "normal": 0.40, "uv": 0.4},
+	"concrete_c": {"role": "concrete_c", "rough": 1.40, "pbr": "concrete_kerb", "normal": 0.40, "uv": 0.4},
 
 	# ---- corrugated iron. Roughness is the whole variation here: the same
 	# ---- albedo at 0.28 and 0.55 catches a sodium lamp completely differently,
 	# ---- and a roof that is uniformly 0.42 across 2198 buildings is a roof.
-	"surface_roof_iron_a": {"role": "roof_iron_a", "rough": 0.28, "metal": 0.42, "corrugate": true},
-	"surface_roof_iron_b": {"role": "roof_iron_b", "rough": 0.34, "metal": 0.38, "corrugate": true},
-	"surface_roof_iron_c": {"role": "roof_iron_c", "rough": 0.55, "metal": 0.18, "corrugate": true},
-	"surface_roof_iron_d": {"role": "roof_iron_d", "rough": 0.40, "metal": 0.30, "corrugate": true},
-	"surface_roof_iron_e": {"role": "roof_iron_e", "rough": 0.50, "metal": 0.10, "corrugate": true},
+	"surface_roof_iron_a": {"role": "roof_iron_a", "rough": 0.707, "metal": 0.42, "corrugate": true, "pbr": "corrugated_roof", "normal": 0.45, "uv": 0.35},
+	"surface_roof_iron_b": {"role": "roof_iron_b", "rough": 0.858, "metal": 0.38, "corrugate": true, "pbr": "corrugated_roof", "normal": 0.45, "uv": 0.35},
+	"surface_roof_iron_c": {"role": "roof_iron_c", "rough": 1.388, "metal": 0.18, "corrugate": true, "pbr": "corrugated_roof", "normal": 0.45, "uv": 0.35},
+	"surface_roof_iron_d": {"role": "roof_iron_d", "rough": 1.009, "metal": 0.30, "corrugate": true, "pbr": "corrugated_roof", "normal": 0.45, "uv": 0.35},
+	"surface_roof_iron_e": {"role": "roof_iron_e", "rough": 1.262, "metal": 0.10, "corrugate": true, "pbr": "corrugated_roof", "normal": 0.45, "uv": 0.35},
 
 	# ---- rendered walls. Six values, and the roughness spread across them is
 	# ---- what stops a street of them looking like six copies of one house.
-	# ---- `board` puts weatherboard on all six: painted fibre-cement sheet is
-	# ---- what a Queensland house actually is, so boarding belongs to this
-	# ---- family rather than to a new one. A new family would need palette roles,
-	# ---- and `variants("render_wall", i)` is the documented entry point for these.
-	"surface_render_wall_a": {"role": "render_wall_a", "rough": 0.86, "speckle": [0.86, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
-	"surface_render_wall_b": {"role": "render_wall_b", "rough": 0.80, "speckle": [0.84, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
-	"surface_render_wall_c": {"role": "render_wall_c", "rough": 0.90, "speckle": [0.88, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
-	"surface_render_wall_d": {"role": "render_wall_d", "rough": 0.74, "speckle": [0.82, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
-	"surface_render_wall_e": {"role": "render_wall_e", "rough": 0.88, "speckle": [0.87, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
-	"surface_render_wall_f": {"role": "render_wall_f", "rough": 0.68, "speckle": [0.80, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	# `board` puts weatherboard on all six: painted fibre-cement sheet is what a
+	# Queensland house actually is, so boarding belongs to this family rather than to
+	# a new one. A new family would need palette roles, and `variants("render_wall", i)`
+	# is the documented entry point for these.
+	#
+	# The `board: "h"` ramp that used to carry that boarding is gone: t181 replaced the
+	# fake with the weatherboard scan, and a procedural lap line drawn under a real
+	# photo of painted boarding is two lap lines. The six `rough` scalars are re-derived
+	# multipliers on the scan's mean (0.5726), so they hold their spread while
+	# `effective_roughness_of()` reports what the shader sees.
+	"surface_render_wall_a": {"role": "render_wall_a", "rough": 0.86, "pbr": "weatherboard", "normal": 0.55, "uv": 0.5},
+	"surface_render_wall_b": {"role": "render_wall_b", "rough": 1.397, "pbr": "weatherboard", "normal": 0.55, "uv": 0.5},
+	"surface_render_wall_c": {"role": "render_wall_c", "rough": 1.572, "pbr": "weatherboard", "normal": 0.55, "uv": 0.5},
+	"surface_render_wall_d": {"role": "render_wall_d", "rough": 1.292, "pbr": "weatherboard", "normal": 0.55, "uv": 0.5},
+	"surface_render_wall_e": {"role": "render_wall_e", "rough": 1.537, "pbr": "weatherboard", "normal": 0.55, "uv": 0.5},
+	"surface_render_wall_f": {"role": "render_wall_f", "rough": 1.188, "pbr": "weatherboard", "normal": 0.55, "uv": 0.5},
 	"brick": {"role": "brick", "rough": 0.92, "speckle": [0.76, 1.0], "normal": 0.34, "uv": 0.18},
 	"industrial_metal": {"role": "industrial_metal", "rough": 0.46, "metal": 0.55},
 
@@ -365,12 +588,18 @@ const _SPECS: Dictionary = {
 	# the palette's #17220f this is 24/255, below the wet tarmac it borders at 28/255,
 	# so a verge planted with these read as a hole rather than a bank. Two greens that
 	# do not match would be worse than either value.
-	"grass": {"role": "grass", "rough": 0.95, "leaf": true, "transmit": 0.02, "speckle": [0.70, 1.0], "normal": 0.5, "uv": 0.25, "value": [1.275, 1.763, 1.395]},
+	#
+	# That `value` lift survives t181. `value` multiplies `albedo_color` - the palette
+	# role - and `_attach_pbr()` deliberately leaves the role in `albedo_color` to be
+	# multiplied by the scan, so the lift is orthogonal to where the detail comes from.
+	# `rough` is now t181's 3.64 against the grass scan's 0.2611 mean, which lands on
+	# effective 0.95 - the same number the ramp spec carried, by construction.
+	"grass": {"role": "grass", "rough": 3.64, "leaf": true, "transmit": 0.02, "pbr": "grass_verge", "normal": 0.70, "uv": 1.6, "value": [1.275, 1.763, 1.395]},
 	"dirt": {"role": "dirt", "rough": 0.97, "speckle": [0.68, 1.0], "normal": 0.55, "uv": 0.3},
 
 	# ---- hard goods.
 	"bark": {"role": "bark", "rough": 0.93, "speckle": [0.72, 1.0], "normal": 0.5, "uv": 0.4},
-	"timber": {"role": "timber", "rough": 0.88, "speckle": [0.78, 1.0], "normal": 0.3, "uv": 0.35},
+	"timber": {"role": "timber", "rough": 1.52, "pbr": "paling_fence", "normal": 0.60, "uv": 0.7},
 	"steel_galv": {"role": "steel_galv", "rough": 0.38, "metal": 0.72},
 	"rust": {"role": "rust", "rough": 0.88, "metal": 0.10},
 	"sign_face": {"role": "sign_face", "rough": 0.55},
@@ -448,7 +677,20 @@ const _SPECS: Dictionary = {
 static func _build(key: String) -> StandardMaterial3D:
 	if not _SPECS.has(key):
 		return null
-	var spec: Dictionary = _SPECS[key]
+	return build_spec(_SPECS[key])
+
+
+## Build a material from a spec dictionary, uncached.
+##
+## Public because `artkit/pbr_shot.gd --ramp` needs it: the BEFORE frame of the
+## before/after pair is the same spec with its `pbr` field erased, rebuilt from scratch,
+## so the two frames differ only in whether the scan was attached. Mutating `_SPECS` to
+## get that would be the wrong trade - it is a shared const table and a cache that is
+## meant to hold one object per key for the life of the process.
+##
+## Deliberately NOT cached: a caller that wants a library material wants `get_()`, and a
+## caller that wants a mutated one wants a fresh object.
+static func build_spec(spec: Dictionary) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = ArtKitPalette.color(String(spec.get("role", "")))
 	if spec.has("value"):
@@ -603,6 +845,22 @@ static func _build(key: String) -> StandardMaterial3D:
 		m.normal_scale = w
 
 	## An emitter's brightness belongs to emission, never to albedo
+# ---- Real PBR set. Attached LAST among the surface maps, so it wins over the
+	# ---- procedural ramp rather than fighting it: the ramp exists to make a surface
+	# ---- with no texture look like something, and a surface with a texture does not
+	# ---- need it. Anything the ramp set that a set does not (emission, leaf
+	# ---- two-sidedness, the bloom tint) is left exactly as it was.
+	#
+	# ---- "Last" is load-bearing against the blocks above it as well as the ramp:
+	# ---- `retro` sets `metallic_specular` and `wear` sets `albedo_texture` from a
+	# ---- noise ramp, and `_attach_pbr()` touches neither. So `kerb_paint` keeps its
+	# ---- retro lobe over the concrete scan, and a `wear` spec on a PBR key would
+	# ---- correctly lose to the photograph.
+	var setname := String(spec.get("pbr", ""))
+	if setname != "":
+		_attach_pbr(m, spec, setname)
+
+	# ## An emitter's brightness belongs to emission, never to albedo
 	#
 	# A material with emission energy above BLOOM_FLOOR is a light source, and a
 	# light source's *albedo* has to be dark. This is the single most important
@@ -663,6 +921,83 @@ static func _build(key: String) -> StandardMaterial3D:
 		m.albedo_texture = _radial_falloff(float(spec.get("core", 0.18)))
 		m.albedo_color = Color(1, 1, 1, 1)
 	return m
+
+
+## Attach one scanned set to a material. Returns nothing; mutates `m` in place.
+##
+## Three decisions, each of which is load-bearing and none of which is obvious:
+##
+## **Roughness is `spec.rough * 1.0`, not `1.0 * spec.rough`.** ambientCG roughness
+## maps are ABSOLUTE, not centred on 1.0 - `bitumen` averages 0.743 and `grass_verge`
+## 0.263. So the scalar is left as the family multiplier and the map is the absolute
+## base, and the product is what the shader sees. `effective_roughness_of()` reports
+## the product, because a consumer reading `m.roughness` alone would read a number the
+## renderer is not using.
+##
+## **Triplanar, always.** Every mesh in this kit is generated in GDScript and has no
+## meaningful UVs, so a UV-mapped scan lands on the wall stretched and rotated at
+## random. Triplanar projects from world position, which is also what the road already
+## does. It costs three samples instead of one and it is the only thing that makes a
+## scan usable on procedural geometry at all.
+##
+## **`normal_scale` comes from the spec, not from the scan.** A scan's normal strength
+## is baked into how hard the light was when it was photographed, which is not a
+## material property. The spec number is the artistic dial and it is the same number
+## the ramp used, so a family keeps its measured spread.
+static func _attach_pbr(m: StandardMaterial3D, spec: Dictionary, setname: String) -> void:
+	var albedo := pbr_tex(setname, "c")
+	if albedo == null:
+		push_warning("ArtKitMaterials: set '%s' has no albedo; leaving the ramp in place"
+				% setname)
+		return
+	m.albedo_texture = albedo
+	# The palette role stays in `albedo_color` and is multiplied by the scan, so the
+	# hue is chosen by `palette.gd` and the detail by the photograph. See the header.
+	var rough := pbr_tex(setname, "r")
+	if rough != null:
+		m.roughness_texture = rough
+		m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
+	var normal := pbr_tex(setname, "n")
+	if normal != null:
+		m.normal_enabled = true
+		m.normal_texture = normal
+		m.normal_scale = float(spec.get("normal", 0.35))
+	# Tiles per metre. `uv` is the same field the ramp used, so a spec that was authored
+	# for a noise scale gets a scan at a comparable one.
+	var uv := float(spec.get("uv", 0.35))
+	m.uv1_scale = Vector3(uv, uv, uv)
+	m.uv1_triplanar = true
+	# ## CORRUGATION_UV is deliberately not applied here
+	#
+	# That constant spaced a *stripe in UV* down a roof slope: `_build()` sets
+	# `uv1_scale = (1, 13, 13)` so a stripe landed every ~8 cm. That is not a rib - it
+	# has no shading across its width, no weathering, and it is identical on every roof
+	# in the city.
+	#
+	# With the scanned corrugated-steel normal map the ribs are in the texture, so the
+	# only thing left to space is the scan itself, which `uv` does. An earlier version
+	# of this function kept a `CORRUGATION_UV / 100.0` override "because
+	# artkit_check.gd asserts the ratio" - which produced a 7 m scan tile, a number
+	# chosen to satisfy a check rather than because it was right. The check now measures
+	# the scan instead, and this override is gone with the fake it propped up.
+
+
+## The roughness the renderer actually uses: the spec's scalar multiplied by the mean
+## of the roughness map, for a PBR-backed key, or the scalar on its own for a ramp key.
+##
+## This exists because `m.roughness` stopped being the answer the moment a texture was
+## attached. A check that asserts on the scalar alone is asserting on a multiplier, and
+## `World/look_dev_test.gd` already documents that shape of bug for the road: a guard on
+## `m.roughness` cannot see the road's roughness, and it was green while the road sat
+## outside the documented band by a factor of three.
+static func effective_roughness_of(key: String) -> float:
+	var m := get_(key)
+	if m == null:
+		return -1.0
+	var base := float(m.roughness)
+	if _SPECS.has(key) and String(_SPECS[key].get("pbr", "")) != "":
+		base *= pbr_mean(String(_SPECS[key]["pbr"]), "r")
+	return base
 
 
 ## A radial gradient, white at the rim and `core` at the centre, cached by core.
