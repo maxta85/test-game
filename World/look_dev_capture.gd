@@ -253,39 +253,47 @@ func _pose_spec(pose: String, at: Vector3, fwd: Vector3, side: Vector3, g: RoadG
 		_:
 			# walk1..3: the same pose, walked back along the street.
 			#
-			# Snapped to the road network, because walking a fixed 500 m back
-			# along the anchor street's *direction* walks straight off the end of
-			# it: the first version put the camera in empty terrain and counted 90 m
-			# of covered street for a frame of black. Both the before and the after
-			# build measured that pose identically - road mean 2.65, road dark
-			# 1.000 - because there was no road in it to measure. So the pose is
-			# built from the edge the camera actually lands on and looks at that
-			# street's far junction.
+			# Walked along the anchor street's own polyline by arc length. Two
+			# earlier versions of this pose were wrong in ways that only the
+			# pictures caught, and both of them PASSED every threshold:
+			#
+			#   1. A fixed 500 m straight-line ray along the start direction walks
+			#      off the carriageway at the first bend. Measured: road mean 2.65,
+			#      road dark 1.000, a frame of black - counted as 90 m of street.
+			#      Snapping that endpoint to the nearest road edge fixed the black
+			#      frame and created the next bug:
+			#   2. `nearest_road` snaps to whatever is nearest, which 250 m and
+			#      500 m back from the midpoint of a 1408 m arterial is not the
+			#      anchor street at all, and the camera then stood 18 m off *that*
+			#      street. Measured on 2026-10-03 (tag vf-before, same camera, six
+			#      poses): walk2 framed a building wall and walk3 bare terrain -
+			#      road detail 0.044 and 0.79 against 4.69 on `street`, both still
+			#      reporting 90 m covered, both passing the luma, dark, clip and
+			#      orange checks. The 500 m gate was satisfied by two frames with
+			#      no street in them.
+			#
+			# The polyline IS the street, so arc length along it keeps the camera
+			# on the carriageway at a distance that means something. When the
+			# street is shorter than the pose asked for, `achieved_m` says so and
+			# the coverage gate sums the achieved distance, not the wish.
 			var k := int(pose.replace("walk", ""))
 			var back: float = WALK_BACK_M[clampi(k - 1, 0, WALK_BACK_M.size() - 1)]
-			var snap := g.nearest_road(at - fwd * back)
-			var base: Vector3 = snap["point"]
-			var eid := int(snap["edge"])
-			if eid >= 0:
-				var na: Vector2 = g.node_pos(int(g.edges[eid]["a"]))
-				var nb: Vector2 = g.node_pos(int(g.edges[eid]["b"]))
-				var toward_a: float = base.distance_squared_to(
-					Vector3(na.x, base.y, na.y))
-				var far: Vector2 = nb if toward_a > base.distance_squared_to(
-					Vector3(nb.x, base.y, nb.y)) else na
-				var near: Vector2 = na if toward_a > base.distance_squared_to(
-					Vector3(nb.x, base.y, nb.y)) else nb
-				var d := (base - Vector3(near.x, 0.0, near.y))
-				d = d.normalized() if d.length() > 0.1 else -fwd
-				out = {"at": base - d * 18.0 + Vector3(0.0, 2.2, 0.0),
-					"look": Vector3(far.x, 1.0, far.y), "fov": 55.0,
-					"run_m": 90.0,
+			var apts: PackedVector2Array = OSMLayout.anchor().get(
+				"pts", PackedVector2Array())
+			var w := _walk_back_along(apts, back)
+			if not bool(w["ok"]):
+				out = {"at": at - fwd * back + Vector3(0.0, 2.2, 0.0),
+					"look": at + fwd * 60.0 + Vector3(0.0, 1.0, 0.0), "fov": 55.0,
+					"run_m": 0.0, "achieved_m": 0.0,
 					"road": Rect2(0.10, 0.78, 0.80, 0.16),
 					"paint": Rect2(0.28, 0.70, 0.44, 0.08)}
 			else:
-				out = {"at": at - fwd * back + Vector3(0.0, 2.2, 0.0),
-					"look": at + fwd * 60.0 + Vector3(0.0, 1.0, 0.0), "fov": 55.0,
-					"run_m": 0.0,
+				var p: Vector3 = w["pos"]
+				var d: Vector3 = w["dir"]
+				out = {"at": p + Vector3(0.0, 2.2, 0.0),
+					"look": p + d * 70.0 + Vector3(0.0, 1.0, 0.0), "fov": 55.0,
+					"run_m": minf(90.0, float(w["ahead_m"])),
+					"achieved_m": float(w["achieved_m"]),
 					"road": Rect2(0.10, 0.78, 0.80, 0.16),
 					"paint": Rect2(0.28, 0.70, 0.44, 0.08)}
 	# Every branch above replaces `out` wholesale, which is how the pose name got
@@ -294,6 +302,47 @@ func _pose_spec(pose: String, at: Vector3, fwd: Vector3, side: Vector3, g: RoadG
 	# like a report that passed. Stamp it on once, here, where it cannot be lost.
 	out["name"] = pose
 	return out
+
+
+## `metres` back along a street polyline from its midpoint, the tangent there,
+## and what was actually available to walk.
+##
+## Arc length, not a straight ray: see the walk pose for what that costs. Travel
+## runs with increasing index (`OSMLayout.start_line()` reads the midpoint the
+## same way), so "back" is decreasing arc length from the middle.
+##
+## `achieved_m` is `metres` on a street long enough and less on one that is not,
+## which is the number the coverage gate has to sum. `ahead_m` is how much street
+## is left in front of the camera, so a pose at the end of its street reports a
+## shorter run instead of claiming 90 m of tarmac it is looking at a fence over.
+func _walk_back_along(pts: PackedVector2Array, metres: float) -> Dictionary:
+	var empty := {"ok": false, "pos": Vector3.ZERO, "dir": Vector3(0.0, 0.0, 1.0),
+		"achieved_m": 0.0, "ahead_m": 0.0}
+	if pts.size() < 2:
+		return empty
+	var segs: Array[float] = []
+	var total := 0.0
+	for i in pts.size() - 1:
+		var s: float = pts[i].distance_to(pts[i + 1])
+		segs.append(s)
+		total += s
+	if total <= 0.0:
+		return empty
+	var want: float = clampf(total * 0.5 - metres, 0.0, total)
+	var acc := 0.0
+	for i in segs.size():
+		if want <= acc + segs[i] or i == segs.size() - 1:
+			var seg: float = segs[i]
+			var u: float = 0.0 if seg <= 0.0 else (want - acc) / seg
+			var q := pts[i].lerp(pts[i + 1], clampf(u, 0.0, 1.0))
+			var d := pts[i + 1] - pts[i]
+			d = d.normalized() if d.length() > 0.001 else Vector2(0.0, 1.0)
+			return {"ok": true, "pos": Vector3(q.x, 0.0, q.y),
+				"dir": Vector3(d.x, 0.0, d.y),
+				"achieved_m": total * 0.5 - want,
+				"ahead_m": total - want}
+		acc += segs[i]
+	return empty
 
 
 ## The first three-way junction ahead of `at` along `fwd`, or `at` itself.
@@ -326,6 +375,10 @@ func _measure(img: Image, spec: Dictionary) -> Dictionary:
 		"paint": LookMeasure.measure_band(img, p.position.x, p.position.y,
 			p.position.x + p.size.x, p.position.y + p.size.y),
 		"covered_m": float(spec["run_m"]),
+		# What the pose actually walked, for the poses that walk. A pose that
+		# reports 90 m of run it was not looking at is how the 500 m gate came to
+		# be satisfied by two frames of a wall and a field.
+		"achieved_m": float(spec.get("achieved_m", spec["run_m"])),
 	}
 
 
