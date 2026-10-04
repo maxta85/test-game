@@ -150,6 +150,19 @@ func build(g: RoadGraph) -> void:
 	_skyline()
 	_flush_batches()
 	_bake_collision()
+	# Last, because the night layer rewrites the light nodes `_streetlights()`
+	# just created and needs `graph` to aim them. See `World/night_pass.gd`: the
+	# lamps are the only source with shape, so how they emit is a night decision,
+	# not a geometry one, and it belongs in one file rather than here.
+	NightPass.install(self)
+
+
+## The night. Installed from `build()` rather than from `Game/main.gd` because the
+## thing being rewritten is the lamps this node created, and a `NightPass` that
+## could be forgotten at the call site would be a night that silently does not
+## apply. `tests` can suppress it with `NightPass.pending = {"enabled": false}`.
+func _night_pass() -> NightPass:
+	return get_node_or_null(NodePath(NightPass.NODE_NAME)) as NightPass
 
 
 ## The Cairns CBD, on the horizon.
@@ -1888,6 +1901,11 @@ func _streetlights() -> void:
 			l.light_volumetric_fog_energy = 0.0
 			l.position = tip - Vector3(0, 0.3, 0)
 			l.shadow_enabled = false   # hundreds of shadow-casting lights would melt a CPU raster
+			# The role tag is how `NightPass` knows which of these it owns. The
+			# street standards get road-aimed cone optics; the junction fills below
+			# deliberately stay omnidirectional, because their whole job is an even
+			# lift over a box rather than a pool.
+			l.set_meta("night_role", "street")
 			add_child(l)
 			count += 1
 	_junction_fill()
@@ -1929,6 +1947,7 @@ func _junction_fill() -> void:
 		l.light_volumetric_fog_energy = 0.0
 		l.position = Vector3(p.x, Look.JUNCTION_FILL_HEIGHT, p.y)
 		l.shadow_enabled = false
+		l.set_meta("night_role", "junction")
 		add_child(l)
 		count += 1
 	print("[World] %d junction fills" % count)
@@ -2216,3 +2235,4 @@ static func _icosphere(radius: float, subdiv: int) -> ArrayMesh:
 			_tri(st, p.call(v0, u0), p.call(v1, u0), p.call(v1, u1))
 			_tri(st, p.call(v0, u0), p.call(v1, u1), p.call(v0, u1))
 	return st.commit()
+
