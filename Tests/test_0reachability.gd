@@ -46,6 +46,15 @@ const SHIPPED := [
 	{"id": "race hud", "script": "res://UI/race_hud.gd"},
 ]
 
+## Shipped, but built on a route rather than at boot: the host creates this one
+## when the player asks for the garage, so it cannot be in the tree until
+## something has asked. Checked after `run()` fires that request - which is also
+## why this entry cannot sit in NOT_SHIPPED any more, where it passed for ever
+## because nothing in this file ever opened a garage to see it appear.
+const SHIPPED_ON_DEMAND := [
+	{"id": "garage screen", "script": "res://Systems/garage/garage_screen.gd"},
+]
+
 ## Shipped subsystems whose entry point is a static function returning geometry
 ## rather than a node of its own, so no script is ever attached to a live node.
 ##
@@ -83,12 +92,6 @@ const NOT_SHIPPED := [
 		"why": "fc491b2 water is not one of WorldBuilder.build()'s 14 steps; OSMWater.surface() returns a WaterSurface",
 	},
 	{
-		"id": "garage",
-		"module": "res://Systems/garage/garage.gd",
-		"scripts": ["res://Systems/garage/garage_screen.gd"],
-		"why": "749255e Garage is RefCounted state behind GarageScreen, whose only entry point is MenuFlow's garage_requested",
-	},
-	{
 		"id": "traffic",
 		"module": "res://AI/traffic/traffic_manager.gd",
 		"scripts": ["res://Systems/traffic/pedestrians.gd"],
@@ -121,8 +124,9 @@ var _live_nodes: Dictionary = {}
 
 
 func run(t: TestHarness) -> void:
-	# The bare `Cfg` identifier is not bound in a --script context, which is the
-	# same trap Systems/garage/garage.gd:58 documents, so it comes off the tree.
+	# `Cfg` by its bare global name resolves here as well - measured, it is the
+	# same object - but it is taken off the tree by path so this suite reads the
+	# one autoload there is and does not care how other suites spell it.
 	var loop := Engine.get_main_loop()
 	var wallet: Object = loop.root.get_node_or_null("Cfg") if loop is SceneTree else null
 	var saved := _snapshot(wallet)
@@ -130,9 +134,25 @@ func run(t: TestHarness) -> void:
 	var entry := await _boot_entry_point(t)
 	if entry != null:
 		_interrogate(entry, t)
+		# The garage is a host screen, so it is not in the tree until the player
+		# asks for it - and this suite used to carry a NOT_SHIPPED entry for it
+		# that could never fail, because nothing here ever opened one. Ask.
+		await _open_the_garage(entry, t)
+		_interrogate_late(entry, t)
 		await t.drop(entry)
 
 	_restore(wallet, saved)
+
+
+## Fires the garage request the main menu sends and lets a frame pass, so the
+## screen the host builds in response is really in the tree.
+func _open_the_garage(entry: Node, t: TestHarness) -> void:
+	if not t.ok(entry.get("menus") != null, "the entry point holds a menu flow"):
+		return
+	entry.menus.garage_requested.emit()
+	for i in 4:
+		await t.tree.process_frame
+	_collect(entry)
 
 
 func _snapshot(wallet: Object) -> Dictionary:
@@ -213,6 +233,18 @@ func _interrogate(entry: Node, t: TestHarness) -> void:
 
 	for g in SHIPPED_GEOMETRY:
 		_assert_shipped_geometry(g, t)
+
+	for n in NOT_SHIPPED:
+		_assert_not_shipped(n, t)
+
+
+## The second pass, once the garage has been asked for. NOT_SHIPPED is only an
+## honest list at a point where every route into the game has been walked, so it
+## is checked here and not at boot.
+func _interrogate_late(_entry: Node, t: TestHarness) -> void:
+	for s in SHIPPED_ON_DEMAND:
+		t.ok(_live.has(s["script"]),
+			"shipped on demand: %s is instantiated by the entry point (%s)" % [s["id"], s["script"]])
 
 	for n in NOT_SHIPPED:
 		_assert_not_shipped(n, t)

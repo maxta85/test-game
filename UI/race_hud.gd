@@ -7,6 +7,11 @@ extends CanvasLayer
 ## Built in code rather than as a .tscn because it is a dozen labels and a bar,
 ## and a code-built UI is far easier to read than a scene file of anchors.
 
+## The map. Built here rather than in `Game/main.gd` because a HUD element is
+## this class's business, and the host only has to hand it the graph and the
+## entrants it already has.
+var minimap: Minimap
+
 var _speed: Label
 var _gear: Label
 var _revfill: ColorRect
@@ -18,9 +23,23 @@ var _message: Label
 var _cash: Label
 var _wrong: Label
 var _message_time := 0.0
+## The last completed round: one line of summary under the race state, and the
+## classification itself on a board below it. Driven off `race.last_round()` in
+## `update()` rather than pushed in by the host, so the HUD shows the same history
+## whether it was wired by `Game/main.gd` or by a test with a director and nothing
+## else.
+var _round: Label
+var _board: VBoxContainer
+var _board_box: Control
+var _round_shown: RoundResult = null
 
 const REV_W := 320.0
 const PAD := 22.0
+## Minimap edge length in pixels. 236 fits a 1080p frame beside the speed block
+## without crowding it, and at that size the 2.6 x 2.8 km network fits whole -
+## which is the point, since a map cropped to the street you are on cannot tell
+## you where the route goes.
+const MAP := 236.0
 
 
 func _ready() -> void:
@@ -47,7 +66,7 @@ func _ready() -> void:
 	unit.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 
 	# --- top left: race state ---
-	var infobox := _box(root, Control.PRESET_TOP_LEFT, Vector2(PAD, PAD), Vector2(230.0, 116.0))
+	var infobox := _box(root, Control.PRESET_TOP_LEFT, Vector2(PAD, PAD), Vector2(300.0, 140.0))
 	_lap = _label(infobox, "LAP 1/3", 20, Color(0.85, 0.85, 0.82))
 	_lap.position = Vector2(0, 0)
 	_time = _label(infobox, "0:00.00", 24, Color(1.0, 0.85, 0.45))
@@ -56,12 +75,42 @@ func _ready() -> void:
 	_pos.position = Vector2(0, 54)
 	_cash = _label(infobox, "$0", 16, Color(0.55, 0.9, 0.55))
 	_cash.position = Vector2(0, 80)
+	# What the last round paid and what the balance came out at. Without this the
+	# wallet is a number that only ever goes down, and a player who cannot see the
+	# round pay them has no reason to enter the next one.
+	_round = _label(infobox, "", 15, Color(0.75, 0.8, 0.95))
+	_round.position = Vector2(0, 102)
+	_round.size = Vector2(300.0, 22)
+
+	# --- the classification, under the race state ---
+	# Shown once a round has been decided and hidden again on the next entry, so a
+	# race is never read through somebody else's result.
+	_board_box = _box(root, Control.PRESET_TOP_LEFT, Vector2(PAD, PAD + 152.0), Vector2(300.0, 0.0))
+	_board_box.visible = false
+	_board = VBoxContainer.new()
+	_board.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_board.add_theme_constant_override("separation", 1)
+	_board.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_board_box.add_child(_board)
 
 	# --- top right: money ---
 	var cashbox := _box(root, Control.PRESET_TOP_RIGHT, Vector2(PAD, PAD), Vector2(150.0, 28.0))
 	_cash = _label(cashbox, "$0", 18, Color(0.55, 0.9, 0.55))
 	_cash.size = cashbox.size
 	_cash.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+
+	# --- bottom left: the map ---
+	# Bottom left because the speed block owns the bottom right and the race
+	# state owns the top left, and this is the fourth corner. A street racer's
+	# map belongs where the driver's eye already is for the rev counter, and the
+	# HUD's own top-left numbers are read in glances, not watched.
+	var mapbox := _box(root, Control.PRESET_BOTTOM_LEFT, Vector2(PAD, PAD), Vector2(MAP, MAP))
+	minimap = Minimap.new()
+	minimap.name = "Minimap"
+	minimap.set_anchors_preset(Control.PRESET_FULL_RECT)
+	minimap.size = Vector2(MAP, MAP)
+	minimap.visible = false
+	mapbox.add_child(minimap)
 
 	# --- centre: countdown and event messages ---
 	_lights = _box_label(root, Control.PRESET_CENTER_TOP, Vector2(0, 40.0), 110, Color(1.0, 0.25, 0.2))
@@ -184,3 +233,101 @@ func update(car: CarBody, race: RaceDirector, delta: float) -> void:
 	_pos.text = "POS %d/%d" % [pos, maxi(race.entrants.size(), 1)]
 	_cash.text = "$%d" % Cfg.money
 	_wrong.visible = race.is_wrong_way(0)
+
+	# The round that was just decided, if any. Read every frame rather than pushed
+	# in, because the HUD already reads the director for everything else and this
+	# way the history cannot be shown for a race the director did not run.
+	_sync_round(race)
+
+	# The map follows the car and the field, from the same graph the streets are
+	# built from. Hidden until a race actually has a route on it, so an empty map
+	# is never on screen in the menus.
+	if minimap != null:
+		minimap.visible = race.def != null
+		if car != null:
+			minimap.set_player(car.global_position, car.forward())
+		# Entrant 0 is the player, who is the centre of a rotating map; the rest
+		# are the field.
+		var field: Array = []
+		for i in range(1, race.entrants.size()):
+			field.append(race.entrants[i])
+		minimap.set_rivals(field)
+
+
+# ---------------------------------------------------------------- the round board
+
+## Puts the director's last concluded round on screen, once. Re-rendering on every
+## frame would be the expensive way to say nothing has changed, so the round being
+## shown is compared by identity and the board is only rebuilt when it differs.
+func _sync_round(race: RaceDirector) -> void:
+	var round: RoundResult = race.last_round() if race != null else null
+	if round == null:
+		_clear_board()
+		return
+	if round == _round_shown:
+		return
+	_round_shown = round
+	_round.text = round.headline()
+	_fill_board(round)
+
+
+## The classification, one label per row, in the order the round recorded. Built
+## from the round rather than from `race.results` so the board shows what was
+## written down, which is the thing a later round must not be able to rewrite.
+func _fill_board(round: RoundResult) -> void:
+	for c in _board.get_children():
+		_board.remove_child(c)
+		c.queue_free()
+	var rows: Array = round.board_rows()
+	# Through `offset_bottom` rather than `size`: the box is anchored, and setting
+	# `size` on an anchored Control in the tree fights the anchor every frame.
+	_board_box.offset_bottom = _board_box.offset_top + 20.0 + 18.0 * float(rows.size())
+	for i in rows.size():
+		var text: String = String(rows[i])
+		var l := _label(_board, text, 15, _board_colour(i, text))
+		l.size = Vector2(300.0, 18.0)
+	_board_box.visible = rows.size() > 0
+
+
+## The player's own row in sodium, as the results board does it, so a four-car
+## classification is findable without counting rows in two places.
+func _board_colour(i: int, text: String) -> Color:
+	if text.begins_with("P1 "):
+		return Color(1.0, 0.9, 0.55)
+	if text.contains(" YOU "):
+		return Color(0.65, 0.8, 1.0)
+	return Color(0.72, 0.72, 0.7)
+
+
+func _clear_board() -> void:
+	if _round_shown == null and _board_box != null and not _board_box.visible:
+		return
+	_round_shown = null
+	if _round != null:
+		_round.text = ""
+	for c in _board.get_children():
+		_board.remove_child(c)
+		c.queue_free()
+	if _board_box != null:
+		_board_box.visible = false
+
+
+## What the HUD is showing, read back. Tests and a host both need to be able to ask
+## without walking the label tree, and the answer has to be the text on the screen
+## rather than a re-derivation of it.
+func round_text() -> String:
+	return _round.text if _round != null else ""
+
+
+## The classification rows as rendered, in order.
+func board_rows() -> Array:
+	var out: Array = []
+	for c in _board.get_children():
+		if c is Label:
+			out.append((c as Label).text)
+	return out
+
+
+## True when a concluded round is on screen.
+func board_visible() -> bool:
+	return _board_box != null and _board_box.visible

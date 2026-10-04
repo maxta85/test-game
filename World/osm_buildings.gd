@@ -119,8 +119,77 @@ const ROOF_TINTS := [
 	Color(0.30, 0.31, 0.30), Color(0.36, 0.30, 0.26), Color(0.26, 0.30, 0.30),
 ]
 
+## --- detail ----------------------------------------------------------------
+##
+## The four things below are what turn an extruded ring into a building: an eave
+## that has an underside, a veranda across the front, a sill under every pane, and
+## a tin awning over a shopfront. All of it goes into the batches `build()` already
+## emits, so the whole pass costs no draw call - the city stays at eleven nodes,
+## which is the number Tests/test_osm_buildings.gd caps.
+##
+## Every dimension is a real one. A veranda deck stands 1.45 m off the wall and
+## falls 0.72 m from the eave to its outer edge, which is a low Queenslander
+## veranda; a 2 m one would be a deck you could not walk under.
+const VERANDA_OUT := 1.45
+## Deck edge, held in from the roof edge so the roof oversails the balustrade.
+const DECK_OUT := 1.32
+const DECK_T := 0.13
+## How far below the eave the veranda roof meets the wall, and its fall.
+const VERANDA_ATTACH := 0.34
+const VERANDA_DROP := 0.72
+const VERANDA_FASCIA := 0.16
+## Balustrade: a closed apron under the deck, a rail above it, and a gap between.
+## The gap is the point - a solid wall from deck to rail reads as a porch box, and
+## the rhythm of daylight through balusters is what says "veranda" from a car.
+const APRON := 0.42
+const RAIL_TOP := 0.95
+const RAIL_T := 0.10
+const POST_W := 0.10
+## Sill under a pane: how far it stands off the wall, how deep, how much wider
+## than the glass. The overhang is what casts the line under the window.
+const SILL_OUT := 0.07
+const SILL_T := 0.09
+const SILL_W := 0.07
+## Tin awning over a shopfront. Steel, not canvas, because that is what a
+## tropical strip actually gets and because it can share the roof batch.
+const AWNING_OUT := 1.25
+const AWNING_DROP := 0.55
+
 static var _data: Variant = null
 static var _raw: Array = []
+
+## Frontage telemetry for the last `plan()`/`build()` pair. `FRONTAGE_M` is a
+## limit on what may be *glazed*, not on what may be *built*: a backland wall
+## still wants a window grid so the far side of the map is not a black field, but
+## a veranda is 1.45 m of deck and rail projecting off the building, and on a wall
+## 40 m from a carriageway that is geometry facing a fence.
+##
+## `_faces_total` counts every face handed to `_veranda()`, `_faces_front` the ones
+## within FRONTAGE_M, and `_fallback` the ones that exist only because
+## `_street_faces()` had nothing better to return. `_verandas_built` is drawn
+## only from `_faces_front`, and `_fallback_verandas` counts the offers refused
+## for want of frontage - so `_faces_front == _fallback_verandas + <refused by
+## span> + _verandas_built`. The two numbers to watch are `_verandas_built`
+## against `_fallback_verandas`: before the gate existed the first was ~26x the
+## total offered.
+static var _faces_total: int = 0
+static var _faces_front: int = 0
+static var _fallback: int = 0
+static var _fallback_verandas: int = 0
+static var _verandas_built: int = 0
+
+
+## What the last `plan()`/`build()` pair did with frontage. Public so a capture or
+## a test can read the ratio without re-deriving it from geometry.
+static func frontage_stats() -> Dictionary:
+	return {
+		"faces_total": _faces_total,
+		"faces_front": _faces_front,
+		"fallback": _fallback,
+		"verandas_built": _verandas_built,
+		"fallback_verandas": _fallback_verandas,
+		"frontage_m": FRONTAGE_M,
+	}
 
 
 static func data() -> Dictionary:
@@ -157,6 +226,14 @@ static func footprints() -> Array:
 ## shape decided. No geometry, so the test and the world agree on which buildings
 ## exist without either of them having to build anything.
 static func plan(graph: RoadGraph) -> Dictionary:
+	# Reset here, not in `build()`: `build()` calls `plan()`, and a caller that
+	# asks for the plan first (every test does) would otherwise leave the counters
+	# describing a plan whose faces were never built.
+	_faces_total = 0
+	_faces_front = 0
+	_fallback = 0
+	_fallback_verandas = 0
+	_verandas_built = 0
 	var roads := road_index(graph)
 	var rng := RandomNumberGenerator.new()
 	var kept: Array = []
@@ -233,6 +310,7 @@ static func build(parent: Node3D, graph: RoadGraph) -> Dictionary:
 		var tint: int = e["tint"]
 		var roof: int = e["roof"]
 		_band(walls[tint], ring, lift, lift + wall)
+		_detail(walls[tint], roofs[roof], ring, e)
 		_facade(walls[tint], windows, signs, ring, e)
 		for q in ring:
 			lo = Vector2(minf(lo.x, q.x), minf(lo.y, q.y))
@@ -258,13 +336,24 @@ static func build(parent: Node3D, graph: RoadGraph) -> Dictionary:
 		var mat := MatLib.corrugated(ROOF_TINTS[tint])
 		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 		nodes += _emit(parent, "Roof%d" % tint, roofs[tint], mat)
-	# Energy is the whole game on a facade. At 1.1 a lit pane sat under a sodium
-	# lamp and lost to the wall the lamp was lighting - the glass was there and
-	# the street still read as blank render. A lit window at night is brighter
-	# than the wall around it; that is the whole reason a facade reads at all.
-	nodes += _emit(parent, "SignFascia", signs[0], MatLib.emissive(Color(1.0, 0.78, 0.45), 3.4))
-	nodes += _emit(parent, "WindowWarm", windows[0], MatLib.emissive(Color(1.0, 0.74, 0.44), 2.4))
-	nodes += _emit(parent, "WindowCool", windows[1], MatLib.emissive(Color(0.62, 0.76, 0.95), 2.0))
+	# Energy is the whole game on a facade, and 2.4 was too much of it.
+	#
+	# At 1.1 a lit pane sat under a sodium lamp and lost to the wall the lamp was
+	# lighting, so the energy went up - and at 2.4 the near shopfront went the other
+	# way. Measured off the race-start frame at 1280x720, the near-facade region
+	# had 36.6% of its pixels with a channel pinned at 255 and a mean hue of 0.26:
+	# a white light box, not a lit room. Sampled directly, a pane core was
+	# (255, 255, 255) - no colour left at all.
+	#
+	# At 1.15 the same pixel is (255, 255, 211) and the region's mean hue is 0.54,
+	# so the pane reads as a warm room with a halo. It is still two channels hot,
+	# and that is the glow doing it rather than the emission: GLOW_THRESHOLD is 0.95
+	# and the additive pass lands on top of an already-bright core. Chasing the
+	# last channel would mean dimming the glass until the facade stopped reading,
+	# which is the failure the 1.1 experiment already made once.
+	nodes += _emit(parent, "SignFascia", signs[0], MatLib.emissive(Color(1.0, 0.60, 0.22), 1.5))
+	nodes += _emit(parent, "WindowWarm", windows[0], MatLib.emissive(Color(1.0, 0.70, 0.38), 1.15))
+	nodes += _emit(parent, "WindowCool", windows[1], MatLib.emissive(Color(0.55, 0.72, 0.95), 1.10))
 	if not posts.is_empty():
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -287,6 +376,12 @@ static func build(parent: Node3D, graph: RoadGraph) -> Dictionary:
 	out["stumps"] = posts.size()
 	print("[OSM buildings] %d real footprints: %d clear, %d clipped (%d vertices moved), %d dropped, %d draw calls"
 		% [int(p["read"]), int(p["clear"]), int(p["clipped"]), int(p["moved"]), int(p["dropped"]), nodes])
+	# The frontage line is printed next to the geometry line because the two are
+	# the same argument: `faces_total` is what the old code would have built a
+	# veranda on, `verandas_built` is what it does. They were not equal before
+	# FRONTAGE_M was enforced here.
+	print("[OSM frontage] %d faces offered to _veranda, %d within %.1f m of a carriageway, %d verandas built, %d refused for want of frontage (%d buildings had no frontage at all and were glazed anyway)"
+		% [_faces_total, _faces_front, FRONTAGE_M, _verandas_built, _fallback_verandas, _fallback])
 	return out
 
 
@@ -368,9 +463,16 @@ static func _street_faces(ring: PackedVector2Array, cand: Array, roads: Dictiona
 		out.append({"i": i, "cls": cls, "gap": gap})
 	# A building with no road in front of it still gets one glazed face, or the
 	# far side of the map goes dark. Same fallback the old single-edge search was.
+	#
+	# This face is tagged, and it is the ONLY thing the tag is for: glazing a
+	# backland wall is right, hanging a veranda off one is not. `_veranda()` gates
+	# on the tag. Before the tag existed this face was indistinguishable from a
+	# real frontage, and `_veranda()` - which takes `faces[0]` and `faces[1]` with
+	# no question asked - built a veranda on it.
 	if out.is_empty() and not cand.is_empty():
 		out.append({"i": int(nearest["i"]), "cls": RoadGraph.RoadClass.LANE,
-				"gap": float(nearest["gap"])})
+				"gap": float(nearest["gap"]), "fallback": true})
+		_fallback += 1
 	out.sort_custom(func(x, y): return float(x["gap"]) < float(y["gap"]))
 	return out
 
@@ -623,6 +725,201 @@ static func _moved(before: PackedVector2Array, after: PackedVector2Array) -> int
 
 # ------------------------------------------------------------------ geometry
 
+## The detail pass, per building: the underside of the eave overhang, and then
+## whatever the building is - a veranda on a raised house, a tin awning on a shop.
+##
+## The soffit is the one that is a fix rather than a flourish. `_pitched` and
+## `_cap` both face up and `_band` faces out, so nothing in this file has ever
+## had a face pointing at the ground: the EAVES overhang was a 0.6 m strip of
+## nothing, and from a car-height camera you could see straight through it into
+## the inside of the building. At night that reads as a bright slot under every
+## eave, because whatever is behind it is not dark.
+static func _detail(st: SurfaceTool, roof_st: SurfaceTool, ring: PackedVector2Array,
+		e: Dictionary) -> void:
+	var lift: float = e["lift"]
+	var top: float = lift + float(e["wall"])
+	var eaved := _offset(ring, EAVES)
+	# 2 cm below the slab on a flat roof, and flush on a pitched one. The cap of a
+	# flat roof fills the *eaved* ring at exactly `top`, so a soffit at `top`
+	# would be a coplanar overlap and would z-fight across the whole overhang. A
+	# pitched roof only shares an edge with its eave line, so there is nothing to
+	# fight and the soffit goes flush.
+	var soffit_y := top - (0.02 if bool(e["flat"]) else 0.0)
+	_soffit(st, ring, eaved, soffit_y)
+	if bool(e["flat"]):
+		if top - lift > SHOP_TOP + 1.2:
+			_awning(roof_st, ring, e)
+		return
+	_veranda(st, roof_st, ring, e, lift, top)
+
+
+## The underside of the eave overhang: one downward quad per ring edge, spanning
+## from the wall out to the eave line the roof already oversails to.
+static func _soffit(st: SurfaceTool, ring: PackedVector2Array, eaved: PackedVector2Array,
+		y: float) -> void:
+	var n := ring.size()
+	for i in n:
+		var a := ring[i]
+		var b := ring[(i + 1) % n]
+		var out := Vector3(b.y - a.y, 0.0, a.x - b.x)
+		if out.length_squared() < 1e-6:
+			continue
+		_quad(st, Vector3(a.x, y, a.y), Vector3(b.x, y, b.y),
+			Vector3(eaved[(i + 1) % n].x, y, eaved[(i + 1) % n].y),
+			Vector3(eaved[i].x, y, eaved[i].y), Vector3.DOWN)
+
+
+## A veranda across the two faces of a raised house you actually drive past.
+##
+## This is the Cairns silhouette. A stilt house with a roofed deck, a rail and a
+## stair is legible as a house from the far side of a street; the same box on
+## posts is a box on posts, and the daylight under it is a hole in the frame. The
+## lit window grid already says "someone is home" - this says "this is a place".
+static func _veranda(st: SurfaceTool, roof_st: SurfaceTool, ring: PackedVector2Array,
+		e: Dictionary, lift: float, top: float) -> void:
+	var faces: Array = e["faces"]
+	var n: int = mini(faces.size(), 2)
+	for k in n:
+		var f: Dictionary = faces[k]
+		# FRONTAGE_M is BINDING here, not advisory. `_street_faces()` drops faces
+		# past it, but when a building has no frontage at all its fallback hands
+		# back one face anyway - and that face is by definition a backland wall,
+		# `gap` > FRONTAGE_M. A veranda is the only thing in this file that
+		# PROJECTS off the building (VERANDA_OUT 1.45 m, DECK_OUT 1.32 m), so on a
+		# backland elevation it is deck, rail, apron and fascia aimed at another
+		# building's fence, which is why no camera had ever photographed one.
+		#
+		# The fallback face is kept for glazing - a window grid on a backland wall
+		# is correct, and removing it would put a black field where the far side of
+		# the map used to be. The building simply gets no veranda.
+		_faces_total += 1
+		var gap := float(f["gap"])
+		if gap > FRONTAGE_M:
+			_fallback_verandas += 1
+			continue
+		_faces_front += 1
+		if _veranda_face(st, roof_st, ring, e, f, lift, top):
+			_verandas_built += 1
+
+
+## Returns true if it actually built something. A face can pass the frontage
+## test and still get nothing here: too short to stand a veranda on. The
+## frontage telemetry counts what was BUILT rather than what was offered, so the
+## 85-vs-73 gap between "on a real frontage" and "built" is visible instead of
+## being absorbed into a single number.
+static func _veranda_face(st: SurfaceTool, roof_st: SurfaceTool, ring: PackedVector2Array,
+		e: Dictionary, f: Dictionary, lift: float, top: float) -> bool:
+	var i := int(f["i"])
+	var a := ring[i]
+	var b := ring[(i + 1) % ring.size()]
+	var span := a.distance_to(b)
+	# A face too short to stand a veranda on gets nothing at all. Half a veranda
+	# is a projecting shelf.
+	if span < VERANDA_OUT + CORNER_MARGIN * 2.0 + 0.6:
+		return false
+	var dir := (b - a) / span
+	var nrm := Vector3(dir.y, 0.0, -dir.x)
+	var along := Vector3(dir.x, 0.0, dir.y)
+	var p0 := Vector3(a.x, 0.0, a.y)
+	var p1 := Vector3(b.x, 0.0, b.y)
+	var q0 := p0 + nrm * DECK_OUT
+	var q1 := p1 + nrm * DECK_OUT
+
+	# Deck, at the floor the wall already starts from, so it reads as the same
+	# slab the house stands on rather than a shelf stuck to it.
+	_horiz(st, p0, p1, q1, q0, lift)
+	_edge(st, q0, q1, nrm, lift - DECK_T - APRON, lift - DECK_T)
+	_edge(st, q0, q1, nrm, lift - DECK_T, lift)
+	_edge(st, q0, q1, nrm, lift + RAIL_TOP - RAIL_T, lift + RAIL_TOP)
+
+	# Veranda roof: off the wall under the eave, out and down to the rail. It goes
+	# in the roof batch, which is CULL_DISABLED, so its underside is there to be
+	# seen from a car and no separate soffit quad is needed.
+	var y_attach := top - VERANDA_ATTACH
+	var y_edge := y_attach - VERANDA_DROP
+	_quad(roof_st, p0 + Vector3(0.0, y_attach, 0.0), p1 + Vector3(0.0, y_attach, 0.0),
+		q1 + Vector3(0.0, y_edge, 0.0), q0 + Vector3(0.0, y_edge, 0.0), Vector3.UP)
+	_edge(roof_st, q0, q1, nrm, y_edge - VERANDA_FASCIA, y_edge)
+	_post(st, q0, nrm, along, POST_W * 0.5, lift - DECK_T - APRON, y_edge - VERANDA_FASCIA)
+	_post(st, q1, nrm, along, POST_W * 0.5, lift - DECK_T - APRON, y_edge - VERANDA_FASCIA)
+	return true
+
+
+## A tin awning over a shopfront, on the same principle as the veranda: the shop
+## needs something between the sign and the footpath or the ground floor is a
+## rectangle of glass with a stripe above it.
+static func _awning(roof_st: SurfaceTool, ring: PackedVector2Array, e: Dictionary) -> void:
+	var lift: float = e["lift"]
+	var y_wall := lift + SHOP_TOP + 0.15
+	var y_edge := y_wall - AWNING_DROP
+	for f in e["faces"]:
+		var i := int(f["i"])
+		var a := ring[i]
+		var b := ring[(i + 1) % ring.size()]
+		var span := a.distance_to(b)
+		if span < AWNING_OUT + 1.0:
+			continue
+		var dir := (b - a) / span
+		var nrm := Vector3(dir.y, 0.0, -dir.x)
+		var along := Vector3(dir.x, 0.0, dir.y)
+		var p0 := Vector3(a.x, 0.0, a.y)
+		var p1 := Vector3(b.x, 0.0, b.y)
+		var q0 := p0 + nrm * AWNING_OUT
+		var q1 := p1 + nrm * AWNING_OUT
+		_quad(roof_st, p0 + Vector3(0.0, y_wall, 0.0), p1 + Vector3(0.0, y_wall, 0.0),
+			q1 + Vector3(0.0, y_edge, 0.0), q0 + Vector3(0.0, y_edge, 0.0), Vector3.UP)
+		_edge(roof_st, q0, q1, nrm, y_edge - VERANDA_FASCIA, y_edge)
+		# Two struts, because an awning with nothing holding it up is a floating
+		# triangle, and the strut is the diagonal the eye reads as "built".
+		_stay(roof_st, q0, nrm, along, Vector3(0.0, lift + SHOP_TOP - 0.2, 0.0),
+			Vector3(0.0, y_edge, 0.0), 0.045)
+		_stay(roof_st, q1, nrm, along, Vector3(0.0, lift + SHOP_TOP - 0.2, 0.0),
+			Vector3(0.0, y_edge, 0.0), 0.045)
+
+
+## A flat horizontal quad through two wall points and two points `out` away from
+## them. The four corners must be given in an order the winding can be fixed
+## from, which `_quad` does against the facing.
+static func _horiz(st: SurfaceTool, p0: Vector3, p1: Vector3, q1: Vector3, q0: Vector3,
+		y: float) -> void:
+	_quad(st, p0 + Vector3(0.0, y, 0.0), p1 + Vector3(0.0, y, 0.0),
+		q1 + Vector3(0.0, y, 0.0), q0 + Vector3(0.0, y, 0.0), Vector3.UP)
+
+
+## A vertical band between two points at a common height range, facing `nrm`. The
+## balcony/deck/rail/apron/soffit edge primitive: two numbers and a direction, so
+## none of them can drift out of square with the others.
+static func _edge(st: SurfaceTool, p0: Vector3, p1: Vector3, nrm: Vector3, y0: float,
+		y1: float) -> void:
+	_quad(st, p0 + Vector3(0.0, y0, 0.0), p1 + Vector3(0.0, y0, 0.0),
+		p1 + Vector3(0.0, y1, 0.0), p0 + Vector3(0.0, y1, 0.0), nrm)
+
+
+## A square post standing on `base`, four faces so it is a post from any angle.
+static func _post(st: SurfaceTool, base: Vector3, nrm: Vector3, along: Vector3, half: float,
+		y0: float, y1: float) -> void:
+	var c0 := base - along * half
+	var c1 := base + along * half
+	var d0 := c0 + nrm * half
+	var d1 := c1 + nrm * half
+	_edge(st, c0, c1, nrm, y0, y1)
+	_edge(st, d0, d1, -nrm, y0, y1)
+	_edge(st, c0, d0, along, y0, y1)
+	_edge(st, c1, d1, -along, y0, y1)
+
+
+## A diagonal stay from a wall point up to an awning edge. A quad, so it needs a
+## width to be visible at all: `t` is half its thickness along the wall.
+static func _stay(st: SurfaceTool, base: Vector3, nrm: Vector3, along: Vector3, low: Vector3,
+		high: Vector3, t: float) -> void:
+	var a0 := base + along * t + low
+	var a1 := base - along * t + low
+	var b0 := base + along * t + high
+	var b1 := base - along * t + high
+	_quad(st, a0, b0, b1, a1, nrm)
+	_quad(st, a0, a1, b1, b0, -nrm)
+
+
 ## Vertical band around a ring: a wall, a parapet, a slab edge.
 static func _band(st: SurfaceTool, ring: PackedVector2Array, y0: float, y1: float) -> void:
 	for i in ring.size():
@@ -749,6 +1046,13 @@ static func _cap(st: SurfaceTool, ring: PackedVector2Array, y: float, up: bool) 
 ## the whole facade pass costs a single extra draw call for the city of 2198 -
 ## which matters, because Tests/test_osm_buildings.gd caps this at a dozen and the
 ## cap is the reason a facade can be worth drawing at all.
+##
+## `wall_st` is the building's own wall tint batch, and it carries all of the
+## opaque relief: the piers and cornice from `street/verticals`, and the sill from
+## the buildings-detail pass. Both arrived at that signature independently and it
+## is the same signature, so the merge keeps one of the two names rather than two.
+## A sill is opaque and belongs on the wall it is bolted to, which is why it costs
+## no draw call.
 static func _facade(wall_st: SurfaceTool, windows: Array, signs: Array,
 		ring: PackedVector2Array, e: Dictionary) -> void:
 	for f in e["faces"]:
@@ -782,6 +1086,20 @@ static func _face(wall_st: SurfaceTool, windows: Array, signs: Array,
 		var p := Vector3(c.x, ground + y0, c.y) + nrm * GLASS_OUT
 		_quad(st, p - along * half_w, p + along * half_w,
 				p + along * half_w + up * h, p - along * half_w + up * h, nrm)
+
+	# The sill under a panel. Two quads, not one: the horizontal top is the part
+	# that takes light from above and throws a line under the glass, and a single
+	# vertical lip in the plane of the wall throws nothing and reads as a painted
+	# stripe. This is the whole difference between a pane and an opening.
+	var sill := func(t: float, y0: float, half_w: float) -> void:
+		var c := a + dir * t
+		var w := half_w + SILL_W
+		var c0 := Vector3(c.x, ground + y0, c.y) - along * w
+		var c1 := Vector3(c.x, ground + y0, c.y) + along * w
+		var s0 := c0 + nrm * SILL_OUT
+		var s1 := c1 + nrm * SILL_OUT
+		_quad(wall_st, c0, c1, s1, s0, up)
+		_edge(wall_st, s0, s1, nrm, ground + y0 - SILL_T, ground + y0)
 
 	# A box standing proud of the wall, as a real box and not a decal: a front
 	# face plus both returns. The returns are what a car going past at 60 km/h
@@ -852,6 +1170,22 @@ static func _face(wall_st: SurfaceTool, windows: Array, signs: Array,
 			panel.call(glass, CORNER_MARGIN + (float(k) + 0.5) * bay_pitch, SHOP_SILL,
 					minf(1.15, bay_pitch * 0.4), SHOP_TOP - SHOP_SILL)
 
+	if shop:
+		# Shopfront: a run of bays. The gaps between them are real - the piers above
+		# stand in them - so a bay reads as a bay and not as a white rectangle
+		# floating on unbroken wall.
+		#
+		# The glass is 64% of the bay, not 80%: at 2.3 m of glass in a 2.6 m bay the
+		# frontage was one unbroken sheet of light with no frame in it at all. Bay
+		# count and pitch come from the count above, because the piers stand on that
+		# same rhythm and two copies of a pitch always drift.
+		var glass: SurfaceTool = windows[0 if bool(e["warm"]) else 1]
+		for k in bays:
+			var t := CORNER_MARGIN + (float(k) + 0.5) * bay_pitch
+			var half_bay := minf(0.95, bay_pitch * 0.32)
+			panel.call(glass, t, SHOP_SILL, half_bay, SHOP_TOP - SHOP_SILL)
+			sill.call(t, SHOP_SILL, half_bay)
+
 	# Signage. A shop signs its own frontage; anything on an arterial or a
 	# highway is a main road frontage and gets one whether or not it is a shop,
 	# because that is the stretch where a sign is what you read at 60 km/h.
@@ -884,8 +1218,9 @@ static func _face(wall_st: SurfaceTool, windows: Array, signs: Array,
 			# facade where every pane is lit is an office block.
 			var warm: bool = bool(e["warm"]) if (int(e["id"]) + row * 7 + col * 13) % 5 > 0 \
 					else not bool(e["warm"])
-			panel.call(windows[0 if warm else 1], CORNER_MARGIN + (float(col) + 0.5) * pitch,
-					y, half_w, PANE_H)
+			var t := CORNER_MARGIN + (float(col) + 0.5) * pitch
+			panel.call(windows[0 if warm else 1], t, y, half_w, PANE_H)
+			sill.call(t, y, half_w)
 
 
 ## Stumps under a raised house, one per corner of the ring and thinned out, so a

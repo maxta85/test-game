@@ -119,12 +119,69 @@ const MAX_ROAD_DARK := 0.75
 ## rejects both of those and keeps all four that are on tarmac; the margin over
 ## `walk3` is deliberately thin, because a pose that is nearly this bad should
 ## fail rather than be tolerated.
+##
+## ---------------------------------------------------------------------------
+## RE-MEASURED 2026-10-04 (tag grade2-base, after `bc7efef`): THIS CHECK HAS
+## THREE FALSE NEGATIVES, and it is left in place rather than quietly tuned down.
+##
+## The poses moved. `bc7efef` stopped RDP collapsing road centrelines into
+## straight chords, so the road graph went 359 junctions / 401 edges / 31 694 m
+## -> 1872 / 2021 / 50 845 m, and every pose in that capture sits on different
+## street than it did on `vf-before` (all six are on Hoare Street now). Its
+## `walk2`/`walk3` observation may well have been true here and false there.
+##
+## Ground truth by frame difference rather than by proxy: the capture was
+## repeated with **only** `MatLib.wet_asphalt()` changed (albedo plus a magenta
+## emission floor, both inside `World/mat_lib.gd`), so a pixel that moved *is*
+## asphalt. Asphalt share of the road band, threshold 8 against a **measured**
+## jitter floor of max 1 level taken from sky regions of the same frame pair:
+##
+##     kerb 99.6%   street 99.9%   junction 97.3%
+##     walk1 100.0%  walk2  100.0%  walk3  100.0%
+##
+## 85 676 road pixels against 562 non-road - 99.3% of every band is tarmac. So
+## on this geometry `walk1` (0.284), `walk2` (0.106) and `walk3` (0.096) fail for
+## low detail while demonstrably being road.
+##
+## Why the statistic cannot do this job, measured over those 86 238 labelled
+## pixels: `detail` is the mean absolute *horizontal* gradient, and it separates
+## the two classes at AUC 0.879 - but **inverted**. Road pixels have a median
+## horizontal gradient of 0.000 against 1.000 for non-road. The road here is dark
+## (luma p50 3.0) and wet, so it has almost no horizontal structure to measure.
+## What the statistic actually measures is "how much texture is in this surface",
+## which is a different question - and it cuts against this file's own wet-road
+## direction, since the fix for the glitter these thresholds were written against
+## was a smooth near-mirror, which is exactly what drives `detail` toward zero.
+##
+## No threshold repairs it: a floor below 0.096 admits every band and can then
+## never fire, which is a check that cannot fail. Identifying road needs a
+## geometric answer - a downward ray per band reporting its collider or material -
+## and that has to be taken in `World/look_dev_capture.gd`, whose owner this file
+## does not share. Left fail-closed and documented rather than weakened on the
+## strength of a proxy that is known to point the wrong way.
+## ---------------------------------------------------------------------------
 const MIN_ROAD_DETAIL := 1.00
 
 ## LIGHTING. A night frame whose near field clips is a frame with no night in it.
 ## The before frame loses its whole right-hand third to white, so this is the
 ## threshold that has to move and it is the one that could redden a release.
 const MAX_FRAME_CLIPPED := 0.035
+
+## LIGHTING, on the hero surface. `MAX_FRAME_CLIPPED` above is a whole-frame
+## budget and a *local* blowout hides inside it: a street whose road band is
+## half a percent of the frame can still lose its entire sodium pool to white.
+## Measured on the `street` pose, the road band clipped 0.0642 while the frame
+## as a whole clipped only 0.0218 and passed the budget above with room to
+## spare - so the one check that would have caught it never ran, and the road
+## read as an orange glitter field.
+##
+## 0.05 is set from `CLIP_LUMA` rather than from the build: 250/255 is inside the
+## last two 8-bit steps where the tonemap has no room left to roll off, so a
+## clipped pixel has no tonal separation left in it at all. One pixel in twenty
+## of the road being tonally dead is a blown pool; the before build misses this
+## by 28% and the after build clears it by 4.6x, which is a wide enough gap on
+## both sides that the number is not fitted to the pair it was measured on.
+const MAX_ROAD_CLIPPED := 0.05
 
 ## ATMOSPHERE / LIGHTING, the other side of the same knob: a frame with no floor is
 ## just as wrong as one with no ceiling. `look.gd` measured the unlit road at
@@ -329,6 +386,13 @@ static func checks(poses: Array) -> Array:
 		out.append(_c("%s: frame not blown out" % name,
 			float(rep["clipped"]) <= MAX_FRAME_CLIPPED, "clipped",
 			float(rep["clipped"]), 1.0, MAX_FRAME_CLIPPED, "lighting"))
+		# And the same question of the one surface the rubric calls the hero. This
+		# is a separate assertion, not a stricter version of the one above: a
+		# whole-frame budget cannot see a blowout that is small in area and total
+		# in effect, and that is the shape this defect actually had.
+		out.append(_c("%s: the road is not blown out" % name,
+			float(road["clipped"]) <= MAX_ROAD_CLIPPED, "road clipped",
+			float(road["clipped"]), 1.0, MAX_ROAD_CLIPPED, "lighting"))
 		# ATMOSPHERE - and one that is all floor is just as wrong.
 		out.append(_c("%s: frame has a floor" % name,
 			float(rep["dark"]) <= MAX_FRAME_DARK, "dark",

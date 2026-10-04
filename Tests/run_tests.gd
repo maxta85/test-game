@@ -19,8 +19,42 @@ extends SceneTree
 ## suite's, and it should never cost the run its honesty - an aborted suite
 ## used to be a silent pass, which is how a whole suite could die at its first
 ## line and the run still print "0 failed".
+##
+## WHAT IS GUARANTEED, and by what. A suite file that cannot be turned into a
+## running object is named, the run carries on, the normal summary still
+## prints, and the process exits non-zero - see `_acquire`. That case is the
+## one that used to cost the whole run, because `load()` hands back a NON-NULL
+## GDScript for a file that failed to compile, so the old null check never
+## fired and the failure only surfaced as a `.new()` throw inside this file's
+## own coroutine.
+##
+## THE LIMIT, MEASURED, NOT GUESSED. GDScript has no try/catch and no API that
+## reports whether a coroutine aborted, so a suite that throws part way through
+## `run()` cannot be detected at the throw site. With
+## `Tests/test_probe_runthrow.gd` as the only broken file, the run printed
+## `-- probe_runthrow: 1 passed, 0 failed`, a summary of `6 passed, 0 failed`,
+## and exited 0 - measured 2026-10-03. Godot's own `SCRIPT ERROR` line names
+## the file and line, so the information is in the transcript, but it is not in
+## the counts.
+##
+## The realistic cases are still caught, because a suite that throws almost
+## always leaves one of the three traces `end_suite()` inspects, and each of
+## those names the suite: `Engine.time_scale` left moved, nodes left standing,
+## or the tree left paused. A suite engineered to die leaving none of the three
+## is the only shape that slips through, and closing it would mean guessing
+## ("zero assertions means broken"?) - which is the same move that made a run
+## green without testing anything. Deliberately not done: a false failure on a
+## healthy suite is worse than this gap, because it trains people to ignore the
+## runner.
 
 const TESTS_DIR := "res://Tests/"
+
+## Suites that were discovered but never ran, kept on their own axis.
+## Deliberately NOT recorded through `t.ok`: an unloadable file is not a
+## suite whose assertions passed and not a suite whose assertions failed -
+## it contributed no assertions at all, and the run's honesty depends on
+## that being visible as its own thing.
+var _unloadable: Array[Dictionary] = []
 
 ## A throwaway suite, for the self-check: it builds a world and then dies half
 ## way through it, which is the shape the runner has to survive.
@@ -70,20 +104,130 @@ func _initialize() -> void:
 		var name: String = String(path).get_file().replace("test_", "").replace(".gd", "")
 		if filter != "" and not name.contains(filter):
 			continue
-		var script: Script = load(path)
 		t.begin_suite(name)
-		if script == null:
-			t.ok(false, "suite failed to load: %s" % path)
+		var got: Variant = _acquire(path)
+		# `typeof` is tested first on purpose. `_acquire` can itself be torn
+		# down by a throw it could not contain, and a torn-down call comes
+		# back null - calling `.is_empty()` on that null is the same crash,
+		# one call deeper.
+		if typeof(got) != TYPE_DICTIONARY or got.is_empty():
+			_record_unloadable(path,
+				"instantiation threw inside the runner and could not be contained")
 		else:
-			var suite: Object = script.new()
-			await suite.call("run", t)
+			var suite: Object = got.get("suite", null)
+			if suite == null:
+				_record_unloadable(path, got.get("error", "unknown reason"))
+			elif not suite.has_method("run"):
+				_record_unloadable(path,
+					"it instantiated, but the object has no run(t) method to call")
+			else:
+				await suite.call("run", t)
 		t.end_suite()
 		await _isolate(t, name)
 		ran += 1
 
 	if ran == 0:
 		print("no suites matched filter")
-	quit(t.summary())
+	# UNPARSEABLE is a separate outcome, not a failed assertion: the counters
+	# are left exactly as the suites left them, and the non-zero status is
+	# added on top of the summary's own.
+	var exit_code: int = t.summary()
+	# Printed AFTER `summary()`, not before it. Measured 2026-10-03 with a
+	# deliberately unparseable probe: printing this block first left
+	# "7 passed, 0 failed" as the LAST line on screen, so the tail of a run
+	# whose exit code was 1 read as a clean pass. The warning about the file
+	# that never ran has to be the last thing printed, not the thing a
+	# half-reading skims past. (w5's original comment here said "after the
+	# summary" while the code printed it before; the code was what ran.)
+	_record_unloadable_summary()
+	if not _unloadable.is_empty():
+		exit_code = maxi(exit_code, _unloadable.size())
+	quit(exit_code)
+
+
+## Loads and instantiates ONE suite, keeping every way that can fail inside
+## this function.
+##
+## Measured 2026-10-03 against a `Tests/test_t75_probe.gd` holding an
+## unclosed paren - the 06:10Z gate failure, reproduced to the letter:
+##
+##     ERROR: Failed to load script "res://Tests/test_t75_probe.gd" with
+##            error "Parse error".
+##     SCRIPT ERROR: Invalid call. Nonexistent function 'new' in base
+##               'GDScript'.
+##               at: _initialize (res://Tests/run_tests.gd:78)
+##
+## Two facts in that transcript decide this whole function.
+##
+## 1. `load()` returns a NON-NULL GDScript for a file that failed to
+##    compile. So the runner's old `if script == null` check never fired
+##    for the one case it was written for, and control fell straight
+##    through to `.new()`. A null check alone cannot fix this; the loaded
+##    object has to be interrogated.
+## 2. That `.new()` ran in `_initialize`'s own frame. A GDScript runtime
+##    error aborts the function it happens in, so it aborted the runner's
+##    coroutine: `end_suite()`, `_isolate()`, the rest of the loop and
+##    `quit()` were all skipped, the SceneTree idled on an empty script,
+##    and the process was killed at the 900 s timeout - exit 124, no
+##    summary. Hanging is what an aborted runner looks like from outside.
+##
+## So there are two defences, because either alone leaves a hole.
+##
+##   a. `can_instantiate()` is checked BEFORE `.new()`, so the common case
+##      (a parse error) never calls `.new()` and never aborts anything.
+##   b. `.new()` is still called from here rather than from `_initialize`,
+##      so a throw from any OTHER cause - a script that compiles but whose
+##      `_init()` dies - is contained in this function and the caller
+##      carries on. That containment is not a guess: the harness
+##      self-check has always depended on it, because
+##      `_SelfCheckAbort.run` throws and the runner runs on past it.
+##
+## Returns `{"suite": Object|null, "error": String}`.
+func _acquire(path: String) -> Dictionary:
+	var script: Script = load(path)
+	if script == null:
+		return {"suite": null,
+			"error": "load() returned null - Godot logged the parse/compile error immediately above"}
+	if not script.can_instantiate():
+		# reload() re-runs the parser and hands back the engine's own verdict,
+		# so the report carries the error code and not just "it broke". It
+		# also re-prints the parse error next to this line, which is what puts
+		# Godot's "Expected closing )" text in the middle of the report.
+		var err: int = script.reload()
+		return {"suite": null,
+			"error": "the GDScript loaded but Godot refused to compile it: "
+				+ "can_instantiate() = false, reload() = %d (%s). " % [err, error_string(err)]
+				+ "The parse error Godot printed above names the offending line."}
+	var suite: Object = script.new()
+	if suite == null:
+		return {"suite": null,
+			"error": "the script compiled and instantiated, but the object came back null"}
+	return {"suite": suite, "error": ""}
+
+
+## Records a suite that never ran. Kept off `t.ok`/`t.problem` so it cannot
+## be counted as a pass, counted as a failure, or filed as a cleanup
+## problem - it is none of those three things.
+func _record_unloadable(path: String, reason: String) -> void:
+	_unloadable.append({"path": path, "reason": reason})
+	print("    [UNPARSEABLE] %s" % path)
+	print("                 %s" % reason)
+	print("                 0 assertions ran; every other suite still runs.")
+
+
+## The UNPARSEABLE block, printed after the normal end-of-run summary so it
+## reads as its own section and cannot be skimmed as part of the counts.
+func _record_unloadable_summary() -> void:
+	if _unloadable.is_empty():
+		return
+	print("\n%s" % "=".repeat(58))
+	print("  UNPARSEABLE SUITES (%d) - discovered, never ran:" % _unloadable.size())
+	for u in _unloadable:
+		print("    UNPARSEABLE %s" % u["path"])
+		print("                %s" % u["reason"])
+	print("  %d suite(s) contributed no assertions. That is a broken file, not" % _unloadable.size())
+	print("  a failing test: fix the file(s) above, the rest of the run stands.")
+	print("=".repeat(58))
 
 
 ## The harness's own promises, checked on every run. A few physics frames, and
