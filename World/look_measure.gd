@@ -108,6 +108,22 @@ const MAX_ROAD_DARK := 0.75
 ## threshold that has to move and it is the one that could redden a release.
 const MAX_FRAME_CLIPPED := 0.035
 
+## LIGHTING, on the hero surface. `MAX_FRAME_CLIPPED` above is a whole-frame
+## budget and a *local* blowout hides inside it: a street whose road band is
+## half a percent of the frame can still lose its entire sodium pool to white.
+## Measured on the `street` pose, the road band clipped 0.0642 while the frame
+## as a whole clipped only 0.0218 and passed the budget above with room to
+## spare - so the one check that would have caught it never ran, and the road
+## read as an orange glitter field.
+##
+## 0.05 is set from `CLIP_LUMA` rather than from the build: 250/255 is inside the
+## last two 8-bit steps where the tonemap has no room left to roll off, so a
+## clipped pixel has no tonal separation left in it at all. One pixel in twenty
+## of the road being tonally dead is a blown pool; the before build misses this
+## by 28% and the after build clears it by 4.6x, which is a wide enough gap on
+## both sides that the number is not fitted to the pair it was measured on.
+const MAX_ROAD_CLIPPED := 0.05
+
 ## ATMOSPHERE / LIGHTING, the other side of the same knob: a frame with no floor is
 ## just as wrong as one with no ceiling. `look.gd` measured the unlit road at
 ## literally rgb(0,0,0) before the contrast fix.
@@ -311,6 +327,13 @@ static func checks(poses: Array) -> Array:
 		out.append(_c("%s: frame not blown out" % name,
 			float(rep["clipped"]) <= MAX_FRAME_CLIPPED, "clipped",
 			float(rep["clipped"]), 1.0, MAX_FRAME_CLIPPED, "lighting"))
+		# And the same question of the one surface the rubric calls the hero. This
+		# is a separate assertion, not a stricter version of the one above: a
+		# whole-frame budget cannot see a blowout that is small in area and total
+		# in effect, and that is the shape this defect actually had.
+		out.append(_c("%s: the road is not blown out" % name,
+			float(road["clipped"]) <= MAX_ROAD_CLIPPED, "road clipped",
+			float(road["clipped"]), 1.0, MAX_ROAD_CLIPPED, "lighting"))
 		# ATMOSPHERE - and one that is all floor is just as wrong.
 		out.append(_c("%s: frame has a floor" % name,
 			float(rep["dark"]) <= MAX_FRAME_DARK, "dark",

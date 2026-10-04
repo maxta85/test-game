@@ -43,6 +43,59 @@ extends RefCounted
 ## carry the look and the ambient only keeps the dark from being a hole - but the
 ## grade was eating the bottom of the range, and that cost more than any lamp
 ## setting ever returned.
+##
+## ---------------------------------------------------------------------------
+## RE-ANCHORED TO THE REAL GEOMETRY (street/grade-on-real-geometry)
+##
+## Everything above was measured over `./render.sh`'s `street`/`aerial`/`carfront`
+## presets, which come from `Game/main.gd`'s `ShotPoser` and frame the grid
+## **relative to the car** - so two runs are two different frames and "the grade
+## improved" is not a measurable claim. The numbers below were re-measured on
+## `World/look_dev_capture.gd`'s six fixed poses (`kerb`, `street`, `junction`,
+## `walk1-3`), which are derived from `OSMLayout.start_line()` rather than from
+## the car, on the same 359-junction / 401-edge OSM world the player drives. Same
+## camera before and after, so the pairs are comparable and the frames are
+## re-measurable without re-rendering.
+##
+##     godot --path . --rendering-driver vulkan --resolution 1280x720 \
+##           --script res://World/look_dev_capture.gd -- --out /tmp/frames --tag X
+##
+## Two results from that re-measurement, both of which are *negative*, and both of
+## which are here so the next person does not spend the day re-deriving them:
+##
+## **1. `GLOW_THRESHOLD` is not a hue lever, and the red-looking sky bloom is not
+## a glow defect.** A sodium lamp's halo *looks* magenta-red against this city's
+## blue night sky, which reads as a colour bug. It is not: subtract the sky
+## behind it and the bloom's own colour is amber. The composite is the problem,
+## not the glow. Sweeping the threshold over 0.95 / 0.55 / 0.30 / 0.12 moved the
+## bloom's green-to-blue ratio 4.80 -> 4.23, i.e. very slightly the *wrong* way,
+## so the apparent fix is worse than doing nothing. Measured on the `street`
+## pose, bloom = pixel minus the median of an annulus containing no glow,
+## core pixels (which carry no hue) excluded:
+##
+##     threshold   bloom rgb        g/b
+##     0.95 (is)   191.2/ 71.6/14.9   4.80
+##     0.55        192.2/ 74.8/16.5   4.52
+##     0.30        192.6/ 77.4/17.7   4.36
+##     0.12        193.5/ 79.1/18.7   4.23
+##
+## **2. The frame-clipping failure is emissive-source-bound, so no lamp setting
+## can reach it.** `walk2` clips 4.37% of the frame against a 3.5% ceiling and no
+## grade change moves it: the whole-frame clipped share is *bit-identical*
+## (0.0437055) before and after a road-material change that moved every other
+## pose. The clipped pixels are one building's glazing at rgb 249/249/251 -
+## neutral white, 95% of a 290x35 region - i.e. an emissive panel clipping, not a
+## surface catching a lamp. It comes from the `MatLib.emissive()` call sites in
+## `World/osm_buildings.gd` (`WindowCool` at energy 2.0, `WindowWarm` 2.4,
+## `SignFascia` 3.4), all of which exceed the tonemap's clip point at
+## `tonemap_exposure` 1.45. Do **not** sweep `STREETLIGHT_ENERGY` chasing it:
+## the junction road band already sits at 7.80 mean against a 6.0 floor, so
+## there is 23% of headroom on that axis and spending it buys nothing here.
+##
+## The road itself was fixed at the material instead, in `World/mat_lib.gd`, and
+## the clipped-highlight instrument that was missing from the hero surface is in
+## `World/look_measure.gd` (`MAX_ROAD_CLIPPED`). No constant below changed value.
+## ---------------------------------------------------------------------------
 
 ## Energy of one street lamp. Was 45.0, which was not "ten times a shopfront" but
 ## ten times a shopfront *and* additive down a straight - 1278 shadowless lamps
