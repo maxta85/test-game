@@ -30,6 +30,46 @@ const HERO_POSES := ["kerb", "street", "junction"]
 ## has to be good before the map is allowed to grow.
 const WALK_BACK_M := [0.0, 250.0, 500.0]
 
+## The residential poses, deliberately NOT in the default list.
+##
+## Every pose above is on the anchor street, which is a commercial strip: it
+## frames shopfronts, kerbs and junctions and never a house. The building detail
+## that `World/osm_buildings.gd` spends 1,659 verandas on lives on side streets
+## that nothing here could see, so `resi` and `resi_detail` were written to look
+## at one - and they are opt-in (`--only resi`) rather than added to
+## `HERO_POSES`, because `World/look_dev_test.gd::_image_gate` asserts every
+## rubric point in `World/look_measure.gd` over every pose in the report, and
+## those thresholds were calibrated on kerb/street/junction. Adding a fifth
+## subject nobody calibrated would hand the next agent a red gate for a scene
+## that is fine.
+const RESI_POSES := ["resi", "resi_detail"]
+## The shortest wall that gets a veranda, summed from `OSMBuildings`' own constants
+## rather than copied as a number, so a change to any of the three cannot leave
+## this quietly picking walls the builder would skip.
+const RESI_MIN_SPAN := OSMBuildings.VERANDA_OUT + OSMBuildings.CORNER_MARGIN * 2.0 + 0.6
+## Eye heights. `resi` is 1.65 m, a standing adult on the footpath.
+##
+## `resi_detail` is the same eye height and looks at the same building; only the
+## standoff changes.
+##
+## Three attempts at this pose, and the two that failed are the useful part. In the
+## near lane for a steep 3/4 angle, the view went through a parked car; raised to
+## 2.4 m to clear it, through a tree instead - a faceted `(0, 0, 0)` artkit canopy
+## that did not move when the camera rose 0.8 m, which is what said "not a car".
+## Moved onto the footpath it went through a *second* tree, bigger, because these
+## footpaths have trees on them. The conclusion is not "raise it higher": it is that
+## eye level on this street is inside the canopy, so the detail pose crosses the
+## road and shoots back, where the only thing between camera and wall is air.
+const RESI_EYE := 1.65
+const RESI_EYE_DETAIL := 1.65
+## A house-sized frontage, for the pose that has to show one veranda rather than a
+## whole street. The longest street-facing wall in this map is 26.1 m, which is
+## two shops or a small block: a 26 m veranda is a veranda on nothing anybody
+## lives in. The detail pose takes the longest frontage inside this band instead.
+const RESI_HOUSE_SPAN := Vector2(7.0, 14.0)
+
+var _resi: Dictionary = {}
+
 
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
@@ -132,9 +172,10 @@ func _initialize() -> void:
 		# Print where the camera *ended up*, not where it was asked to go: the
 		# gap between those two numbers is the whole class of bug this harness
 		# exists to rule out, and it is invisible in the picture.
-		print("[LookDev] %s  asked=%s got=%s current=%s fov=%.0f  -> %s" % [
+		print("[LookDev] %s  asked=%s got=%s current=%s fov=%.0f street=%s run_m=%.0f -> %s" % [
 			pose, str(spec["at"].round()), str(cam.global_position.round()),
-			str(cam.current), float(spec["fov"]), path])
+			str(cam.current), float(spec["fov"]), str(spec.get("street", "")),
+			float(spec.get("run_m", 0.0)), path])
 		print("           %s" % JSON.stringify(m))
 
 	Engine.time_scale = 1.0
@@ -251,49 +292,53 @@ func _pose_spec(pose: String, at: Vector3, fwd: Vector3, side: Vector3, g: RoadG
 				"road": Rect2(0.15, 0.66, 0.70, 0.26),
 				"paint": Rect2(0.30, 0.52, 0.40, 0.10)}
 		_:
+			if RESI_POSES.has(pose):
+				return _residential_spec(String(pose), g)
 			# walk1..3: the same pose, walked back along the street.
 			#
-			# Walked along the anchor street's own polyline by arc length. Two
-			# earlier versions of this pose were wrong in ways that only the
-			# pictures caught, and both of them PASSED every threshold:
+			# Snapped to the road network, because walking a fixed 500 m back
+			# along the anchor street's *direction* walks straight off the end of
+			# it: the first version put the camera in empty terrain and counted 90 m
+			# of covered street for a frame of black. Both the before and the after
+			# build measured that pose identically - road mean 2.65, road dark
+			# 1.000 - because there was no road in it to measure. So the pose is
+			# built from the edge the camera actually lands on and looks at that
+			# street's far junction.
 			#
-			#   1. A fixed 500 m straight-line ray along the start direction walks
-			#      off the carriageway at the first bend. Measured: road mean 2.65,
-			#      road dark 1.000, a frame of black - counted as 90 m of street.
-			#      Snapping that endpoint to the nearest road edge fixed the black
-			#      frame and created the next bug:
-			#   2. `nearest_road` snaps to whatever is nearest, which 250 m and
-			#      500 m back from the midpoint of a 1408 m arterial is not the
-			#      anchor street at all, and the camera then stood 18 m off *that*
-			#      street. Measured on 2026-10-03 (tag vf-before, same camera, six
-			#      poses): walk2 framed a building wall and walk3 bare terrain -
-			#      road detail 0.044 and 0.79 against 4.69 on `street`, both still
-			#      reporting 90 m covered, both passing the luma, dark, clip and
-			#      orange checks. The 500 m gate was satisfied by two frames with
-			#      no street in them.
-			#
-			# The polyline IS the street, so arc length along it keeps the camera
-			# on the carriageway at a distance that means something. When the
-			# street is shorter than the pose asked for, `achieved_m` says so and
-			# the coverage gate sums the achieved distance, not the wish.
+			# But `nearest_road` is not enough, and that was measured too. It snaps
+			# to the nearest edge *of any street*, so at 500 m the straight-line
+			# point came back `lateral=68.07 edge=238 len=58` - 68 m off the
+			# arterial, on a different 58 m residential street - and at 0 m it came
+			# back `lateral=8.86` on a 14 m road, i.e. 1.9 m outside the kerb. The
+			# chain walk below follows the anchor's own connected edges instead, so
+			# every walk pose is on the anchor street by construction.
 			var k := int(pose.replace("walk", ""))
 			var back: float = WALK_BACK_M[clampi(k - 1, 0, WALK_BACK_M.size() - 1)]
-			var apts: PackedVector2Array = OSMLayout.anchor().get(
-				"pts", PackedVector2Array())
-			var w := _walk_back_along(apts, back)
-			if not bool(w["ok"]):
-				out = {"at": at - fwd * back + Vector3(0.0, 2.2, 0.0),
-					"look": at + fwd * 60.0 + Vector3(0.0, 1.0, 0.0), "fov": 55.0,
-					"run_m": 0.0, "achieved_m": 0.0,
+			var walk := _walk_along(g, at, back)
+			var base: Vector3 = walk["point"]
+			var weid := int(walk["edge"])
+			if weid >= 0:
+				var na: Vector2 = g.node_pos(int(g.edges[weid]["a"]))
+				var nb: Vector2 = g.node_pos(int(g.edges[weid]["b"]))
+				var toward_a: float = base.distance_squared_to(
+					Vector3(na.x, base.y, na.y))
+				var far: Vector2 = nb if toward_a > base.distance_squared_to(
+					Vector3(nb.x, base.y, nb.y)) else na
+				var near: Vector2 = na if toward_a > base.distance_squared_to(
+					Vector3(nb.x, base.y, nb.y)) else nb
+				var d := (base - Vector3(near.x, 0.0, near.y))
+				d = d.normalized() if d.length() > 0.1 else -fwd
+				out = {"at": base - d * 18.0 + Vector3(0.0, 2.4, 0.0),
+					"look": Vector3(far.x, 1.0, far.y), "fov": 55.0,
+					"run_m": 90.0,
+					"street": walk["name"],
 					"road": Rect2(0.10, 0.78, 0.80, 0.16),
 					"paint": Rect2(0.28, 0.70, 0.44, 0.08)}
 			else:
-				var p: Vector3 = w["pos"]
-				var d: Vector3 = w["dir"]
-				out = {"at": p + Vector3(0.0, 2.2, 0.0),
-					"look": p + d * 70.0 + Vector3(0.0, 1.0, 0.0), "fov": 55.0,
-					"run_m": minf(90.0, float(w["ahead_m"])),
-					"achieved_m": float(w["achieved_m"]),
+				out = {"at": at - fwd * back + Vector3(0.0, 2.4, 0.0),
+					"look": at + fwd * 60.0 + Vector3(0.0, 1.0, 0.0), "fov": 55.0,
+					"run_m": 0.0,
+					"street": "",
 					"road": Rect2(0.10, 0.78, 0.80, 0.16),
 					"paint": Rect2(0.28, 0.70, 0.44, 0.08)}
 	# Every branch above replaces `out` wholesale, which is how the pose name got
@@ -301,48 +346,261 @@ func _pose_spec(pose: String, at: Vector3, fwd: Vector3, side: Vector3, g: RoadG
 	# six poses came back as `{}` - a report that measured nothing and looked
 	# like a report that passed. Stamp it on once, here, where it cannot be lost.
 	out["name"] = pose
+	# Stamp the street every pose is on, in one place, so the log line can claim
+	# it instead of the report having to be trusted. A pose spec that says
+	# nothing about which street it is on is a pose spec that can silently be
+	# somewhere else - which is exactly what `nearest_road` did at 500 m.
+	if String(out.get("street", "")) == "":
+		var se := int(g.nearest_road(out["at"] as Vector3)["edge"])
+		out["street"] = String(g.edges[se].get("name", "")) if se >= 0 and se < g.edges.size() else ""
 	return out
 
 
-## `metres` back along a street polyline from its midpoint, the tangent there,
-## and what was actually available to walk.
+## The residential poses: a house with a veranda on it, found in the data.
 ##
-## Arc length, not a straight ray: see the walk pose for what that costs. Travel
-## runs with increasing index (`OSMLayout.start_line()` reads the midpoint the
-## same way), so "back" is decreasing arc length from the middle.
+## Everything else in this file is anchored to `OSMLayout.start_line()`, which is
+## a shopfront strip, so no pose here can frame a Queenslander. The subject is
+## therefore looked up rather than written down, and it is looked up in
+## `OSMBuildings.plan()` - the same `faces` array the builder glazes the veranda
+## from - so "this camera is pointed at a veranda" is true by construction. A
+## literal coordinate would drift onto the wrong house the first time
+## `Tools/osm_cairns.py` re-cut a footprint, and nothing would say so.
 ##
-## `achieved_m` is `metres` on a street long enough and less on one that is not,
-## which is the number the coverage gate has to sum. `ahead_m` is how much street
-## is left in front of the camera, so a pose at the end of its street reports a
-## shorter run instead of claiming 90 m of tarmac it is looking at a fence over.
-func _walk_back_along(pts: PackedVector2Array, metres: float) -> Dictionary:
-	var empty := {"ok": false, "pos": Vector3.ZERO, "dir": Vector3(0.0, 0.0, 1.0),
-		"achieved_m": 0.0, "ahead_m": 0.0}
-	if pts.size() < 2:
-		return empty
-	var segs: Array[float] = []
-	var total := 0.0
-	for i in pts.size() - 1:
-		var s: float = pts[i].distance_to(pts[i + 1])
-		segs.append(s)
-		total += s
-	if total <= 0.0:
-		return empty
-	var want: float = clampf(total * 0.5 - metres, 0.0, total)
-	var acc := 0.0
-	for i in segs.size():
-		if want <= acc + segs[i] or i == segs.size() - 1:
-			var seg: float = segs[i]
-			var u: float = 0.0 if seg <= 0.0 else (want - acc) / seg
-			var q := pts[i].lerp(pts[i + 1], clampf(u, 0.0, 1.0))
-			var d := pts[i + 1] - pts[i]
-			d = d.normalized() if d.length() > 0.001 else Vector2(0.0, 1.0)
-			return {"ok": true, "pos": Vector3(q.x, 0.0, q.y),
-				"dir": Vector3(d.x, 0.0, d.y),
-				"achieved_m": total * 0.5 - want,
-				"ahead_m": total - want}
-		acc += segs[i]
-	return empty
+## The `gap <= FRONTAGE_M` test is load-bearing and is why this pose is also the
+## evidence for a defect: `OSMBuildings._street_faces()` hands back one face for
+## a building that has *no* frontage at all, so of the 1,659 verandas the builder
+## emits, only 21 are on a wall a person on the street can see. A camera that
+## picks its subject by span alone would frame a backland wall nine times out of
+## ten, which is exactly the mistake this function refuses to make.
+func _residential_spec(pose: String, g: RoadGraph) -> Dictionary:
+	var s := _resi_subject(g, "street")
+	if s.is_empty():
+		push_error("[LookDev] no street-facing veranda in the map - the resi poses need one")
+		return {"name": pose, "at": Vector3.ZERO, "look": Vector3(0.0, 1.0, -1.0),
+			"fov": 50.0, "run_m": 0.0, "road": Rect2(0.1, 0.7, 0.8, 0.2),
+			"paint": Rect2(0.3, 0.8, 0.4, 0.06)}
+	var wall: Vector2 = s["mid"]
+	var along: Vector2 = s["dir"]
+	var out: Vector2 = s["nrm"]
+	var hw: float = g.width_for(int(s["cls"])) * 0.5
+	var span: float = s["span"]
+	var ground: float = s["lift"]
+	var gap: float = s["gap"]
+	# Where the camera stands, measured out from the wall along `out` and then
+	# along the frontage.
+	#
+	# `resi` is the shot the anchor-street poses cannot make: 21 m down its own
+	# frontage, on the footpath, so the veranda recedes and the street is in frame.
+	# Across the road it cannot work - a 9 m street puts the far kerb 11.5 m from
+	# the wall, which at fov 50 crops a 26 m frontage to ten metres of it.
+	#
+	# `resi_detail` crosses the carriageway and shoots back at the same veranda
+	# from the far footpath, which is the only sightline on this street with
+	# nothing in it: the near lane is parked cars and the near footpath is trees.
+	var detail := pose == "resi_detail"
+	var standoff := (hw + gap + 1.8) if detail else (gap - 0.6)
+	var along_m := span * (0.80 if not detail else 0.34)
+	var stand := wall + out * standoff + along * along_m
+	var look_at := wall + along * (span * 0.30) - out * (0.3 if detail else 0.0)
+	# The camera has to be on the road network, or it is inside a block looking at
+	# the back of a wall - which is a frame that renders fine and measures fine and
+	# is worth nothing. `nearest_road` is the same call the layout uses, so this is
+	# the real carriageway and not a guess at it.
+	var nr := g.nearest_road(Vector3(stand.x, 0.0, stand.y))
+	var eid := int(nr["edge"])
+	# `nearest_road()` answers `{edge, dist_along, point, lateral}` - there is no
+	# "class" on it. The width of the carriageway it found lives on the edge, which
+	# is the same two-step Tests/test_osm_buildings.gd takes.
+	var off_road := 9999.0
+	if eid >= 0:
+		var hw_here := g.width_for(int(g.edges[eid]["class"])) * 0.5
+		off_road = float(nr["lateral"]) - hw_here
+		# Past the footpath is the failure, not past the kerb: standing on the
+		# footpath is the whole point of `resi`, and warning about it trained me to
+		# ignore the warning. `FOOTPATH_W` is the project's own number for how far
+		# back the footpath goes, so this threshold is not one I picked.
+		if off_road > LookDev.FOOTPATH_W:
+			push_warning("[LookDev] %s camera is %.1f m past the footpath, not on the street (lateral %.1f m, half-width %.1f m)" % [
+				pose, off_road - LookDev.FOOTPATH_W, float(nr["lateral"]), hw_here])
+	var eye := RESI_EYE if not detail else RESI_EYE_DETAIL
+	# The pose to two decimals, not the rounded one the generic print below shows.
+	# This harness's own argument is that a camera nobody can check is a camera
+	# nobody can trust, and `Systems/camera/shot_poser.gd` carries a copy of these
+	# numbers for `./render.sh residential` - a copy needs a source worth copying.
+	print("[LookDev] %s pose: at=(%.2f, %.2f, %.2f) look=(%.2f, %.2f, %.2f) fov=%.0f standoff=%.2f along=%.2f" % [
+		pose, stand.x, eye, stand.y, look_at.x, ground + (1.40 if not detail else 1.45),
+		look_at.y, 50.0 if detail else 55.0, standoff, along_m])
+	# The veranda occupies deck (0.85 m here) to roof edge (~3.1 m), so the detail
+	# pose aims into the middle of it rather than at the windows above.
+	var aim_y := ground + (1.40 if not detail else 1.45)
+	return {
+		"name": pose,
+		"at": Vector3(stand.x, eye, stand.y),
+		"look": Vector3(look_at.x, aim_y, look_at.y),
+		"fov": 50.0 if detail else 55.0,
+		"run_m": span,
+		# The bands the rubric reads. The road is the bottom of the frame in both,
+		# and `resi` is the wider one so its band sits lower.
+		"road": Rect2(0.06, 0.74, 0.88, 0.22) if pose == "resi" else Rect2(0.02, 0.80, 0.96, 0.18),
+		"paint": Rect2(0.30, 0.86, 0.40, 0.08),
+	}
+
+
+## The wall a resi pose looks at, chosen from the map and cached per subject.
+##
+## `street` takes the longest street-facing frontage in the map, because a 5 m
+## wall gives a camera nothing to stand back from and a long one gives it a run
+## of veranda receding down the street. `detail` takes the longest one inside
+## RESI_HOUSE_SPAN instead, because the point of that pose is one readable
+## veranda and the longest wall on the map is a 26 m block nobody would give a
+## veranda to.
+func _resi_subject(g: RoadGraph, key: String) -> Dictionary:
+	if _resi.has(key):
+		return _resi[key]
+	var house := key == "detail"
+	var plan := OSMBuildings.plan(g)
+	var longest := 0.0
+	var pick: Dictionary = {}
+	for e in plan["buildings"]:
+		# A shop has an awning, not a veranda; `flat` is the same test the builder
+		# uses to decide which of the two it is drawing.
+		if bool(e["flat"]):
+			continue
+		var ring: PackedVector2Array = e["ring"]
+		for f in e["faces"]:
+			if float(f["gap"]) > OSMBuildings.FRONTAGE_M:
+				continue
+			var i := int(f["i"])
+			var a := ring[i]
+			var b := ring[(i + 1) % ring.size()]
+			var span := a.distance_to(b)
+			if span < RESI_MIN_SPAN or span <= longest:
+				continue
+			if house and span > RESI_HOUSE_SPAN.y:
+				continue
+			longest = span
+			var dir := (b - a) / span
+			pick = {
+				"mid": (a + b) * 0.5,
+				# Same outward normal as `OSMBuildings._band`: rings are wound so
+				# the outward normal of a -> b is (dy, -dx).
+				"dir": dir,
+				"nrm": Vector2(dir.y, -dir.x),
+				"span": span,
+				"gap": float(f["gap"]),
+				"cls": int(f["cls"]),
+				"id": int(e["id"]),
+				"lift": float(e["lift"]),
+				"wall": float(e["wall"]),
+			}
+	_resi[key] = pick
+	if not pick.is_empty():
+		print("[LookDev] resi/%s subject: osm %d, %.1f m frontage, %.1f m off the kerb, class %d, deck %.2f m, wall %.2f m"
+			% [key, int(pick["id"]), float(pick["span"]), float(pick["gap"]),
+				int(pick["cls"]), float(pick["lift"]), float(pick["wall"])])
+	return pick
+
+
+## Walk `back_m` back along the anchor street's OWN edge chain and return where
+## that lands. `nearest_road` is the wrong tool for this because it answers
+## "what is the closest edge of any street", which is how a pose that is meant
+## to be 500 m down a 4-lane arterial ended up 68 m sideways on a 58 m
+## residential street.
+##
+## From the anchor edge's near end, repeatedly take the incident edge that best
+## continues the current heading, and stop when the street turns too hard to be
+## the same street any more (`MIN_CONTINUE_DOT`) or the budget runs out. Every
+## hop is a real connected edge, so the answer is on the anchor by construction
+## rather than by hoping the nearest street is the right one.
+const MIN_CONTINUE_DOT := 0.55
+const MAX_CHAIN_HOPS := 64
+
+
+func _walk_along(g: RoadGraph, at: Vector3, back_m: float) -> Dictionary:
+	var snap := g.nearest_road(at)
+	var eid := int(snap["edge"])
+	if eid < 0 or eid >= g.edges.size():
+		return {"point": at, "edge": -1, "name": ""}
+	var base: Vector3 = snap["point"]
+	var na: Vector2 = g.node_pos(int(g.edges[eid]["a"]))
+	var nb: Vector2 = g.node_pos(int(g.edges[eid]["b"]))
+	# Stand on the end of the anchor edge that is behind `at`, and head away
+	# from `at`. Everything after this follows real edges.
+	var to_a: float = base.distance_squared_to(Vector3(na.x, base.y, na.y))
+	var to_b: float = base.distance_squared_to(Vector3(nb.x, base.y, nb.y))
+	var cur: int = int(g.edges[eid]["a"]) if to_a < to_b else int(g.edges[eid]["b"])
+	var far_node: int = int(g.edges[eid]["b"]) if to_a < to_b else int(g.edges[eid]["a"])
+	var cur_pos: Vector2 = g.node_pos(cur)
+	var heading: Vector2 = (cur_pos - Vector2(base.x, base.z)).normalized()
+	if heading.length() < 0.1:
+		heading = Vector2(base.x, base.z) - cur_pos
+		heading = heading.normalized() if heading.length() > 0.1 else Vector2(1.0, 0.0)
+	var from_eid := eid
+	var want_street := String(g.edges[eid].get("name", ""))
+	var left := back_m
+	var last_from: Vector2 = cur_pos
+	var last_to: Vector2 = cur_pos
+	var last_len := 1.0
+	var last_eid := eid
+	var hops := 0
+	while left > 0.0 and hops < MAX_CHAIN_HOPS:
+		hops += 1
+		var best := -1
+		var best_dot := MIN_CONTINUE_DOT
+		for cand in g.nodes[cur]["edges"]:
+			var ce := int(cand)
+			if ce == from_eid or ce < 0 or ce >= g.edges.size():
+				continue
+			# Same street or nothing. A heading test alone is not enough: measured
+			# with it, the 500 m pose wandered onto a side street 434 m from the
+			# anchor, because at every junction it just took the best-aligned edge
+			# and a side street off a bend can be perfectly aligned for one hop.
+			# The name is what makes "still on the anchor street" a fact.
+			var cn := String(g.edges[ce].get("name", ""))
+			if want_street != "" and cn != "" and cn != want_street:
+				continue
+			var ca: int = int(g.edges[ce]["a"])
+			var cb: int = int(g.edges[ce]["b"])
+			var other: int = cb if ca == cur else ca
+			if other < 0 or other == cur:
+				continue
+			var op: Vector2 = g.node_pos(other)
+			var dir := op - cur_pos
+			var l := dir.length()
+			if l < 1.0:
+				continue
+			var d: float = (dir / l).dot(heading)
+			if d > best_dot:
+				best_dot = d
+				best = ce
+		if best < 0:
+			break
+		var ba: int = int(g.edges[best]["a"])
+		var bb: int = int(g.edges[best]["b"])
+		var other2: int = bb if ba == cur else ba
+		var op2: Vector2 = g.node_pos(other2)
+		var seg := op2 - cur_pos
+		var seg_len := seg.length()
+		if seg_len < 1.0:
+			break
+		last_from = cur_pos
+		last_to = op2
+		last_len = seg_len
+		last_eid = best
+		heading = seg / seg_len
+		left -= seg_len
+		cur = other2
+		cur_pos = op2
+		far_node = cur
+		from_eid = best
+	# Slide the leftover budget along the last real segment so the camera lands
+	# at the requested distance instead of at the previous junction.
+	var t := 1.0
+	if left > 0.0 and last_len > 0.0:
+		t = clampf(1.0 - left / last_len, 0.0, 1.0)
+	var pt: Vector2 = last_from.lerp(last_to, t)
+	return {"point": Vector3(pt.x, base.y, pt.y), "edge": last_eid,
+		"name": String(g.edges[last_eid].get("name", ""))}
 
 
 ## The first three-way junction ahead of `at` along `fwd`, or `at` itself.
@@ -382,9 +640,29 @@ func _measure(img: Image, spec: Dictionary) -> Dictionary:
 	}
 
 
+## Hide every Control in the tree, so two runs cannot differ by a lap counter or
+## a menu still fading out.
+##
+## The `CanvasLayer` case is the one that matters and the one the first version
+## got wrong: a `CanvasLayer` is **not** a `CanvasItem` (it extends `Node`, so it
+## has no `visible` and no transform of its own - it is a container that hands
+## its children a different camera). `(c as CanvasItem)` on one of those is
+## `null`, so the `if c is CanvasLayer or c is Control` branch took the cast and
+## the write threw
+##
+##     Invalid assignment of property or key 'visible' ... on a base object of type 'Nil'
+##
+## which aborts the function. Because GDScript unwinds the *callee* and hands
+## control back to `_initialize`, the capture did not die loudly - it stopped
+## posing frames and left a `SceneTree` with nothing to quit it, so the process
+## sat there until the timeout and produced zero PNGs and no marker. The
+## `CanvasLayer` is recursed into instead: the Control tree that actually draws
+## is always one level down from it.
 func _hide_ui(n: Node) -> void:
 	for c in n.get_children():
-		if c is CanvasLayer or c is Control:
+		if c is CanvasLayer:
+			_hide_ui(c)
+		elif c is CanvasItem:
 			(c as CanvasItem).visible = false
 		else:
 			_hide_ui(c)

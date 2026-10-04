@@ -55,6 +55,20 @@ const CORRIDOR_ALT_M := 2.0
 ## not an argument because `_drive` is already nine parameters and one more would
 ## make every call site a chance to swap them.
 var graph_ref: RoadGraph = null
+## Set from `--wake=1`. See the note at the sleep branch in `_drive`.
+var wake := false
+
+
+## Whether the TREE this runs on carries t127's no-sleep fix. Read from the source at
+## run time rather than from a chain name, because the question is about the code that
+## is actually driving the car and a branch can be renamed or rebased under you.
+func car_body_has_sleep_fix() -> bool:
+	var f := FileAccess.open("res://Systems/vehicle/car_body.gd", FileAccess.READ)
+	if f == null:
+		return false
+	var txt := f.get_as_text()
+	f.close()
+	return txt.contains("_stay_awake_if_driven")
 
 
 func _initialize() -> void:
@@ -63,6 +77,11 @@ func _initialize() -> void:
 	for a in args:
 		if a.begins_with("--seconds="):
 			seconds = a.substr(10).to_float()
+		elif a.begins_with("--wake="):
+			wake = a.substr(7) == "1"
+			print("[real] --wake=1 given: the probe will set car.sleeping = false each frame")
+	print("[real] SLEEP_FIX_PRESENT=%d  (car_body.gd has _stay_awake_if_driven: %s)" % [
+		1 if car_body_has_sleep_fix() else 0, str(car_body_has_sleep_fix())])
 
 	print("[real] building the world")
 	var graph := RoadGraph.new()
@@ -131,22 +150,42 @@ func _initialize() -> void:
 		quit(2)
 		return
 
-	var r := await _drive(root, car, pts, total, seconds, CORRIDOR_M, street)
-	var r_alt := await _drive(root, car, pts, total, seconds * 0.5, CORRIDOR_ALT_M, street)
+	print("")
+	print("[real] --- KEYBOARD, HOLD ---")
+	var r := await _drive(root, car, pts, total, seconds, CORRIDOR_M, street, false)
+	print("")
+	print("[real] --- KEYBOARD, TAP ---")
+	var r_tap := await _drive(root, car, pts, total, seconds, CORRIDOR_M, street, true)
+	print("")
+	print("[real] --- GAMEPAD-STYLE ANALOGUE (axis between the stops) ---")
+	var r_pad := await _drive(root, car, pts, total, seconds, CORRIDOR_M, street, false, 0.5)
 	print("")
 	print("REAL_INPUT_RESULT corridor=%.1f  distance=%.1f of %.1f  top=%.1f  off=%d  peak_steer=%.2f  ended=%s" % [
 		CORRIDOR_M, float(r["dist"]), float(r["total"]), float(r["top"]),
 		int(r["off"]), float(r["peak_steer"]), str(r["ended"])])
-	print("REAL_INPUT_RESULT corridor=%.1f  distance=%.1f of %.1f  top=%.1f  off=%d  peak_steer=%.2f  ended=%s  (sensitivity)" % [
-		CORRIDOR_ALT_M, float(r_alt["dist"]), float(r_alt["total"]), float(r_alt["top"]),
-		int(r_alt["off"]), float(r_alt["peak_steer"]), str(r_alt["ended"])])
+	print("REAL_INPUT_RESULT mode=TAP       distance=%.1f of %.1f  top=%.1f  off=%d  peak_steer=%.2f  ended=%s" % [
+		float(r_tap["dist"]), float(r_tap["total"]), float(r_tap["top"]),
+		int(r_tap["off"]), float(r_tap["peak_steer"]), str(r_tap["ended"])])
+	print("REAL_INPUT_RESULT mode=ANALOGUE  distance=%.1f of %.1f  top=%.1f  off=%d  peak_steer=%.2f  ended=%s" % [
+		float(r_pad["dist"]), float(r_pad["total"]), float(r_pad["top"]),
+		int(r_pad["off"]), float(r_pad["peak_steer"]), str(r_pad["ended"])])
 	print("REAL_INPUT=%s" % ("PASS" if bool(r["reached"]) else "FAIL"))
 	quit(0)
 
 
 ## The drive. INPUT ACTIONS ONLY.
+## Frames a tapped steering correction is held before the key comes back up. At 60 Hz
+## this is 50 ms, about a tenth of the ramp's 0.31 s travel to full lock, so a tap
+## should land near 0.16 of lock if the ramp exists and exactly 1.0 if it does not.
+const TAP_FRAMES := 3
+
+var _steer_held := 0
+
+
 func _drive(root: Node3D, car: Node3D, pts: PackedVector2Array, total: float,
-		seconds: float, corridor: float, street: String) -> Dictionary:
+		seconds: float, corridor: float, street: String, tap: bool = false,
+		analog: float = 0.0) -> Dictionary:
+	_steer_held = 0
 	var s := SPAWN_S
 	var t := 0.0
 	var top := 0.0
@@ -165,7 +204,13 @@ func _drive(root: Node3D, car: Node3D, pts: PackedVector2Array, total: float,
 	for _i in 30:
 		await process_frame
 
-	Input.action_press("throttle", 1.0)
+	if analog > 0.0:
+		# The GAMEPAD path: an axis reading between the stops. Reported separately,
+		# because t140 deliberately claimed nothing about it and this proves whether
+		# it was already working.
+		Input.action_press("throttle", analog)
+	else:
+		Input.action_press("throttle", 1.0)
 	while t < seconds:
 		await process_frame
 		# `Engine.get_process_delta_time()` is a NODE method; this is a SceneTree
@@ -192,15 +237,35 @@ func _drive(root: Node3D, car: Node3D, pts: PackedVector2Array, total: float,
 			Input.action_press("throttle", 1.0)
 
 		# THE ONLY THING THAT REACHES THE CAR. Binary, exactly as a keyboard gives it.
-		if off_line and lat > 0.0:
+		# `tap` holds each correction for one frame's worth of time and then lets go,
+		# which is the whole point of the ramp: a tap must give a SMALL angle. With no
+		# ramp a tap is indistinguishable from a hold, so a hold-only test would pass
+		# against code that has no ramp at all.
+		var want_left := off_line and lat > 0.0
+		var want_right := off_line and lat < 0.0
+		if tap and want_left and _steer_held <= 0:
 			Input.action_press("steer_left", 1.0)
-			Input.action_release("steer_right")
-		elif off_line and lat < 0.0:
+			_steer_held = TAP_FRAMES
+		elif tap and want_right and _steer_held >= 0:
 			Input.action_press("steer_right", 1.0)
-			Input.action_release("steer_left")
-		else:
+			_steer_held = -TAP_FRAMES
+		elif tap:
 			Input.action_release("steer_left")
 			Input.action_release("steer_right")
+			if _steer_held > 0:
+				_steer_held -= 1
+			elif _steer_held < 0:
+				_steer_held += 1
+		else:
+			if want_left:
+				Input.action_press("steer_left", 1.0)
+				Input.action_release("steer_right")
+			elif want_right:
+				Input.action_press("steer_right", 1.0)
+				Input.action_release("steer_left")
+			else:
+				Input.action_release("steer_left")
+				Input.action_release("steer_right")
 
 		peak_steer = maxf(peak_steer, absf(float(car.steer)))
 		top = maxf(top, float(car.speed_kph))
@@ -210,8 +275,17 @@ func _drive(root: Node3D, car: Node3D, pts: PackedVector2Array, total: float,
 			ended = "far end"
 			break
 		if car.is_sleeping():
-			ended = "BODY ASLEEP at s=%.1f" % s
-			break
+			if wake:
+				# The probe waking the body. NOT A PRODUCTION FIX and not a claim that
+				# the game is fine - it is the measuring instrument removing a known
+				# confound (t127's defect, fixed on chain A at 052f723, absent here)
+				# so the steering numbers are not truncated at 47 m. `Systems/vehicle/**`
+				# is outside this task's scope, so the defect cannot be fixed here and
+				# the probe stops being the thing that is confounded.
+				car.sleeping = false
+			else:
+				ended = "BODY ASLEEP at s=%.1f" % s
+				break
 	Input.action_release("throttle")
 	Input.action_release("steer_left")
 	Input.action_release("steer_right")

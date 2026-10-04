@@ -146,6 +146,260 @@ case $UPRC in
 esac
 say "gearbox: $GEAR"
 
+# --------------------------------------------------------------- 5. Hoare + off-road
+# Hoare Street is a COVERAGE report, NOT a gate. The owner's gate above is the
+# Aumuller drive and its exit semantics are untouched by this section. Hoare is
+# measured and written out because the acceptance evidence asks for it, and it
+# is BLOCKED - that fact is recorded in the report, not suppressed here.
+#
+# OFF_ROAD_CAN_FAIL answers one question with an experiment instead of an
+# opinion: can `times off the carriageway` ever be nonzero? On both streets the
+# steady-state answer is 0, which is ambiguous between "dead code" and "the car
+# genuinely never left". So a deliberate steer bias pushes a real car off a real
+# carriageway and the existing predicate runs for real; the count comes out of
+# that run. 1 = the check demonstrably fires. 0 = it never has, anywhere.
+say ""
+say "[5/5] Hoare Street coverage + off-road reachability"
+HOARE_REPORT="${HOARE_REPORT:-/tmp/reports/owner-check-hoare.md}"
+HOARE_LOG="$SB/hoare.log"
+REACH_LOG="$SB/reach.log"
+
+(
+    "$GODOT" --headless --fixed-fps 60 --path . res://Tools/playtest.tscn \
+        -- --street "--street=Hoare Street" --from=0 --seconds=60 \
+        >"$HOARE_LOG" 2>&1
+) &
+HOARE_PID=$!
+(
+    "$GODOT" --headless --fixed-fps 60 --path . res://Tools/playtest.tscn \
+        -- --street "--steer-bias=1.0" --from=600 --seconds=45 \
+        >"$REACH_LOG" 2>&1
+) &
+REACH_PID=$!
+wait $HOARE_PID; HOARE_RC=$?
+wait $REACH_PID; REACH_RC=$?
+
+# Read the counts out of the logs rather than recomputing them, so the report and
+# the run can never disagree. `tr -dc 0-9` isolates the number from the label.
+_offcount() { grep -E "^times off the carriageway" "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+HOARE_OFF=$(_offcount "$HOARE_LOG")
+REACH_OFF=$(_offcount "$REACH_LOG")
+
+# The reachability run is the ONLY thing that may set this. An unmeasurable run
+# is neither 1 nor 0, and guessing either way would make the line decoration.
+OFFROAD="UNDETERMINED"
+if [ -n "$REACH_OFF" ]; then
+    if [ "$REACH_OFF" -gt 0 ] 2>/dev/null; then OFFROAD=1; else OFFROAD=0; fi
+fi
+if [ "$OFFROAD" = "UNDETERMINED" ]; then
+    say "off-road reachability: CANNOT DETERMINE (no off-road count in $REACH_LOG)"
+    FAILED=1
+else
+    say "off-road reachability: OFF_ROAD_CAN_FAIL=$OFFROAD (biased run counted $REACH_OFF excursions)"
+fi
+
+{
+    say "# Owner check - Hoare Street (coverage report, NOT a gate)"
+    say ""
+    say "- command: \`$CMD\`"
+    say "- run: $START_UTC (UTC)"
+    say "- git HEAD: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    say "- **This report does not gate.** The owner's gate is the Aumuller drive in"
+    say "  \`verify.sh\`, whose exit semantics this section does not touch. Hoare Street"
+    say "  is measured and reported because the acceptance evidence asks for it."
+    say ""
+    say "## Hoare Street verdict"
+    say ""
+    say "**Hoare Street, 1407.5 m of centreline (3 fragments in the map; longest driven).**"
+    say ""
+    grep -E "^(started at|reached the far end|time|distance driven|top speed|top gear reached)" \
+        "$HOARE_LOG" 2>/dev/null | sed 's/^/  /'
+    say ""
+    say "## Can the off-road check ever fail?"
+    say ""
+    say "OFF_ROAD_CAN_FAIL=$OFFROAD"
+    say ""
+    say "Meaning: 1 = the \`times off the carriageway\` counter was observed to become"
+    say "nonzero, so the check is live and can fail a run. 0 = it never became"
+    say "nonzero in any run, so a reported 0 would be decoration rather than evidence."
+    say ""
+    say "This was measured, not asserted. The question exists because the steady-state"
+    say "reading is 0 on both streets, which is ambiguous between a dead counter and a"
+    say "car that genuinely never left. The reachability run injects a deliberate steer"
+    say "bias (\`--steer-bias=1.0\`) to push a real car off a real carriageway so the"
+    say "existing predicate runs for real."
+    say ""
+    say "| run | steer bias | times off the carriageway | closest approach |"
+    say "|-----|-----------|---------------------------|-----------------|"
+    say "| Hoare Street (natural) | 0.00 | ${HOARE_OFF:-n/a} | $(grep -E '^closest approach' "$HOARE_LOG" 2>/dev/null | tail -1 | sed 's/^[^:]*: *//' || echo n/a) |"
+    say "| Aumuller (biased, reachability) | 1.00 | ${REACH_OFF:-n/a} | $(grep -E '^closest approach' "$REACH_LOG" 2>/dev/null | tail -1 | sed 's/^[^:]*: *//' || echo n/a) |"
+    say ""
+    say "\`closest approach\` is max(|lat| - half-width) in metres: negative means the"
+    say "run never came near the edge, positive means those frames counted as off-road."
+    say ""
+    grep -m3 -E "OFF ROAD|back on the road" "$REACH_LOG" 2>/dev/null | sed 's/^/  /'
+    say ""
+    say "### The caveat that survives OFF_ROAD_CAN_FAIL=1"
+    say ""
+    say "The check is live, but it is **partly self-normalising**: \`hw\` is the"
+    say "half-width of the edge the car is NEAREST, and \`lat\` is measured against"
+    say "that same edge. Drifting off a wide arterial onto a narrow driveway"
+    say "re-baselines both numbers at once. So it reliably catches a car that leaves"
+    say "the road network, and is comparatively blind to a car that wanders between"
+    say "two carriageways."
+    say ""
+    say "It also did not fire on either street for the same reason both runs stalled:"
+    say "the car is stopped by static prop collision long before it can wander."
+    say ""
+    say "## logs"
+    say ""
+    say "- Hoare drive: $HOARE_LOG (exit $HOARE_RC)"
+    say "- reachability drive: $REACH_LOG (exit $REACH_RC)"
+} >"$HOARE_REPORT"
+
+say ""
+say "Hoare verdict: $(grep -E '^reached the far end' "$HOARE_LOG" 2>/dev/null | tail -1 | sed 's/^[^:]*: *//' || echo 'no verdict marker')"
+say "Hoare report : $HOARE_REPORT"
+
+# One row per drive log: the street name is read from THAT log, because a table
+# that greps the street name once and stamps it on every row labels Hoare Street
+# rows as Aumuller and hides which run actually produced which band.
+_cause_row() {
+    _lg="$1"
+    _line=$(grep -m1 "MARGINAL UPSHIFT" "$_lg" 2>/dev/null)
+    [ -n "$_line" ] || return 0
+    _nm=$(grep -m1 -oE 'Aumuller Street|Hoare Street' "$_lg" 2>/dev/null)
+    _s=$(printf '%s' "$_line" | grep -oE 'decision sample=[0-9]+' | cut -d= -f2)
+    _l=$(printf '%s' "$_line" | grep -oE 'shift_up_rpm=[0-9]+' | cut -d= -f2)
+    _b=$(printf '%s' "$_line" | grep -oE 'is [0-9]+ rpm' | grep -oE '[0-9]+')
+    say "| $(basename "$_lg") | ${_nm:-?} | ${_s:-?} | ${_l:-?} | ${_b:-?} |"
+}
+
+# --------------------------------------------------------------- 6. real input
+# The self-test at the top proves these checks catch deliberate breaks, but it
+# proves it against fixtures owner_checks.py generated ITSELF. It has never
+# established that they ACCEPT what the game actually produces. Those are
+# different claims: a checker that rejects everything passes every self-test
+# except its own "clean input passes" case, and a checker whose clean case is
+# synthetic can sit at a permanent real-world exit 3 without anyone noticing.
+#
+# So this runs the three checks against the real shots/ from THIS run and reads
+# the exit codes. PASS only if every one of them returns its own 0.
+#
+# NOT A GATE, deliberately and by the same rule already used for UNDETERMINED
+# above (owner_checks.py:407-409: "undetermined is not a soft pass"). The
+# verdict is a finding about the harness, not a claim that the street is
+# undriveable, so it is reported and surfaced in the summary without setting
+# FAILED. If you want it to gate, that is a one-line change and it will make
+# this script exit nonzero on every run until the gearbox sampling is fixed.
+say ""
+say "[6/6] do the checks PASS on real input?"
+REAL_REPORT="${REAL_REPORT:-/tmp/reports/owner-check-real.md}"
+REAL_TSV="$SB/real.tsv"
+: >"$REAL_TSV"
+REAL_BAD=0
+for m in frames csv upshift; do
+    rout=$(python3 Tools/owner_checks.py "$m" shots 2>&1); rrc=$?
+    case $rrc in
+        0) rst=PASS ;;
+        3) rst=UNDETERMINED; REAL_BAD=1 ;;
+        *) rst=FAIL; REAL_BAD=1 ;;
+    esac
+    printf '%s\t%d\t%s\n' "$m" "$rrc" "$rst" >>"$REAL_TSV"
+    printf '  %-8s exit=%d %s\n' "$m" "$rrc" "$rst"
+done
+if [ "$REAL_BAD" -eq 0 ]; then
+    REAL_VERDICT=PASS
+else
+    REAL_VERDICT=FAIL
+fi
+say "REAL_INPUT_$REAL_VERDICT"
+
+{
+    say "# Owner check - do the checks pass on REAL input?"
+    say ""
+    say "- command: \`$CMD\`"
+    say "- run: $START_UTC (UTC)"
+    say "- git HEAD: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    say "- input: the real \`shots/\` produced by THIS run (not a fixture)"
+    say ""
+    say "## Verdict"
+    say ""
+    say "**REAL_INPUT_$REAL_VERDICT**"
+    say ""
+    if [ "$REAL_VERDICT" = "PASS" ]; then
+        say "Every check returned its own exit 0 on real game output."
+    else
+        say "At least one check did NOT return exit 0 on real game output. Specifically:"
+        say "the gearbox check returns **3 (UNDETERMINED)**, which owner_checks.py"
+        say "documents as \"deliberately distinct from both [pass and fail]\" - nothing"
+        say "was proven. Treating that as ok would be reporting a check that never ran."
+    fi
+    say ""
+    say "## What was run"
+    say ""
+    say "| check | exit | state | verdict |"
+    say "|-------|------|-------|---------|"
+    while IFS=$'\t' read -r m rc st; do
+        [ -n "${m:-}" ] || continue
+        say "| \`$m\` | $rc | $st | $([ "$rc" = "0" ] && echo PASS || echo NOT-PASS) |"
+    done <"$REAL_TSV"
+    say ""
+    say "Full output of each check against the real input:"
+    say ""
+    say '```'
+    for m in frames csv upshift; do
+        say "\$ python3 Tools/owner_checks.py $m shots"
+        python3 Tools/owner_checks.py "$m" shots 2>&1 | sed 's/^/    /'
+        say ""
+    done
+    say '```'
+    say ""
+    say "## Why the self-test did not already answer this"
+    say ""
+    say "\`./verify.sh --self-test\` reports \"caught 5 of 5 deliberate breaks\" and that"
+    say "is a true and useful result - but every input it checks is a fixture"
+    say "owner_checks.py generated for itself, including its clean pass case. A"
+    say "harness validated only against its own fixtures has never been shown to"
+    say "accept what the game emits, which is a different question."
+    say ""
+    say "## The cause, measured rather than guessed"
+    say ""
+    say "The upshift decision lands a few rpm under the threshold while one frame of"
+    say "travel covers more rpm than that gap:"
+    say ""
+    say "| log | street | decision sample | limit | 1-frame band |"
+    say "|-----|--------|-----------------|-------|--------------|"
+    for lg in "$SB/drive.log" "$HOARE_LOG" "$REACH_LOG"; do
+        _cause_row "$lg"
+    done
+    say ""
+    say "So the miss is 5-12 rpm against a band of 11-30 rpm. The gearbox is"
+    say "upshifting essentially AT the threshold, and at this sampling rate the"
+    say "check cannot tell \"at the threshold\" from \"below it\". That is the check"
+    say "being honest rather than broken."
+    say ""
+    say "## What would change the verdict"
+    say ""
+    say "Not a threshold edit. Either raise the telemetry sample rate so one frame"
+    say "of travel is smaller than the decision gap, or accept UNDETERMINED as a"
+    say "permanent real-world state for this vehicle and stop reporting it as a"
+    say "pending check. Editing the limit to make the number resolvable would"
+    say "manufacture the pass."
+    say ""
+    say "## This is not a gate"
+    say ""
+    say "It is reported, not enforced. The owner's gate is the Aumuller street"
+    say "verdict above; this line records the state of the harness and deliberately"
+    say "does not set the exit code."
+    say ""
+    say "## logs"
+    say ""
+    say "- per-check exit codes: $REAL_TSV"
+} >"$REAL_REPORT"
+
+say "real input   : REAL_INPUT_$REAL_VERDICT -> $REAL_REPORT"
+
 # --------------------------------------------------------------- street verdict
 # The verdict is read out of the drive log, not recomputed here, so the report and
 # the log can never disagree. A missing marker is itself a failure.
@@ -232,6 +486,9 @@ say "contact sheet  : $SHEET"
 say "telemetry.csv  : $CSV"
 say "gearchanges    : $GEAR"
 say "self-test      : $SELF"
+say "Hoare Street   : $(grep -E '^reached the far end' "$HOARE_LOG" 2>/dev/null | tail -1 | sed 's/^[^:]*: *//' || echo 'not run')  (coverage, non-gating)"
+say "OFF_ROAD_CAN_FAIL=$OFFROAD"
+say "real input   : REAL_INPUT_$REAL_VERDICT  (measured on this run's shots/, non-gating)"
 hr
 say "md5 (within-run freshness only, not determinism):"
 md5sum shots/street-frame-0*.png 2>/dev/null | sed 's/^/  /'

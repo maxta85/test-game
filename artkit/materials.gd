@@ -136,6 +136,76 @@ static func noise_tex(size: int, freq: float, octaves: int, seed_value: int,
 	return tex
 
 
+# ------------------------------------------------------------------- banding
+
+## ## Boarded, ribbed and paled surfaces
+##
+## A flat albedo is why a building reads as a box. Timber weatherboard is horizontal
+## boards with a shadow line under each lip; a paling fence is the same idea turned
+## 90 degrees; Colorbond is a sawtooth. None of that is a colour - it is a *profile*,
+## and a profile is a one-dimensional ramp, which Godot already draws. So these are
+## `GradientTexture2D`s generated in-engine: no texture to source, no licence to hold.
+## They are honest procedural work, not a stand-in for an asset nobody made.
+##
+## Each period gets its own small deterministic brightness offset, because the most
+## recognisable thing about real weatherboard is that no two boards weather the same
+## way. A uniform ramp reads as striped wallpaper, which is worse than the flat colour
+## it replaced. The offset is centred on zero so the *mean* is untouched and only the
+## spread moves - brightening every board by a positive jitter turns a cladding
+## material into a lighter one by accident.
+static var _band_cache: Dictionary = {}
+
+const BOARD_PROFILE := [
+	[0.00, 0.30], [0.06, 0.78], [0.18, 1.00], [0.74, 0.94], [0.90, 0.52], [1.00, 0.30],
+]
+const PALING_PROFILE := [
+	[0.00, 0.22], [0.10, 0.86], [0.62, 1.00], [0.80, 0.44], [1.00, 0.22],
+]
+const RIB_PROFILE := [
+	[0.00, 0.34], [0.14, 0.62], [0.42, 1.00], [0.58, 0.96], [0.86, 0.50], [1.00, 0.34],
+]
+
+
+## A repeating banded ramp. `vertical` runs the bands down U instead of along V,
+## which is the whole difference between a paling fence and a weatherboard wall.
+static func bands_tex(periods: int, profile: Array, warm: float, vertical: bool,
+		seed_value: int, jitter: float = 0.10) -> GradientTexture2D:
+	var key := "%d|%s|%.3f|%s|%d|%.3f" % [periods, str(profile), warm,
+			str(vertical), seed_value, jitter]
+	if _band_cache.has(key):
+		return _band_cache[key]
+	var g := Gradient.new()
+	var offs := PackedFloat32Array()
+	var cols := PackedColorArray()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value
+	var span := 1.0 / float(maxi(periods, 1))
+	for i in maxi(periods, 1):
+		var base := float(i) * span
+		var off := rng.randf_range(-jitter, jitter)
+		for pair in profile:
+			var v: float = clampf(float(pair[1]) + off, 0.0, 1.0)
+			offs.append(base + float(pair[0]) * span)
+			# `warm` biases red up and blue down. The palette owns base albedo; a
+			# shading ramp is material data, exactly as `_palm_ring_tex` already is
+			# with its `Color(v, v, v * 0.92)`.
+			cols.append(Color(v * (1.0 + warm * 0.10), v, v * (1.0 - warm * 0.08)))
+	g.offsets = offs
+	g.colors = cols
+	var tex := GradientTexture2D.new()
+	tex.gradient = g
+	tex.width = 8 if vertical else 128
+	tex.height = 128 if vertical else 8
+	if vertical:
+		tex.fill_from = Vector2(0.0, 0.0)
+		tex.fill_to = Vector2(1.0, 0.0)
+	else:
+		tex.fill_from = Vector2(0.0, 0.0)
+		tex.fill_to = Vector2(0.0, 1.0)
+	_band_cache[key] = tex
+	return tex
+
+
 # ------------------------------------------------------------------- the spec
 
 ## key -> build recipe. Written as data so the check can read the *intent* of
@@ -143,8 +213,10 @@ static func noise_tex(size: int, freq: float, octaves: int, seed_value: int,
 ## without instantiating anything, and assert the library matches that intent.
 ## Emission energy at or above which a material counts as a light source for the
 ## albedo rule below, and as a bloom tier for `standards.md`. 0.5 sits in a real
-## gap: the loudest faint self-lit surface is lane paint at 0.09 and the quietest
-## source is a CBD window band at 1.1.
+## gap: the loudest faint self-lit surface is foliage at 0.05 and the quietest
+## source is `interior_warm` at 0.55. The retroreflective family - lane paint,
+## kerb paint, plate - sits below this line and is deliberately not a source; see
+## `retro` in `_build`.
 const BLOOM_FLOOR := 0.5
 
 ## How far a source's albedo is knocked down. Chosen so the brightest emitter in
@@ -171,8 +243,16 @@ const BLOOM_TIERS: Dictionary = {
 	1.5: {"max_extent_m": 12.0, "roles": ["glass_lit"]},
 	1.1: {"max_extent_m": 40.0, "roles": ["cbd_window"]},
 	0.55: {"max_extent_m": 12.0, "roles": ["interior_warm"]},
-	0.09: {"max_extent_m": 999.0, "roles": ["paint_white", "paint_yellow", "plate"]},
 }
+#
+# There is deliberately no 0.09 tier. It used to hold `paint_white`,
+# `paint_yellow` and `plate` - the retroreflective family - and its whole purpose
+# was to let a lane marking and a licence plate sit on the bloom budget. That was
+# the same category error as their emission, one layer over: a bloom tier is a
+# declaration that a material is a light source, and it is what a consumer reads to
+# decide how far it may scale a lens. A retroreflector has no business in the
+# table, so removing the emission removed the row. `interior_warm` at 0.55 is now
+# the quietest source in the library and foliage at 0.05 the loudest non-source.
 
 
 ## The bloom tier a material sits on, or an empty dictionary if it is not a source.
@@ -203,12 +283,35 @@ const _SPECS: Dictionary = {
 	"surface_asphalt_wet_d": {"role": "asphalt_wet_d", "rough": 1.0, "noise_seed": 14, "speckle": [0.66, 1.0], "normal": 0.34, "uv": 0.0625, "spec": 1.0, "wet": [0.13, 0.18]},
 	"surface_asphalt_dry": {"role": "asphalt_dry", "rough": 0.74, "noise_seed": 15, "speckle": [0.62, 1.0], "normal": 0.42, "uv": 0.08},
 
-	# ---- markings. Emissive, faintly: a night road's paint is the one surface
-	# ---- that has to survive being unlit, and a hint of emission is cheaper
-	# ---- than doubling every streetlight.
-	"paint_white": {"role": "paint_white", "rough": 0.22, "emit": 0.09, "emit_role": "paint_white"},
-	"paint_yellow": {"role": "paint_yellow", "rough": 0.24, "emit": 0.09, "emit_role": "paint_yellow"},
-	"kerb_paint": {"role": "kerb_paint", "rough": 0.46, "emit": 0.0},
+	# ---- markings. Retroreflective, NOT emissive.
+	# ----
+	# ---- These three were `rough: 0.22, emit: 0.09` - a faintly self-lit
+	# ---- mirror - and that is a category error, not a tuning miss. Retroreflection
+	# ---- is light returned *from* a source, near the direction it arrived from.
+	# ---- Emission is light the surface makes itself, from nowhere, in every
+	# ---- direction at once. The two read identically on a lit dash and
+	# ---- oppositely everywhere else: an emissive line is exactly as visible on a
+	# ---- stretch with no lamp as under one, which is the tell that it is a decal.
+	# ---- `World/mat_lib.gd` reached the same conclusion independently and
+	# ---- `artkit/props.gd` already documents it for the sign plates ("a sign
+	# ---- that glows is a lie about the world"), so the kit contradicting its
+	# ---- own neighbours was a real inconsistency, not a house style.
+	# ----
+	# ---- Roughness is the half that actually does the work here. 0.22 is a
+	# ---- near-mirror: a horizontal dash reflects the sky and the lamp heads down
+	# ---- its own length and reads as a strip of chrome. Thermoplastic measures
+	# ---- about 0.55-0.62, and matte is what returns the lamp diffusely - which is
+	# ---- the whole mechanism. So the paint is now matte and carries no emission
+	# ---- at all; a dash brightens as the car comes under a lamp and goes dark
+	# ---- between lamps, which is the behaviour that makes a street readable at
+	# ---- speed.
+	# ----
+	# ---- `retro` is what replaces the emission: it is the flag that says "this
+	# ---- surface returns light toward the viewer", and it drives the specular
+	# ---- below. It is not a light source and never enters a bloom tier.
+	"paint_white": {"role": "paint_white", "rough": 0.58, "retro": 0.52, "spec": 0.34, "wear": 0.13},
+	"paint_yellow": {"role": "paint_yellow", "rough": 0.60, "retro": 0.52, "spec": 0.34, "wear": 0.13},
+	"kerb_paint": {"role": "kerb_paint", "rough": 0.52, "retro": 0.40, "spec": 0.30},
 
 	# ---- concrete. Three values because a kerb, a footpath and a gutter run
 	# ---- side by side and are never the same pour.
@@ -227,14 +330,28 @@ const _SPECS: Dictionary = {
 
 	# ---- rendered walls. Six values, and the roughness spread across them is
 	# ---- what stops a street of them looking like six copies of one house.
-	"surface_render_wall_a": {"role": "render_wall_a", "rough": 0.86, "speckle": [0.86, 1.0], "normal": 0.16, "uv": 0.1},
-	"surface_render_wall_b": {"role": "render_wall_b", "rough": 0.80, "speckle": [0.84, 1.0], "normal": 0.16, "uv": 0.1},
-	"surface_render_wall_c": {"role": "render_wall_c", "rough": 0.90, "speckle": [0.88, 1.0], "normal": 0.16, "uv": 0.1},
-	"surface_render_wall_d": {"role": "render_wall_d", "rough": 0.74, "speckle": [0.82, 1.0], "normal": 0.16, "uv": 0.1},
-	"surface_render_wall_e": {"role": "render_wall_e", "rough": 0.88, "speckle": [0.87, 1.0], "normal": 0.16, "uv": 0.1},
-	"surface_render_wall_f": {"role": "render_wall_f", "rough": 0.68, "speckle": [0.80, 1.0], "normal": 0.16, "uv": 0.1},
+	# ---- `board` puts weatherboard on all six: painted fibre-cement sheet is
+	# ---- what a Queensland house actually is, so boarding belongs to this
+	# ---- family rather than to a new one. A new family would need palette roles,
+	# ---- and `variants("render_wall", i)` is the documented entry point for these.
+	"surface_render_wall_a": {"role": "render_wall_a", "rough": 0.86, "speckle": [0.86, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	"surface_render_wall_b": {"role": "render_wall_b", "rough": 0.80, "speckle": [0.84, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	"surface_render_wall_c": {"role": "render_wall_c", "rough": 0.90, "speckle": [0.88, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	"surface_render_wall_d": {"role": "render_wall_d", "rough": 0.74, "speckle": [0.82, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	"surface_render_wall_e": {"role": "render_wall_e", "rough": 0.88, "speckle": [0.87, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	"surface_render_wall_f": {"role": "render_wall_f", "rough": 0.68, "speckle": [0.80, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
 	"brick": {"role": "brick", "rough": 0.92, "speckle": [0.76, 1.0], "normal": 0.34, "uv": 0.18},
 	"industrial_metal": {"role": "industrial_metal", "rough": 0.46, "metal": 0.55},
+
+	# ---- paling fence. Three values because a fence line is the first thing a
+	# ---- viewer reads about a boundary, and one paling material makes a whole
+	# ---- street the same fence. 10 palings per 1.6 m tile is a 160 mm
+	# ---- board-and-gap pitch, which is what a paling fence measures once the gap
+	# ---- is counted. Warm: the reference fence is a red-brown, and under the
+	# ---- sodium in this scene a warm albedo is what keeps it from going grey.
+	"paling_a": {"role": "timber", "rough": 0.90, "board": "v", "paling_seed": 5501, "paling_jitter": 0.16},
+	"paling_b": {"role": "timber", "rough": 0.84, "board": "v", "paling_seed": 5502, "paling_jitter": 0.20},
+	"paling_c": {"role": "timber", "rough": 0.94, "board": "v", "paling_seed": 5503, "paling_jitter": 0.13},
 
 	# ---- vegetation. Two-sided and a touch self-lit: a streetlight behind a
 	# ---- frond should bleed a little through it. Emission at 0.05 is well
@@ -243,7 +360,12 @@ const _SPECS: Dictionary = {
 	"surface_foliage_b": {"role": "foliage_b", "rough": 0.84, "leaf": true, "transmit": 0.055},
 	"surface_foliage_c": {"role": "foliage_c", "rough": 0.94, "leaf": true, "transmit": 0.03},
 	"surface_foliage_d": {"role": "foliage_d", "rough": 0.90, "leaf": true, "transmit": 0.04},
-	"grass": {"role": "grass", "rough": 0.95, "leaf": true, "transmit": 0.02, "speckle": [0.70, 1.0], "normal": 0.5, "uv": 0.25},
+	# `grass` is `bush_scrub`'s material, so it sits on the same verge `MatLib.ground()`
+	# draws. Lifted with it, for the same measured reason and by the same amount: at
+	# the palette's #17220f this is 24/255, below the wet tarmac it borders at 28/255,
+	# so a verge planted with these read as a hole rather than a bank. Two greens that
+	# do not match would be worse than either value.
+	"grass": {"role": "grass", "rough": 0.95, "leaf": true, "transmit": 0.02, "speckle": [0.70, 1.0], "normal": 0.5, "uv": 0.25, "value": [1.275, 1.763, 1.395]},
 	"dirt": {"role": "dirt", "rough": 0.97, "speckle": [0.68, 1.0], "normal": 0.55, "uv": 0.3},
 
 	# ---- hard goods.
@@ -308,7 +430,12 @@ const _SPECS: Dictionary = {
 	"tyre": {"role": "tyre", "rough": 0.92, "spec": 0.18},
 	"car_glass": {"role": "car_glass", "rough": 0.05, "metal": 0.10, "spec": 1.0},
 	"chrome": {"role": "chrome", "rough": 0.08, "metal": 1.0},
-	"plate": {"role": "plate", "rough": 0.35, "emit": 0.09, "emit_role": "plate"},
+	# A plate is the purest retroreflector in the library and it was authored the
+	# same wrong way as the road paint: `emit: 0.09`. A plate that glows is a
+	# plate you can see from directly above with every light off, which is not a
+	# property plates have. It is `retro` at a high value and matte - sheeting is
+	# matte, and the return toward the viewer is the entire point.
+	"plate": {"role": "plate", "rough": 0.44, "retro": 0.62, "spec": 0.38},
 	"contact_shadow": {"role": "night_base", "unshaded_mul": true, "core": 0.18},
 
 	"cbd_glass": {"role": "cbd_glass", "rough": 0.42, "metal": 0.2},
@@ -324,6 +451,12 @@ static func _build(key: String) -> StandardMaterial3D:
 	var spec: Dictionary = _SPECS[key]
 	var m := StandardMaterial3D.new()
 	m.albedo_color = ArtKitPalette.color(String(spec.get("role", "")))
+	if spec.has("value"):
+		# An explicit per-channel multiplier on a palette role. Used only where the
+		# palette's own value is measurably wrong for this scene - see `grass`.
+		var v: Array = spec["value"]
+		m.albedo_color = Color(m.albedo_color.r * float(v[0]),
+				m.albedo_color.g * float(v[1]), m.albedo_color.b * float(v[2]))
 	if bool(spec.get("dark", false)):
 		m.albedo_color = m.albedo_color * 0.6
 	m.roughness = float(spec.get("rough", 0.8))
@@ -360,16 +493,63 @@ static func _build(key: String) -> StandardMaterial3D:
 				false, float(wet[0]), float(wet[1]))
 		m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
 
-	# Corrugation. Stripes in UV rather than a modelled rib, because 2198
-	# buildings with modelled ribs is 2198 buildings of wasted triangles and at
-	# street distance nobody can tell.
+	## Boarding, palings and ribs
+	#
+	# These were a comment and a UV scale. `uv1_scale` on its own only changes how
+	# # often a texture repeats, so a material with no texture got a different tile
+	# # size and no pattern at all: every roof was one flat angled plane and every
+	# # wall was isotropic speckle with no edge in it anywhere for an eye to find.
+	# # Measured before this change, WALL_VARIATION was 0.00 on every pose.
+	#
+	# The profile is a `GradientTexture2D`, so it is one texture and two channels:
+	# # albedo picks up enough of it to be visible in flat ambient, and roughness
+	# # carries the rest. Roughness is what actually sells ribs - a crest is a
+	# # different angle from the plane beside it, so under a lamp a crest returns
+	# # a specular smear and a valley returns nearly nothing.
+	#
+	# One tile is a fixed number of METRES because the projection is triplanar, so
+	# # the pitch is set once and every surface gets the pitch its own size can
+	# # afford: a 9 m house wall spans ~2.7 board tiles and shows ~44 boards, a
+	# # 0.4 m pedestrian spans an eighth of one and shows a soft gradient, and a
+	# # 0.15 m pole spans a twentieth and shows nothing. The pattern sizes itself.
+	var board := String(spec.get("board", ""))
+	if board != "":
+		var vertical := board == "v"
+		var periods := 10 if vertical else 16
+		var tile_m := 1.6 if vertical else 3.33   # a 160 mm paling, a 208 mm board
+		var ramp := bands_tex(periods,
+				PALING_PROFILE if vertical else BOARD_PROFILE,
+				0.85 if vertical else 0.55, vertical,
+				int(spec.get("paling_seed", 4407)),
+				float(spec.get("paling_jitter", 0.11)))
+		m.albedo_texture = ramp
+		m.roughness_texture = ramp
+		m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
+		m.uv1_scale = Vector3(1.0 / tile_m, 1.0 / tile_m, 1.0 / tile_m)
+		m.uv1_triplanar = true
+		# The `speckle` branch above already claimed uv1_scale and the albedo
+		# texture; boarding owns both from here, because a board profile and an
+		# isotropic mottle cannot share one texture and the board is the one with
+		# edges in it.
+		m.albedo_color = m.albedo_color.lightened(0.04)
+
+	# Corrugation. Ribs run down the slope, so the profile lies along V. Triplanar is
+	# deliberately off: these are roof quads from `ArtKitMesh`, which DO carry UVs,
+	# and `artkit_check.gd` holds the tiling at `uv1_scale.y >= CORRUGATION_UV * 0.9`.
+	# That contract is a MULTIPLIER, not a divisor: artkit's meshes run 0..1 across a
+	# quad, so the tile count is the scale. The first version of this used
+	# `1 / (0.076 * 32)` here and the check failed it - correctly, because on a 0..1
+	# quad that is 0.4 of ONE tile across the whole roof, i.e. the corrugation I was
+	# adding was invisible. One rib per tile and 13 tiles per quad puts a rib about
+	# every 8 cm on a wall-sized quad, which is real Colorbond pitch.
 	if bool(spec.get("corrugate", false)):
 		var cu := CORRUGATION_UV
 		m.uv1_scale = Vector3(1.0, cu, cu)
 		m.uv1_triplanar = false
-		# A vertical albedo stripe is what actually reads as ribbing under a
-		# raking light, so the corrugation is albedo as well as roughness.
-		m.albedo_color = m.albedo_color.lightened(0.06)
+		var rib_ramp := bands_tex(1, RIB_PROFILE, 0.15, false, 6607, 0.05)
+		m.albedo_texture = rib_ramp
+		m.roughness_texture = rib_ramp
+		m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
 
 	# Foliage: two-sided, and a little self-lit so a lamp behind a frond bleeds
 	# through rather than the frond reading as a hole in the light.
@@ -380,7 +560,49 @@ static func _build(key: String) -> StandardMaterial3D:
 		m.emission = m.albedo_color
 		m.emission_energy_multiplier = t
 
-	# ## An emitter's brightness belongs to emission, never to albedo
+	# ## Retroreflection: light returned, not light made
+	#
+	# `retro` is how this library says "this surface returns light toward the
+	# viewer". It exists because the alternative was the mistake this file used to
+	# make on every marking and on the plate: a little emission, standing in for a
+	# physical effect it does not model. Emission has no direction. A dash with
+	# emission on it glows equally whether or not anything is lighting it, which is
+	# precisely why it reads as a decal rather than as paint.
+	#
+	# A real retroreflective surface - glass-bead thermoplastic, the sheeting on a
+	# sign plate or a licence plate - works by returning light back along the axis
+	# it arrived on, so the surface looks brightest to an observer *near the source*
+	# and dims for one standing off to the side. StandardMaterial3D has no
+	# retro-reflective lobe, so this is an approximation and is labelled as one:
+	# `metallic_specular` is raised so the specular lobe is tight and bright rather
+	# than a broad dim sheen, and `roughness` carries the rest. The two knobs pull
+	# against each other - a wide lobe returns more total light but from more
+	# directions, which is the wash this is avoiding - so the value is authored per
+	# material rather than shared.
+	#
+	# What this deliberately does NOT do is set emission. A retroreflector is not a
+	# light source: it never brightens an unlit stretch of road, never appears in
+	# `BLOOM_TIERS`, and never makes the frame's brightest thing a piece of tarmac.
+	# That last one is the ART_DIRECTION.md rule ("saturated colour is a light
+	# source, not a surface") applied to a case the file had been getting backwards:
+	# this is a *desaturated* surface that had been made to emit.
+	if spec.has("retro"):
+		m.metallic_specular = float(spec["retro"])
+
+	# Wear. A wheel track polishes thermoplastic off and rain scours the edges, so a
+	# flat albedo over a 0.12 m x 3 m dash is a rectangle. The ramp is held high
+	# (0.87-1.0) so it adds mottle without halving the value the way raw noise does.
+	if spec.has("wear"):
+		var wseed := int(spec.get("noise_seed", 11)) + 1200
+		m.uv1_scale = Vector3(1.0, 1.0, 1.0)
+		m.uv1_triplanar = true
+		m.albedo_texture = noise_tex(256, 2.4, 4, wseed, false, 0.87, 1.0)
+		var w := float(spec["wear"])
+		m.normal_enabled = true
+		m.normal_texture = noise_tex(256, 3.1, 3, wseed + 18, true)
+		m.normal_scale = w
+
+	## An emitter's brightness belongs to emission, never to albedo
 	#
 	# A material with emission energy above BLOOM_FLOOR is a light source, and a
 	# light source's *albedo* has to be dark. This is the single most important
@@ -421,7 +643,7 @@ static func _build(key: String) -> StandardMaterial3D:
 		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		m.albedo_color.a = float(spec["alpha"])
 
-	# ## Contact darkening
+	## Contact darkening
 	#
 	# A multiply decal. Unshaded, multiplied into whatever is under it, white at
 	# the rim and dark in the middle, so it darkens the road under a car and
@@ -467,6 +689,25 @@ static func _radial_falloff(core: float) -> GradientTexture2D:
 
 
 # ----------------------------------------------------------------- inspection
+
+## How strongly a key returns light toward the viewer, 0.0 for a material that
+## does not do it. Read from the spec rather than the built material because the
+## intent is the thing worth asserting: a retroreflector that quietly became a
+## light source, or a marking that quietly lost its return, both leave a plausible
+## StandardMaterial3D behind and only the spec says which one it was meant to be.
+static func retro_of(key: String) -> float:
+	if not _SPECS.has(key):
+		return 0.0
+	return float(_SPECS[key].get("retro", 0.0))
+
+
+## True for a surface that returns light rather than making it. The negative
+## direction matters as much as the positive: a retroreflective surface that also
+## emits is a light source wearing a marking's paint, which is the exact defect
+## the `retro` block in `_build` documents.
+static func is_retroreflexive(key: String) -> bool:
+	return retro_of(key) > 0.0
+
 
 ## The albedo a key actually ends up with, or Color(0,0,0,0) if the key is
 ## unknown. The check compares these across the library: N materials that all

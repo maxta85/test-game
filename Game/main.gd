@@ -12,6 +12,24 @@ signal world_ready(graph: RoadGraph)
 
 const SHOT_MODE := "--shot"
 
+## Boot flag: skip the front of house and put the player straight in the car.
+##
+##   godot --path . -- --drive
+##
+## WHY THIS IS A FLAG AND NOT THE DEFAULT. The cold boot is contractually the main
+## menu - `Tests/test_menu_wiring.gd::_cold_boot` asserts `screen_name() ==
+## "main_menu"`, `race.state_name() == "idle"` and the HUD down, and that suite is
+## not in this task's scope to change. So the drivable boot is an opt-in mode
+## rather than a change of behaviour, and the default boot is untouched.
+##
+## What it does buy, and what the playtest harness previously had to do by hand:
+## the menus own ESC and re-assert their own visibility, and `main_menu` puts a
+## START RACE board over the street. `Tools/playtest.gd` worked around that by
+## hiding every CanvasItem in the tree and calling `flow.close()` itself - i.e.
+## the entry point could not be put in a drivable state without the caller
+## reaching into it. This is that state, asked for by name.
+const DRIVE_MODE := "--drive"
+
 ## How far below the world counts as "fell out of the map". Generous, because
 ## kerbs, dips and the odd jump legitimately put the body below zero, and a
 ## recovery that fires while the car is still on the road is worse than none.
@@ -27,6 +45,10 @@ var hud: RaceHUD
 var menus: MenuFlow
 var garage: Garage
 var garage_screen: GarageScreen
+## The route, marked on the road. Built per race from the definition the
+## director is running, so the marks and the scoring can never be two different
+## routes.
+var track: TrackMarker
 var _rivals: Array = []
 var player_controller: PlayerController
 var _sun: DirectionalLight3D
@@ -89,11 +111,33 @@ func _ready() -> void:
 
 	_open_menus()
 
+	if _drive_requested():
+		_boot_into_the_street()
+
 	if shot_path != "":
 		# A frame grab has nobody at the keyboard to walk the menus, and the
 		# presets frame the grid, so a shot needs a race already under way.
 		_auto_start_race()
 		_capture(shot_path)
+
+
+## The drivable boot. Everything the front of house puts up comes down, the HUD
+## goes up in its place, and the first route on the board is started - so the
+## player is on the grid with the chase camera behind them and the race clock
+## running, rather than looking at a menu with a street behind it.
+##
+## Reported on stdout in one line, because "is it drivable yet" is a question the
+## log has to answer on its own: a caller that cannot see the street has no other
+## way to tell the difference between a drivable boot and a hung one.
+func _boot_into_the_street() -> void:
+	var board: Array = menus.races()
+	if board.is_empty():
+		push_warning("--drive: no races could be built from the road graph")
+		return
+	_on_race_start_requested(String(board[0].id))
+	print("[Drive] %s | car at %s | camera %s | race %s" % [
+		String(board[0].display_name), str(player_car.global_position.round()),
+		camera.name, race.state_name()])
 
 
 ## The front page. Built last, once there is a world behind it to look at.
@@ -115,6 +159,10 @@ func _open_menus() -> void:
 	hud.name = "RaceHUD"
 	add_child(hud)
 	hud.visible = false
+	# The map, off the same graph the streets are built from, so the shape on it
+	# is the shape under the car rather than a picture of somewhere else.
+	hud.minimap.set_graph(graph)
+
 	_wire_audio()
 
 
@@ -182,8 +230,24 @@ func _on_race_start_requested(race_id: String) -> void:
 	# what a visible menu board does with it.
 	menus.close()
 	hud.visible = true
+	_mark_the_route(d)
 	print("[Race] %s: %s, %d laps, %.0f m of street" % [
 		d.display_name, d.kind_name(), d.laps, d.length_m(graph)])
+
+
+## Puts the route on the road and on the map.
+##
+## Both read the one definition the director is scoring on, and the map is fed
+## the marker's own polyline rather than re-deriving it from the junction list -
+## so the line on the minimap is the line the barriers are built along, and the
+## two cannot drift apart.
+func _mark_the_route(d: RaceDef) -> void:
+	if track == null:
+		track = TrackMarker.new()
+		track.name = "TrackMarker"
+		add_child(track)
+	track.build(graph, d)
+	hud.minimap.set_route(track.route_points(), d.closed)
 
 
 ## The player is entrant 0, which is what the director treats as "the race is
@@ -213,6 +277,11 @@ func _conclude_if_over() -> void:
 		return
 	_results_shown = true
 	hud.visible = false
+	# The route stops being a race route the moment the race is over; the street
+	# goes back to being a street, and the map with it.
+	if track != null:
+		track.clear()
+	hud.minimap.clear()
 	Cfg.save_game()
 	menus.show_results(race)
 
@@ -417,6 +486,10 @@ func _shot_request() -> String:
 			if i + 1 < args.size():
 				return String(args[i + 1])
 	return ""
+
+
+func _drive_requested() -> bool:
+	return OS.get_cmdline_user_args().has(DRIVE_MODE)
 
 
 ## Frame-grab mode for automated visual checks. Lets the world settle, poses the

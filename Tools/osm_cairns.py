@@ -36,6 +36,18 @@ Three files come out of one pass: the road corridors the graph is built from,
 plus buildings and water as closed rings. The areas are in their own files
 because the two downstream consumers are separate pieces of work, and a
 renderer must not have to know what it did not draw.
+
+The corridor file also carries a `width_attrs` table: the carriageway width and
+lane count each corridor actually has in OSM, keyed by its geometry. See
+`width_attr()` for why that is derived rather than read, and
+`World/road_graph.gd::WIDTH_ATTR_PATH` for the consumer.
+
+Curve geometry and width come out of the SAME pass, deliberately. They used to be
+two branches of this file that fought over the same output: one simplified road
+centrelines into straight chords (bc7efef reverted that, because a chord is not a
+road), the other one emitted 247 chords with a width table keyed to them. Taking
+either branch's `cairns_map.json` wholesale reverts the other. One pass over the
+raw fetch produces both, so `corridors=356` and `width_attrs` cannot disagree.
 """
 import argparse
 import collections
@@ -64,6 +76,26 @@ OUT_WATER = os.path.join(ROOT, "assets", "maps", "cairns_water.json")
 
 API = "https://api.openstreetmap.org/api/0.6/map?bbox={w},{s},{e},{n}"
 UA = "cairns-after-dark/1.0 (godot prototype; OSM vector fetch)"
+
+# --- street width attributes ---------------------------------------------------
+#
+# Measured on the fetch this map is built from, not assumed: of the ways that
+# survive CLASSIFY, **zero** carry `width` or `est_width`, and 137 carry `lanes`.
+# OSM width tagging in this suburb is simply absent, so an extractor that reads
+# `width` alone emits an empty table and every street in the game stays one width
+# again - the same dead end Tests/test_water.gd already documents for the river
+# centrelines. `lanes` is the only survey-grade width attribute this bbox has.
+#
+# So the number below is a documented convention and not a measurement, and the
+# emitted table records which it is per street (`src`). A consumer is never told a
+# derived number is a tagged one, because the difference is the whole point: a
+# tagged width can be trusted and a derived one can only be as good as the lane
+# width convention under it.
+LANE_M = 3.5   # carriageway lane, on-street parking excluded (Austroads: 3.5 m urban)
+KERB_M = 0.5   # kerb line, each side
+MIN_WIDTH_M = 3.0
+MAX_WIDTH_M = 25.0
+MAX_LANES = 6  # 6 lanes is already 22 m of carriageway; nothing here is wider
 
 # OSM highway tag -> RoadGraph.RoadClass (LANE=0, STREET=1, ARTERIAL=2, HIGHWAY=3).
 # None means "drop it". Two kinds of drop, both load-bearing:
@@ -202,6 +234,59 @@ def dissolve(corridors, snap=0.25):
                                 for i in range(len(best) - 1)), 1)
         kept.append(c)
     return kept, len(corridors) - len(kept)
+
+
+def corridor_key(points):
+    """Identity for one corridor that survives a re-sort or a re-filter.
+
+    Not the name: the corridors in this map carry far fewer distinct names than
+    corridors, so "Mulgrave Road" is dozens of different pieces of road with
+    different lane counts between them. Not the first point either - many
+    corridors start at a junction another corridor also starts at. The whole
+    polyline does identify it, and World/road_graph.gd recomputes this string
+    from the Vector2 points it was handed, so both sides have to agree on the
+    format: every point as `%.2f,%.2f`, joined with `|`, at the 2 dp the points
+    are written at.
+
+    That last clause is the whole contract, and it is why `corridor_key` is fed
+    the emitted points rather than the projected ones: `dissolve()` trims a
+    corridor and the emitted list is what the graph is handed, so keying on
+    anything else keys on geometry the graph never sees.
+    """
+    return "|".join("%.2f,%.2f" % (x, z) for x, z in points)
+
+
+def width_attr(tags):
+    """(width_m, lanes, src) from a way's tags, or (None, None, None).
+
+    `width` then `est_width` first, because that is the measurement; `lanes` only
+    as the fallback. Three ways a value is refused rather than guessed at:
+
+      - `width=2.5;3` (a lane plus a parking strip) takes the first number, which
+        is the carriageway and not the whole reservation;
+      - `width=24'` is rejected, not converted: `'` in this position means feet,
+        and a string parser that assumed metres would ship a road 30% too wide;
+      - anything outside MIN/MAX_WIDTH_M is rejected rather than clamped. A
+        clamped outlier is a width nobody surveyed, and the class default it
+        falls back to is a better guess than a clamped one.
+    """
+    raw = tags.get("width") or tags.get("est_width")
+    if raw:
+        try:
+            w = float(str(raw).split(";")[0].strip().split(" ")[0])
+        except ValueError:
+            w = None
+        if w is not None and MIN_WIDTH_M <= w <= MAX_WIDTH_M:
+            return round(w, 2), None, "osm:width"
+    raw = tags.get("lanes")
+    if raw:
+        try:
+            n = int(float(str(raw).split(";")[0]))
+        except ValueError:
+            n = 0
+        if 1 <= n <= MAX_LANES:
+            return round(n * LANE_M + 2.0 * KERB_M, 2), n, "lanes"
+    return None, None, None
 
 
 # --- buildings and water --------------------------------------------------------
@@ -451,13 +536,29 @@ def extract_areas(root, nodes, lat0, lon0):
 
 
 def dump(path, obj):
+    """Write `obj` as JSON, or leave the file alone if it is already that.
+
+    A conversion that produces identical buildings and water should not rewrite
+    them: it dirties two files the map agent does not own (and did not change),
+    which in a fleet of agents working in parallel worktrees is a scope violation
+    with a innocent-looking cause.
+    """
+    body = json.dumps(obj, separators=(",", ":"))
+    if os.path.exists(path):
+        with open(path) as f:
+            if f.read() == body:
+                print(f"== {path} unchanged ({len(body)} bytes)")
+                return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
-        json.dump(obj, f, separators=(",", ":"))
+        f.write(body)
     print(f"-> {path} ({os.path.getsize(path)} bytes)")
 
 
-def convert(bbox, tol):
+def convert(bbox, tol, ctol=None):
+    """`ctol` is the centreline tolerance; None means "use `tol` for everything"."""
+    if ctol is None:
+        ctol = tol
     s, w, n, e = bbox
     lat0, lon0 = (s + n) / 2.0, (w + e) / 2.0
     print(f"parsing {RAW}", file=sys.stderr)
@@ -469,6 +570,10 @@ def convert(bbox, tol):
 
     corridors, dropped, min_len = [], {"class": 0, "short": 0, "motorway": 0}, 12.0
     names = {}
+    # Counted per way as the class filter passes, before the length and
+    # connectivity drops below, so `--check` can recount them straight out of
+    # the raw fetch and prove the emitted numbers came from the source data.
+    ways_with_attr = collections.Counter()
     for el in root:
         if el.tag != "way":
             continue
@@ -483,7 +588,22 @@ def convert(bbox, tol):
                 pts.append(project(ll[0], ll[1], lat0, lon0))
         if len(pts) < 2:
             continue
-        pts = rdp(pts, tol)
+        # ROAD CENTRELINES KEEP THEIR CURVATURE. `rdp` collapses a real curve into
+        # straight chords, and a chord is not a road: measured on the shipped map,
+        # RDP at 2.5 m took Hoare Street from 36 OSM nodes to 4 points, Clarke from 16
+        # to 2, Aumuller from 23 to 3, and 234 of 247 corridors ended up with 4 points
+        # or fewer (median 2, none above 10).
+        #
+        # That is not a cosmetic loss. A 2-point straight chord has no curvature
+        # information, so anything that projects onto the centreline - the cross-track
+        # term in `Tools/playable_probe.gd`, `LaneFollower.project`, every camera pose
+        # built by offsetting from a station - is offsetting from a straight line that
+        # is not where the road is. It is the mechanism behind t135's "camera under the
+        # terrain" and behind the t111 excursions.
+        #
+        # Building rings and area outlines still simplify, because there the chords are
+        # a genuine win: nobody needs a metre-accurate wall outline.
+        pts = rdp(pts, ctol)
         length = sum(math.dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1))
         cls = CLASSIFY.get(hw, 0)
         if cls is None:
@@ -492,6 +612,12 @@ def convert(bbox, tol):
         if cls == 0:
             dropped["class"] += 1
             continue
+        # Width is read from the way's own tags, here, while the way is still in
+        # hand. Reading it later - off the emitted corridor - would mean keying
+        # the table by geometry again to find the tags it came from.
+        attr_w, attr_lanes, attr_src = width_attr(tags)
+        if attr_src:
+            ways_with_attr[attr_src] += 1
         if length < min_len:
             dropped["short"] += 1
             continue
@@ -501,17 +627,59 @@ def convert(bbox, tol):
             "name": name, "class": cls, "oneway": tags.get("oneway") == "yes",
             "length": round(length, 1),
             "points": [[round(p[0], 2), round(p[1], 2)] for p in pts],
+            # Carried through dissolve() (which copies the dict) and popped below.
+            # The centreline is NOT simplified here even when `--centreline-tolerance`
+            # is non-zero: the width key is the emitted polyline, so the table has
+            # to be written after the geometry is final, not before.
+            "_attr": {"width_m": attr_w, "lanes": attr_lanes, "src": attr_src},
         })
 
     corridors.sort(key=lambda c: -c["length"])
     corridors, islands = dissolve(corridors)
     corridors.sort(key=lambda c: -c["length"])
+
+    # One entry per corridor that has a width, keyed by its geometry - and keyed
+    # AFTER dissolve(), because dissolve() trims a clipped stub's point list, so a
+    # key taken before it describes a polyline that is not the one emitted. That
+    # ordering is the whole difference between a table the graph finds and a table
+    # it silently misses, and a miss is invisible: every street falls back to its
+    # class default, which is a perfectly good-looking road.
+    width_attrs, attr_srcs, lane_hist = {}, collections.Counter(), collections.Counter()
+    for c in corridors:
+        # `w` is the bbox west longitude in this function and stays that way.
+        attr = c.pop("_attr", None) or {}
+        attr_width = attr.get("width_m")
+        if attr_width is None:
+            continue
+        width_attrs[corridor_key(c["points"])] = {
+            "width_m": attr_width, "lanes": attr.get("lanes"), "src": attr.get("src")}
+        attr_srcs[attr.get("src")] += 1
+        if attr.get("lanes"):
+            lane_hist[int(attr["lanes"])] += 1
+    derived = sorted(v["width_m"] for v in width_attrs.values())
+    width_stats = {
+        "corridors": len(corridors),
+        "corridors_with_width": len(width_attrs),
+        "corridors_on_class_default": len(corridors) - len(width_attrs),
+        "tagged": attr_srcs["osm:width"],
+        "derived_from_lanes": attr_srcs["lanes"],
+        "ways_tagged": ways_with_attr["osm:width"],
+        "ways_with_lanes": ways_with_attr["lanes"],
+        "lanes_histogram": {str(k): v for k, v in sorted(lane_hist.items())},
+        "width_m": {"min": derived[0], "max": derived[-1]} if derived else None,
+        "key": "corridor polyline, '%.2f,%.2f' per point joined with '|'",
+        "dropped_with_width": (ways_with_attr["osm:width"] + ways_with_attr["lanes"]
+                               - len(width_attrs)),
+    }
     xs = [p[0] for c in corridors for p in c["points"]]
     zs = [p[1] for c in corridors for p in c["points"]]
     segs = sum(len(c["points"]) - 1 for c in corridors)
     out = {
         "source": "OpenStreetMap contributors, ODbL 1.0",
-        "note": "Generated by Tools/osm_cairns.py - do not hand-edit.",
+        "note": "Generated by Tools/osm_cairns.py - do not hand-edit. "
+                "'width_attrs' carries each corridor's surveyed carriageway width, "
+                "keyed by its geometry; 'src' says whether that width was tagged "
+                "in OSM or derived from the lane count.",
         "bbox": {"south": s, "west": w, "north": n, "east": e},
         "axes": "+X east, +Z south, origin at bbox centre",
         "stats": {
@@ -519,7 +687,9 @@ def convert(bbox, tol):
             "total_km": round(sum(c["length"] for c in corridors) / 1000.0, 2),
             "extent_m": [round(max(xs) - min(xs), 1), round(max(zs) - min(zs), 1)],
             "dropped": dict(dropped, disconnected=islands),
+            "width": width_stats,
         },
+        "width_attrs": width_attrs,
         "corridors": corridors,
     }
     areas = extract_areas(root, nodes, lat0, lon0)
@@ -563,6 +733,11 @@ def convert(bbox, tol):
     print(f"\n{len(corridors)} corridors, {segs} segments, "
           f"{out['stats']['total_km']} km, extent {out['stats']['extent_m']} m")
     print(f"dropped: {dropped}")
+    print(f"widths: {width_stats['corridors_with_width']}/"
+          f"{width_stats['corridors']} corridors "
+          f"({width_stats['tagged']} tagged in OSM, "
+          f"{width_stats['derived_from_lanes']} derived from lanes), lanes "
+          f"{width_stats['lanes_histogram']}, range {width_stats['width_m']} m")
     print(f"buildings: {bstats}")
     print(f"water: {wstats}")
     for c in corridors[:12]:
@@ -595,25 +770,135 @@ def check(path, key, minimum):
     print(f"  {key}: {len(feats)} rings, all closed")
 
 
+def check_roads(path):
+    """Assert the emitted width table is intact, and still derived from the fetch.
+
+    Three things can go wrong here that nothing downstream would notice, because
+    every consumer treats a missing width as "use the class default" and the class
+    default is a perfectly good-looking road:
+
+      - the key format drifts between this file and World/road_graph.gd, so the
+        graph silently stops finding the table and every street goes back to one
+        width. Hence the key is recomputed from the emitted corridors and matched
+        both ways, rather than trusted;
+      - two corridors collide on one key, so the table is a lookup that can answer
+        with the wrong street's width;
+      - the table stops matching the source data, e.g. a tag-filter change that
+        silently drops every `lanes`. Hence the raw fetch is recounted when it is
+        still on disk, which is the only part of this that can catch a fetcher
+        quietly returning less than it used to.
+
+    It also asserts the geometry the table hangs off, because that is the part of
+    the file a width merge used to silently revert: with 356 corridors the widths
+    can be perfectly keyed and still be attached to straight chords.
+    """
+    with open(path) as f:
+        data = json.load(f)
+    table = data.get("width_attrs")
+    assert isinstance(table, dict), f"width_attrs: not a dict in {path}"
+    cors = data.get("corridors")
+    assert isinstance(cors, list) and cors, f"corridors: no list in {path}"
+    stats = data.get("stats", {}).get("width", {})
+    assert stats, f"stats.width missing from {path}"
+
+    keys = {}
+    for c in cors:
+        pts = [(float(p[0]), float(p[1])) for p in c["points"]]
+        k = corridor_key(pts)
+        assert k not in keys, (f"two corridors share one width key: {keys.get(k)} and "
+                              f"{c['name']}")
+        keys[k] = c["name"]
+
+    for k, v in table.items():
+        assert k in keys, f"width_attrs key matches no corridor: {k[:60]}"
+        w = v.get("width_m")
+        assert isinstance(w, (int, float)) and MIN_WIDTH_M <= w <= MAX_WIDTH_M, \
+            f"{keys[k]}: width {w} outside {MIN_WIDTH_M}-{MAX_WIDTH_M} m"
+        assert v.get("src") in ("osm:width", "lanes"), \
+            f"{keys[k]}: src {v.get('src')!r} is not a known provenance"
+        lanes = v.get("lanes")
+        assert lanes is None or 1 <= lanes <= MAX_LANES, \
+            f"{keys[k]}: lanes {lanes} outside 1-{MAX_LANES}"
+
+    assert len(table) == stats.get("corridors_with_width"), \
+        f"width_attrs has {len(table)} entries, stats claims {stats}"
+    assert stats.get("tagged", 0) + stats.get("derived_from_lanes", 0) == len(table), \
+        f"tagged+derived {stats} does not add up to {len(table)} entries"
+    assert (stats.get("corridors_with_width", 0)
+            + stats.get("corridors_on_class_default", 0) == len(cors)), \
+        f"width stats {stats} do not add up to {len(cors)} corridors"
+    assert (stats.get("tagged", 0) + stats.get("derived_from_lanes", 0)
+            + stats.get("dropped_with_width", 0)
+            == stats.get("ways_tagged", 0) + stats.get("ways_with_lanes", 0)), \
+        f"corridor and way width counts disagree: {stats}"
+
+    # Curvature is not optional, and a width merge is exactly the kind of change
+    # that brings a chord-only map back with the table intact. Assert the shape of
+    # the geometry the widths are keyed to, not just the count of corridors: a
+    # 247-corridor map also satisfies every assertion above.
+    points = sorted(len(c["points"]) for c in cors)
+    curved = sum(1 for c in cors if len(c["points"]) > 4)
+    assert points[len(points) // 2] >= 4, (
+        f"median corridor is {points[len(points) // 2]} points: the centrelines "
+        f"look simplified into chords again")
+    assert curved * 2 >= len(cors), (
+        f"only {curved} of {len(cors)} corridors carry more than 4 points")
+
+    if os.path.exists(RAW):
+        root = ET.parse(RAW).getroot()
+        recount = collections.Counter()
+        for el in root:
+            if el.tag != "way":
+                continue
+            tags = {t.get("k"): t.get("v") for t in el.findall("tag")}
+            cls = CLASSIFY.get(tags.get("highway"), 0)
+            if cls is None or cls == 0:
+                continue
+            src = width_attr(tags)[2]
+            if src:
+                recount[src] += 1
+        assert recount["osm:width"] == stats.get("ways_tagged", 0), (
+            f"raw fetch has {recount['osm:width']} tagged-width ways, emitted "
+            f"{stats.get('ways_tagged')}")
+        assert recount["lanes"] == stats.get("ways_with_lanes", 0), (
+            f"raw fetch has {recount['lanes']} lanes-tagged ways, emitted "
+            f"{stats.get('ways_with_lanes')}")
+        print(f"  width_attrs: {len(table)} entries match the fetch "
+              f"({recount['osm:width']} tagged + {recount['lanes']} lanes ways)")
+    else:
+        print("  width_attrs: %d entries (raw fetch absent, source not recounted)"
+              % len(table))
+    print(f"  width_attrs: {stats.get('tagged', 0)} tagged, "
+          f"{stats.get('derived_from_lanes', 0)} derived, lanes "
+          f"{stats.get('lanes_histogram')}")
+    print(f"  centrelines: {len(cors)} corridors, median {points[len(points) // 2]} "
+          f"points, {curved} over 4, {data.get('stats', {}).get('segments')} segments")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bbox", type=float, nargs=4, metavar=("S", "W", "N", "E"),
                     default=list(CAIRNS_BBOX))
     ap.add_argument("--tolerance", type=float, default=2.5,
-                    help="Douglas-Peucker tolerance in metres")
+                    help="Douglas-Peucker tolerance in metres, for BUILDING RINGS")
+    ap.add_argument("--centreline-tolerance", type=float, default=0.0,
+                    help="RDP tolerance for ROAD CENTRELINES. 0 keeps every OSM node: "
+                         "a simplified centreline is a straight chord, and the road is not straight.")
     ap.add_argument("--cache-only", action="store_true")
     ap.add_argument("--check", action="store_true",
-                    help="assert the emitted buildings/water have usable rings, "
-                         "then exit without fetching or converting")
+                    help="assert the emitted buildings/water have usable rings and "
+                         "the road width table is intact, then exit without "
+                         "fetching or converting")
     a = ap.parse_args()
     if a.check:
         check(OUT_BUILDINGS, "buildings", 1000)
         check(OUT_WATER, "water", 5)
+        check_roads(OUT)
         print("EXTRACT-OK")
         return
     if not a.cache_only:
         fetch(tuple(a.bbox))
-    convert(tuple(a.bbox), a.tolerance)
+    convert(tuple(a.bbox), a.tolerance, a.centreline_tolerance)
 
 
 if __name__ == "__main__":

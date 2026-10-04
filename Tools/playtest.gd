@@ -154,6 +154,11 @@ func _ready() -> void:
 				_street_from = maxf(a.substr(7).to_float(), STREET_START_M)
 			elif a.begins_with("--seconds="):
 				_street_limit = a.substr(10).to_float()
+			elif a.begins_with("--steer-bias="):
+				# Deliberate fault injection, for exactly one question: can the
+				# off-road check ever fire? Off by default so no ordinary run is
+				# affected.
+				_street_steer_bias = a.substr(13).to_float()
 		await _street_drive()
 		return
 	await _start_race()
@@ -202,6 +207,17 @@ const STREET_YAW_FLOOR := 0.13       ## rad/s; drop the heading term below this
 var _street: PackedVector2Array = PackedVector2Array()
 var _street_len := 0.0
 var _street_off_road := false
+## How close the run ever came to being called off-road: max(|lat| - hw) over the
+## whole drive, in metres. Negative means the check never fired. Reporting the
+## MARGIN rather than only the 0/1 count is the difference between "stayed on the
+## road" and "never came near the edge", which look identical in the counter.
+var _street_off_margin := -INF
+var _street_hw_min := INF
+## Deliberate constant steer bias, 0 by default. This is the ONLY way the harness
+## can answer "can the off-road check ever fire?" without hand-waving: it pushes a
+## real car off a real carriageway so the existing predicate gets to run. See
+## OFF_ROAD_CAN_FAIL in verify.sh.
+var _street_steer_bias := 0.0
 var _street_name := STREET_NAME
 var _street_name_override := ""
 var _street_max_load := 0.0
@@ -300,6 +316,20 @@ func _street_half_width(p: Vector3) -> float:
 	if eid < 0:
 		return 7.0
 	return float(graph.edges[eid]["width"]) * 0.5
+
+
+## Is this lateral offset off the carriageway? The one definition of "off road"
+## in the file, extracted so the test suite can pin it without instantiating a
+## car and driving 1400 m of street to observe a boolean.
+##
+## It is `|lat| > hw` and NOT `>=`, because sitting exactly on the edge with the
+## bodywork overhanging the line is not yet an excursion. The threshold is the
+## half-width of the edge the car is NEAREST, which makes the metric partly
+## self-normalising: drifting off a wide arterial onto a narrow driveway
+## re-baselines both lat and hw at once. That is a real limitation of the check
+## and is why OFF_ROAD_CAN_FAIL is measured rather than asserted.
+static func street_off_road(lat: float, hw: float) -> bool:
+	return absf(lat) > hw
 
 
 ## Heading error in radians, positive meaning "yaw left to match the tangent".
@@ -442,12 +472,17 @@ func _street_drive() -> void:
 		var steer := 0.0
 		if _street_assist:
 			steer = clampf(STREET_HEAD_GAIN * eff_err + STREET_LAT_GAIN * lat, -1.0, 1.0)
+		steer = clampf(steer + _street_steer_bias, -1.0, 1.0)
 
 		_hold({"throttle": 1.0, "steer": steer})
 		_street_max_steer = maxf(_street_max_steer, absf(steer))
 		_street_max_lat = maxf(_street_max_lat, absf(lat))
 
-		var off: bool = absf(lat) > hw
+		# How far past the edge, in metres. Positive means this frame counted as off-road.
+		_street_off_margin = maxf(_street_off_margin, absf(lat) - hw)
+		_street_hw_min = minf(_street_hw_min, hw)
+
+		var off: bool = street_off_road(lat, hw)
 		if off:
 			if not _street_off_road:
 				_street_off_count += 1
@@ -687,6 +722,9 @@ func _street_report(car: Node, s: float, t: float, distance: float,
 	print("times off the carriageway        : %d" % _street_off_count)
 	print("furthest off the centreline      : %.2f m" % _street_off_max)
 	print("worst single excursion            : %.2f s off the road" % _street_off_worst_time)
+	print("closest approach to the edge     : %+.2f m  (|lat|-hw; negative = never off)" % _street_off_margin)
+	print("narrowest half-width seen        : %.2f m" % (INF if is_inf(_street_hw_min) else _street_hw_min))
+	print("steer bias injected              : %+.2f" % _street_steer_bias)
 	print("peak lateral offset              : %.2f m" % _street_max_lat)
 	print("peak |steer| demanded by assist   : %.2f of 1.00" % _street_max_steer)
 	print("peak body slip angle             : %.3f rad (%.1f deg)" % [
