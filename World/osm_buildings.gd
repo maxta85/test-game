@@ -87,6 +87,24 @@ const SHOP_SILL := 0.45
 const SIGN_H := 0.7
 ## How far the glass stands off the wall, so it does not z-fight the render band.
 const GLASS_OUT := 0.05
+## Vertical relief: the piers between the bays, and the cornice under the eave.
+##
+## A facade before these was lit rectangles stuck on a flat plane, and at night
+## that is a row of blobs - nothing between the bays for the streetlight to catch,
+## and no silhouette at all as the car goes past. Measured on
+## `World/facade_capture.gd` before the change, a 26.5 m shopfront rendered as six
+## clipped white panes with unbroken wall between them.
+##
+## Both go into the wall's own tint batch, so the city still costs the same eleven
+## draw calls. Both are proud by well under the 0.14 m the collider already
+## ignores for the roof overhang, and the collider stays on the ring: the 2.5 m
+## carriageway clearance in `Tests/test_world.gd` is measured on the collider.
+const PIER_W := 0.5
+const PIER_OUT := 0.13
+## The cornice is what separates the facade from the roofline against the sky, so
+## it is deeper than a pier and continuous across the whole face.
+const CORNICE_H := 0.3
+const CORNICE_OUT := 0.2
 ## Only 5 of the 2198 rings carry `building:levels` and 2159 are tagged plain
 ## `building=yes`, so kind and area are what actually decide the height.
 const FLAT_KINDS := ["stadium", "retail", "commercial", "industrial", "warehouse", "church"]
@@ -938,23 +956,33 @@ static func _cap(st: SurfaceTool, ring: PackedVector2Array, y: float, up: bool) 
 
 
 ## The facade treatment: on every street-facing edge, a grid of windows scaled to
-## the wall, a glazed shopfront where the building is a shop, and a sign fascia
-## over a main road frontage.
+## the wall, a glazed shopfront where the building is a shop, a sign fascia over a
+## main road frontage, and the vertical relief that makes any of it read as a
+## building rather than as decals on a wall.
+##
+## `wall_st` is the wall's own tint batch. The piers and the cornice are wall, so
+## they are free: the whole city is eleven draw calls with or without them.
 ##
 ## Everything lit goes into `windows` (two emissive batches) or `signs` (one), so
 ## the whole facade pass costs a single extra draw call for the city of 2198 -
 ## which matters, because Tests/test_osm_buildings.gd caps this at a dozen and the
-## cap is the reason a facade can be worth drawing at all. `trim` is the building's
-## own wall batch: a sill is opaque, so it joins the wall it is bolted to rather
-## than costing a batch of its own.
-static func _facade(trim: SurfaceTool, windows: Array, signs: Array,
+## cap is the reason a facade can be worth drawing at all.
+##
+## `wall_st` is the building's own wall tint batch, and it carries all of the
+## opaque relief: the piers and cornice from `street/verticals`, and the sill from
+## the buildings-detail pass. Both arrived at that signature independently and it
+## is the same signature, so the merge keeps one of the two names rather than two.
+## A sill is opaque and belongs on the wall it is bolted to, which is why it costs
+## no draw call.
+static func _facade(wall_st: SurfaceTool, windows: Array, signs: Array,
 		ring: PackedVector2Array, e: Dictionary) -> void:
 	for f in e["faces"]:
-		_face(trim, windows, signs, ring, e, f)
+		_face(wall_st, windows, signs, ring, e, f)
 
 
-static func _face(trim: SurfaceTool, windows: Array, signs: Array,
-		ring: PackedVector2Array, e: Dictionary, f: Dictionary) -> void:
+static func _face(wall_st: SurfaceTool, windows: Array, signs: Array,
+		ring: PackedVector2Array, e: Dictionary,
+		f: Dictionary) -> void:
 	var i := int(f["i"])
 	var a := ring[i]
 	var b := ring[(i + 1) % ring.size()]
@@ -991,22 +1019,91 @@ static func _face(trim: SurfaceTool, windows: Array, signs: Array,
 		var c1 := Vector3(c.x, ground + y0, c.y) + along * w
 		var s0 := c0 + nrm * SILL_OUT
 		var s1 := c1 + nrm * SILL_OUT
-		_quad(trim, c0, c1, s1, s0, up)
-		_edge(trim, s0, s1, nrm, ground + y0 - SILL_T, ground + y0)
+		_quad(wall_st, c0, c1, s1, s0, up)
+		_edge(wall_st, s0, s1, nrm, ground + y0 - SILL_T, ground + y0)
+
+	# A box standing proud of the wall, as a real box and not a decal: a front
+	# face plus both returns. The returns are what a car going past at 60 km/h
+	# actually sees, and without them the pier is a picture of a pier.
+	var relief := func(st: SurfaceTool, t: float, y0: float, half_w: float, h: float,
+			out: float) -> void:
+		var c := a + dir * t
+		var back := Vector3(c.x, ground + y0, c.y)
+		var front := back + nrm * out
+		var top := h
+		_quad(st, front - along * half_w, front + along * half_w,
+				front + along * half_w + up * top, front - along * half_w + up * top, nrm)
+		for s: float in [1.0, -1.0]:
+			var face_n: Vector3 = along * s
+			var p0: Vector3 = back + along * half_w * s
+			var p1: Vector3 = front + along * half_w * s
+			_quad(st, p0, p1, p1 + up * top, p0 + up * top, face_n)
+		# Cap, so the top of a pier is not a hole when seen from a passing car.
+		var q0 := front - along * half_w
+		var q1 := front + along * half_w
+		_quad(st, q0, q1, back + along * half_w + up * top, back - along * half_w + up * top, up)
+
+	# Vertical rhythm: one pier per bay boundary, ground to cornice.
+	#
+	# These run the WHOLE height, not just to the shopfront head. A pier that stops
+	# 3.2 m up leaves the storeys above it as flat wall again, which measured as
+	# the worst of both - the ground floor had articulation and the facade above
+	# the sign fascia was still a flat plane with panes stuck on it.
+	#
+	# The window grid's own counts are needed to place them, so they are computed
+	# here, before the relief pass, rather than duplicated below. One count, one
+	# place: two copies of a pitch always drift.
+	#
+	# `span` is already the full face, so the end piers sit inside the corner
+	# margin and never overhang the corner.
+	var first := SHOP_TOP + 0.6 if shop else 0.0
+	var rows := clampi(int((wall - first - SILL - PANE_H) / STOREY) + 1, 0, 4)
+	var cols := clampi(int(inner / 2.3), 1, maxi(1, int(inner / 1.6)))
+	var pitch := inner / float(cols)
+	var relief_top: float = ground + wall - CORNICE_H
+	var bay_pitch := 0.0
+	var bays := 0
+	if shop:
+		bays = clampi(int(inner / 2.6), 1, 6)
+		bay_pitch = inner / float(bays)
+
+	# The piers land on the rhythm the lit panels already sit on: a shop is
+	# divided at its bay pitch, a house at its window column pitch. A pier that
+	# does not land on a panel boundary reads as an accident.
+	var pier_pitch := bay_pitch if shop else pitch
+	var pier_count := bays if shop else cols
+	if pier_count > 1 and pier_pitch > PIER_W:
+		for k in pier_count + 1:
+			relief.call(wall_st, CORNER_MARGIN + float(k) * pier_pitch, 0.0,
+					PIER_W * 0.5, relief_top - ground, PIER_OUT)
+	# Cornice: continuous, across the whole face, under the eave. This is the one
+	# that gives the facade a top edge against the sky.
+	if wall > CORNICE_H + 0.6:
+		relief.call(wall_st, span * 0.5, wall - CORNICE_H, inner * 0.5 + CORNER_MARGIN,
+				CORNICE_H, CORNICE_OUT)
 
 	if shop:
-		# Shopfront: a run of bays, mullions left as the gaps between them.
-		#
-		# The glass is 64% of the bay, not 80%. At 2.3 m of glass in a 2.6 m bay the
-		# frontage was one unbroken sheet of light with no frame in it at all, and
-		# the mullion is what makes a shopfront read as a building rather than a
-		# lightbox. Proportion, not brightness - see the emission note in build().
-		var bays := clampi(int(inner / 2.6), 1, 6)
-		var bpitch := inner / float(bays)
+		# Shopfront: a run of bays. The gaps between them are now real - the piers
+		# above stand in them - so a bay reads as a bay instead of as a white
+		# rectangle floating on unbroken wall.
 		var glass: SurfaceTool = windows[0 if bool(e["warm"]) else 1]
 		for k in bays:
-			var t := CORNER_MARGIN + (float(k) + 0.5) * bpitch
-			var half_bay := minf(0.95, bpitch * 0.32)
+			panel.call(glass, CORNER_MARGIN + (float(k) + 0.5) * bay_pitch, SHOP_SILL,
+					minf(1.15, bay_pitch * 0.4), SHOP_TOP - SHOP_SILL)
+
+	if shop:
+		# Shopfront: a run of bays. The gaps between them are real - the piers above
+		# stand in them - so a bay reads as a bay and not as a white rectangle
+		# floating on unbroken wall.
+		#
+		# The glass is 64% of the bay, not 80%: at 2.3 m of glass in a 2.6 m bay the
+		# frontage was one unbroken sheet of light with no frame in it at all. Bay
+		# count and pitch come from the count above, because the piers stand on that
+		# same rhythm and two copies of a pitch always drift.
+		var glass: SurfaceTool = windows[0 if bool(e["warm"]) else 1]
+		for k in bays:
+			var t := CORNER_MARGIN + (float(k) + 0.5) * bay_pitch
+			var half_bay := minf(0.95, bay_pitch * 0.32)
 			panel.call(glass, t, SHOP_SILL, half_bay, SHOP_TOP - SHOP_SILL)
 			sill.call(t, SHOP_SILL, half_bay)
 
@@ -1026,17 +1123,11 @@ static func _face(trim: SurfaceTool, windows: Array, signs: Array,
 			panel.call(signs[0] if not neon else windows[1], span * 0.5, sign_y - ground,
 					sign_w, SIGN_H)
 
-	# Windows: a grid, not a scatter. Columns come from the width of the frontage
-	# and rows from the height of the wall, so a wide two-storey shopfront gets a
-	# row of panes and the townhouse beside it gets two. The column count is
-	# capped by the pitch rather than by a flat number: eight windows spread over
-	# 40 m of frontage is one every five metres, which is not a grid.
-	var first := SHOP_TOP + 0.6 if shop else 0.0
-	var rows := clampi(int((wall - first - SILL - PANE_H) / STOREY) + 1, 0, 4)
-	var cols := clampi(int(inner / 2.3), 1, maxi(1, int(inner / 1.6)))
+	# Windows: a grid, not a scatter. `rows`, `cols` and `pitch` are counted above,
+	# before the relief pass, because the piers have to stand on the same rhythm as
+	# the panes.
 	if rows < 1 or cols < 1:
 		return
-	var pitch := inner / float(cols)
 	var half_w := minf(PANE_W * 0.5, pitch * 0.32)
 	for row in rows:
 		var y := first + SILL + float(row) * STOREY

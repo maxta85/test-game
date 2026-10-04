@@ -12,6 +12,24 @@ signal world_ready(graph: RoadGraph)
 
 const SHOT_MODE := "--shot"
 
+## Boot flag: skip the front of house and put the player straight in the car.
+##
+##   godot --path . -- --drive
+##
+## WHY THIS IS A FLAG AND NOT THE DEFAULT. The cold boot is contractually the main
+## menu - `Tests/test_menu_wiring.gd::_cold_boot` asserts `screen_name() ==
+## "main_menu"`, `race.state_name() == "idle"` and the HUD down, and that suite is
+## not in this task's scope to change. So the drivable boot is an opt-in mode
+## rather than a change of behaviour, and the default boot is untouched.
+##
+## What it does buy, and what the playtest harness previously had to do by hand:
+## the menus own ESC and re-assert their own visibility, and `main_menu` puts a
+## START RACE board over the street. `Tools/playtest.gd` worked around that by
+## hiding every CanvasItem in the tree and calling `flow.close()` itself - i.e.
+## the entry point could not be put in a drivable state without the caller
+## reaching into it. This is that state, asked for by name.
+const DRIVE_MODE := "--drive"
+
 ## How far below the world counts as "fell out of the map". Generous, because
 ## kerbs, dips and the odd jump legitimately put the body below zero, and a
 ## recovery that fires while the car is still on the road is worse than none.
@@ -89,11 +107,33 @@ func _ready() -> void:
 
 	_open_menus()
 
+	if _drive_requested():
+		_boot_into_the_street()
+
 	if shot_path != "":
 		# A frame grab has nobody at the keyboard to walk the menus, and the
 		# presets frame the grid, so a shot needs a race already under way.
 		_auto_start_race()
 		_capture(shot_path)
+
+
+## The drivable boot. Everything the front of house puts up comes down, the HUD
+## goes up in its place, and the first route on the board is started - so the
+## player is on the grid with the chase camera behind them and the race clock
+## running, rather than looking at a menu with a street behind it.
+##
+## Reported on stdout in one line, because "is it drivable yet" is a question the
+## log has to answer on its own: a caller that cannot see the street has no other
+## way to tell the difference between a drivable boot and a hung one.
+func _boot_into_the_street() -> void:
+	var board: Array = menus.races()
+	if board.is_empty():
+		push_warning("--drive: no races could be built from the road graph")
+		return
+	_on_race_start_requested(String(board[0].id))
+	print("[Drive] %s | car at %s | camera %s | race %s" % [
+		String(board[0].display_name), str(player_car.global_position.round()),
+		camera.name, race.state_name()])
 
 
 ## The front page. Built last, once there is a world behind it to look at.
@@ -417,6 +457,10 @@ func _shot_request() -> String:
 			if i + 1 < args.size():
 				return String(args[i + 1])
 	return ""
+
+
+func _drive_requested() -> bool:
+	return OS.get_cmdline_user_args().has(DRIVE_MODE)
 
 
 ## Frame-grab mode for automated visual checks. Lets the world settle, poses the

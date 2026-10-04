@@ -542,7 +542,10 @@ def dump(path, obj):
     print(f"-> {path} ({os.path.getsize(path)} bytes)")
 
 
-def convert(bbox, tol):
+def convert(bbox, tol, ctol=None):
+    """`ctol` is the centreline tolerance; None means "use `tol` for everything"."""
+    if ctol is None:
+        ctol = tol
     s, w, n, e = bbox
     lat0, lon0 = (s + n) / 2.0, (w + e) / 2.0
     print(f"parsing {RAW}", file=sys.stderr)
@@ -572,7 +575,22 @@ def convert(bbox, tol):
                 pts.append(project(ll[0], ll[1], lat0, lon0))
         if len(pts) < 2:
             continue
-        pts = rdp(pts, tol)
+        # ROAD CENTRELINES KEEP THEIR CURVATURE. `rdp` collapses a real curve into
+        # straight chords, and a chord is not a road: measured on the shipped map,
+        # RDP at 2.5 m took Hoare Street from 36 OSM nodes to 4 points, Clarke from 16
+        # to 2, Aumuller from 23 to 3, and 234 of 247 corridors ended up with 4 points
+        # or fewer (median 2, none above 10).
+        #
+        # That is not a cosmetic loss. A 2-point straight chord has no curvature
+        # information, so anything that projects onto the centreline - the cross-track
+        # term in `Tools/playable_probe.gd`, `LaneFollower.project`, every camera pose
+        # built by offsetting from a station - is offsetting from a straight line that
+        # is not where the road is. It is the mechanism behind t135's "camera under the
+        # terrain" and behind the t111 excursions.
+        #
+        # Building rings and area outlines still simplify, because there the chords are
+        # a genuine win: nobody needs a metre-accurate wall outline.
+        pts = rdp(pts, ctol)
         length = sum(math.dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1))
         cls = CLASSIFY.get(hw, 0)
         if cls is None:
@@ -821,7 +839,10 @@ def main():
     ap.add_argument("--bbox", type=float, nargs=4, metavar=("S", "W", "N", "E"),
                     default=list(CAIRNS_BBOX))
     ap.add_argument("--tolerance", type=float, default=2.5,
-                    help="Douglas-Peucker tolerance in metres")
+                    help="Douglas-Peucker tolerance in metres, for BUILDING RINGS")
+    ap.add_argument("--centreline-tolerance", type=float, default=0.0,
+                    help="RDP tolerance for ROAD CENTRELINES. 0 keeps every OSM node: "
+                         "a simplified centreline is a straight chord, and the road is not straight.")
     ap.add_argument("--cache-only", action="store_true")
     ap.add_argument("--check", action="store_true",
                     help="assert the emitted buildings/water have usable rings and "
@@ -836,7 +857,7 @@ def main():
         return
     if not a.cache_only:
         fetch(tuple(a.bbox))
-    convert(tuple(a.bbox), a.tolerance)
+    convert(tuple(a.bbox), a.tolerance, a.centreline_tolerance)
 
 
 if __name__ == "__main__":
