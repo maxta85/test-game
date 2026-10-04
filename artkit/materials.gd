@@ -136,6 +136,76 @@ static func noise_tex(size: int, freq: float, octaves: int, seed_value: int,
 	return tex
 
 
+# ------------------------------------------------------------------- banding
+
+## ## Boarded, ribbed and paled surfaces
+##
+## A flat albedo is why a building reads as a box. Timber weatherboard is horizontal
+## boards with a shadow line under each lip; a paling fence is the same idea turned
+## 90 degrees; Colorbond is a sawtooth. None of that is a colour - it is a *profile*,
+## and a profile is a one-dimensional ramp, which Godot already draws. So these are
+## `GradientTexture2D`s generated in-engine: no texture to source, no licence to hold.
+## They are honest procedural work, not a stand-in for an asset nobody made.
+##
+## Each period gets its own small deterministic brightness offset, because the most
+## recognisable thing about real weatherboard is that no two boards weather the same
+## way. A uniform ramp reads as striped wallpaper, which is worse than the flat colour
+## it replaced. The offset is centred on zero so the *mean* is untouched and only the
+## spread moves - brightening every board by a positive jitter turns a cladding
+## material into a lighter one by accident.
+static var _band_cache: Dictionary = {}
+
+const BOARD_PROFILE := [
+	[0.00, 0.30], [0.06, 0.78], [0.18, 1.00], [0.74, 0.94], [0.90, 0.52], [1.00, 0.30],
+]
+const PALING_PROFILE := [
+	[0.00, 0.22], [0.10, 0.86], [0.62, 1.00], [0.80, 0.44], [1.00, 0.22],
+]
+const RIB_PROFILE := [
+	[0.00, 0.34], [0.14, 0.62], [0.42, 1.00], [0.58, 0.96], [0.86, 0.50], [1.00, 0.34],
+]
+
+
+## A repeating banded ramp. `vertical` runs the bands down U instead of along V,
+## which is the whole difference between a paling fence and a weatherboard wall.
+static func bands_tex(periods: int, profile: Array, warm: float, vertical: bool,
+		seed_value: int, jitter: float = 0.10) -> GradientTexture2D:
+	var key := "%d|%s|%.3f|%s|%d|%.3f" % [periods, str(profile), warm,
+			str(vertical), seed_value, jitter]
+	if _band_cache.has(key):
+		return _band_cache[key]
+	var g := Gradient.new()
+	var offs := PackedFloat32Array()
+	var cols := PackedColorArray()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value
+	var span := 1.0 / float(maxi(periods, 1))
+	for i in maxi(periods, 1):
+		var base := float(i) * span
+		var off := rng.randf_range(-jitter, jitter)
+		for pair in profile:
+			var v: float = clampf(float(pair[1]) + off, 0.0, 1.0)
+			offs.append(base + float(pair[0]) * span)
+			# `warm` biases red up and blue down. The palette owns base albedo; a
+			# shading ramp is material data, exactly as `_palm_ring_tex` already is
+			# with its `Color(v, v, v * 0.92)`.
+			cols.append(Color(v * (1.0 + warm * 0.10), v, v * (1.0 - warm * 0.08)))
+	g.offsets = offs
+	g.colors = cols
+	var tex := GradientTexture2D.new()
+	tex.gradient = g
+	tex.width = 8 if vertical else 128
+	tex.height = 128 if vertical else 8
+	if vertical:
+		tex.fill_from = Vector2(0.0, 0.0)
+		tex.fill_to = Vector2(1.0, 0.0)
+	else:
+		tex.fill_from = Vector2(0.0, 0.0)
+		tex.fill_to = Vector2(0.0, 1.0)
+	_band_cache[key] = tex
+	return tex
+
+
 # ------------------------------------------------------------------- the spec
 
 ## key -> build recipe. Written as data so the check can read the *intent* of
@@ -227,14 +297,28 @@ const _SPECS: Dictionary = {
 
 	# ---- rendered walls. Six values, and the roughness spread across them is
 	# ---- what stops a street of them looking like six copies of one house.
-	"surface_render_wall_a": {"role": "render_wall_a", "rough": 0.86, "speckle": [0.86, 1.0], "normal": 0.16, "uv": 0.1},
-	"surface_render_wall_b": {"role": "render_wall_b", "rough": 0.80, "speckle": [0.84, 1.0], "normal": 0.16, "uv": 0.1},
-	"surface_render_wall_c": {"role": "render_wall_c", "rough": 0.90, "speckle": [0.88, 1.0], "normal": 0.16, "uv": 0.1},
-	"surface_render_wall_d": {"role": "render_wall_d", "rough": 0.74, "speckle": [0.82, 1.0], "normal": 0.16, "uv": 0.1},
-	"surface_render_wall_e": {"role": "render_wall_e", "rough": 0.88, "speckle": [0.87, 1.0], "normal": 0.16, "uv": 0.1},
-	"surface_render_wall_f": {"role": "render_wall_f", "rough": 0.68, "speckle": [0.80, 1.0], "normal": 0.16, "uv": 0.1},
+	# ---- `board` puts weatherboard on all six: painted fibre-cement sheet is
+	# ---- what a Queensland house actually is, so boarding belongs to this
+	# ---- family rather than to a new one. A new family would need palette roles,
+	# ---- and `variants("render_wall", i)` is the documented entry point for these.
+	"surface_render_wall_a": {"role": "render_wall_a", "rough": 0.86, "speckle": [0.86, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	"surface_render_wall_b": {"role": "render_wall_b", "rough": 0.80, "speckle": [0.84, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	"surface_render_wall_c": {"role": "render_wall_c", "rough": 0.90, "speckle": [0.88, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	"surface_render_wall_d": {"role": "render_wall_d", "rough": 0.74, "speckle": [0.82, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	"surface_render_wall_e": {"role": "render_wall_e", "rough": 0.88, "speckle": [0.87, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
+	"surface_render_wall_f": {"role": "render_wall_f", "rough": 0.68, "speckle": [0.80, 1.0], "normal": 0.16, "uv": 0.1, "board": "h"},
 	"brick": {"role": "brick", "rough": 0.92, "speckle": [0.76, 1.0], "normal": 0.34, "uv": 0.18},
 	"industrial_metal": {"role": "industrial_metal", "rough": 0.46, "metal": 0.55},
+
+	# ---- paling fence. Three values because a fence line is the first thing a
+	# ---- viewer reads about a boundary, and one paling material makes a whole
+	# ---- street the same fence. 10 palings per 1.6 m tile is a 160 mm
+	# ---- board-and-gap pitch, which is what a paling fence measures once the gap
+	# ---- is counted. Warm: the reference fence is a red-brown, and under the
+	# ---- sodium in this scene a warm albedo is what keeps it from going grey.
+	"paling_a": {"role": "timber", "rough": 0.90, "board": "v", "paling_seed": 5501, "paling_jitter": 0.16},
+	"paling_b": {"role": "timber", "rough": 0.84, "board": "v", "paling_seed": 5502, "paling_jitter": 0.20},
+	"paling_c": {"role": "timber", "rough": 0.94, "board": "v", "paling_seed": 5503, "paling_jitter": 0.13},
 
 	# ---- vegetation. Two-sided and a touch self-lit: a streetlight behind a
 	# ---- frond should bleed a little through it. Emission at 0.05 is well
@@ -243,7 +327,12 @@ const _SPECS: Dictionary = {
 	"surface_foliage_b": {"role": "foliage_b", "rough": 0.84, "leaf": true, "transmit": 0.055},
 	"surface_foliage_c": {"role": "foliage_c", "rough": 0.94, "leaf": true, "transmit": 0.03},
 	"surface_foliage_d": {"role": "foliage_d", "rough": 0.90, "leaf": true, "transmit": 0.04},
-	"grass": {"role": "grass", "rough": 0.95, "leaf": true, "transmit": 0.02, "speckle": [0.70, 1.0], "normal": 0.5, "uv": 0.25},
+	# `grass` is `bush_scrub`'s material, so it sits on the same verge `MatLib.ground()`
+	# draws. Lifted with it, for the same measured reason and by the same amount: at
+	# the palette's #17220f this is 24/255, below the wet tarmac it borders at 28/255,
+	# so a verge planted with these read as a hole rather than a bank. Two greens that
+	# do not match would be worse than either value.
+	"grass": {"role": "grass", "rough": 0.95, "leaf": true, "transmit": 0.02, "speckle": [0.70, 1.0], "normal": 0.5, "uv": 0.25, "value": [1.275, 1.763, 1.395]},
 	"dirt": {"role": "dirt", "rough": 0.97, "speckle": [0.68, 1.0], "normal": 0.55, "uv": 0.3},
 
 	# ---- hard goods.
@@ -324,6 +413,12 @@ static func _build(key: String) -> StandardMaterial3D:
 	var spec: Dictionary = _SPECS[key]
 	var m := StandardMaterial3D.new()
 	m.albedo_color = ArtKitPalette.color(String(spec.get("role", "")))
+	if spec.has("value"):
+		# An explicit per-channel multiplier on a palette role. Used only where the
+		# palette's own value is measurably wrong for this scene - see `grass`.
+		var v: Array = spec["value"]
+		m.albedo_color = Color(m.albedo_color.r * float(v[0]),
+				m.albedo_color.g * float(v[1]), m.albedo_color.b * float(v[2]))
 	if bool(spec.get("dark", false)):
 		m.albedo_color = m.albedo_color * 0.6
 	m.roughness = float(spec.get("rough", 0.8))
@@ -360,16 +455,63 @@ static func _build(key: String) -> StandardMaterial3D:
 				false, float(wet[0]), float(wet[1]))
 		m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
 
-	# Corrugation. Stripes in UV rather than a modelled rib, because 2198
-	# buildings with modelled ribs is 2198 buildings of wasted triangles and at
-	# street distance nobody can tell.
+	## Boarding, palings and ribs
+	#
+	# These were a comment and a UV scale. `uv1_scale` on its own only changes how
+	# # often a texture repeats, so a material with no texture got a different tile
+	# # size and no pattern at all: every roof was one flat angled plane and every
+	# # wall was isotropic speckle with no edge in it anywhere for an eye to find.
+	# # Measured before this change, WALL_VARIATION was 0.00 on every pose.
+	#
+	# The profile is a `GradientTexture2D`, so it is one texture and two channels:
+	# # albedo picks up enough of it to be visible in flat ambient, and roughness
+	# # carries the rest. Roughness is what actually sells ribs - a crest is a
+	# # different angle from the plane beside it, so under a lamp a crest returns
+	# # a specular smear and a valley returns nearly nothing.
+	#
+	# One tile is a fixed number of METRES because the projection is triplanar, so
+	# # the pitch is set once and every surface gets the pitch its own size can
+	# # afford: a 9 m house wall spans ~2.7 board tiles and shows ~44 boards, a
+	# # 0.4 m pedestrian spans an eighth of one and shows a soft gradient, and a
+	# # 0.15 m pole spans a twentieth and shows nothing. The pattern sizes itself.
+	var board := String(spec.get("board", ""))
+	if board != "":
+		var vertical := board == "v"
+		var periods := 10 if vertical else 16
+		var tile_m := 1.6 if vertical else 3.33   # a 160 mm paling, a 208 mm board
+		var ramp := bands_tex(periods,
+				PALING_PROFILE if vertical else BOARD_PROFILE,
+				0.85 if vertical else 0.55, vertical,
+				int(spec.get("paling_seed", 4407)),
+				float(spec.get("paling_jitter", 0.11)))
+		m.albedo_texture = ramp
+		m.roughness_texture = ramp
+		m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
+		m.uv1_scale = Vector3(1.0 / tile_m, 1.0 / tile_m, 1.0 / tile_m)
+		m.uv1_triplanar = true
+		# The `speckle` branch above already claimed uv1_scale and the albedo
+		# texture; boarding owns both from here, because a board profile and an
+		# isotropic mottle cannot share one texture and the board is the one with
+		# edges in it.
+		m.albedo_color = m.albedo_color.lightened(0.04)
+
+	# Corrugation. Ribs run down the slope, so the profile lies along V. Triplanar is
+	# deliberately off: these are roof quads from `ArtKitMesh`, which DO carry UVs,
+	# and `artkit_check.gd` holds the tiling at `uv1_scale.y >= CORRUGATION_UV * 0.9`.
+	# That contract is a MULTIPLIER, not a divisor: artkit's meshes run 0..1 across a
+	# quad, so the tile count is the scale. The first version of this used
+	# `1 / (0.076 * 32)` here and the check failed it - correctly, because on a 0..1
+	# quad that is 0.4 of ONE tile across the whole roof, i.e. the corrugation I was
+	# adding was invisible. One rib per tile and 13 tiles per quad puts a rib about
+	# every 8 cm on a wall-sized quad, which is real Colorbond pitch.
 	if bool(spec.get("corrugate", false)):
 		var cu := CORRUGATION_UV
 		m.uv1_scale = Vector3(1.0, cu, cu)
 		m.uv1_triplanar = false
-		# A vertical albedo stripe is what actually reads as ribbing under a
-		# raking light, so the corrugation is albedo as well as roughness.
-		m.albedo_color = m.albedo_color.lightened(0.06)
+		var rib_ramp := bands_tex(1, RIB_PROFILE, 0.15, false, 6607, 0.05)
+		m.albedo_texture = rib_ramp
+		m.roughness_texture = rib_ramp
+		m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
 
 	# Foliage: two-sided, and a little self-lit so a lamp behind a frond bleeds
 	# through rather than the frond reading as a hole in the light.
@@ -380,7 +522,7 @@ static func _build(key: String) -> StandardMaterial3D:
 		m.emission = m.albedo_color
 		m.emission_energy_multiplier = t
 
-	# ## An emitter's brightness belongs to emission, never to albedo
+	## An emitter's brightness belongs to emission, never to albedo
 	#
 	# A material with emission energy above BLOOM_FLOOR is a light source, and a
 	# light source's *albedo* has to be dark. This is the single most important
@@ -421,7 +563,7 @@ static func _build(key: String) -> StandardMaterial3D:
 		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		m.albedo_color.a = float(spec["alpha"])
 
-	# ## Contact darkening
+	## Contact darkening
 	#
 	# A multiply decal. Unshaded, multiplied into whatever is under it, white at
 	# the rim and dark in the middle, so it darkens the road under a car and
