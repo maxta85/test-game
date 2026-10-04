@@ -16,6 +16,90 @@ const NEON_PINK := Color(1.0, 0.24, 0.55)
 const NEON_CYAN := Color(0.2, 0.95, 0.95)
 
 
+## ## Banded profiles: the shape every real cladding surface has
+##
+## A flat albedo is the reason a building reads as a box. Timber weatherboard is
+## horizontal boards with a shadow line under each lip; paling fencing is the same
+## idea rotated 90 degrees; corrugated iron is a sawtooth. None of that is a colour,
+## it is a *profile*, and a profile is a one-dimensional ramp - which Godot already
+## draws. So these are `GradientTexture2D`s, generated in-engine, no asset to source
+## and no licence to hold. They are honest procedural work, not a stand-in for a
+## texture that was never made.
+##
+## `bands_tex` builds one ramp of `periods` repeats. `profile` is a list of
+## `[offset_in_period, value]` pairs, so the shape of a board or a rib is written
+## down rather than emergent. Each period is then given its own small deterministic
+## brightness offset, because the single most recognisable thing about real
+## weatherboard is that no two boards weather the same way - a uniform ramp reads as
+## a striped wallpaper, which is worse than the flat colour it replaced.
+##
+## `warm` biases the ramp's red up and its blue down without touching the palette.
+## The palette owns base albedo; a shading ramp is material data, the same way
+## `_palm_ring_tex`'s `Color(v, v, v * 0.92)` already is.
+static var _band_cache: Dictionary = {}
+
+
+## A repeating banded ramp. `vertical` runs the bands down U instead of along V,
+## which is the whole difference between a paling fence and a weatherboard wall.
+static func bands_tex(periods: int, profile: Array, warm: float, vertical: bool,
+		seed_v: int, jitter: float = 0.10) -> GradientTexture2D:
+	var key := "%d|%s|%.3f|%s|%d|%.3f" % [periods, str(profile), warm,
+			str(vertical), seed_v, jitter]
+	if _band_cache.has(key):
+		return _band_cache[key]
+	var g := Gradient.new()
+	var offs := PackedFloat32Array()
+	var cols := PackedColorArray()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_v
+	var span := 1.0 / float(maxi(periods, 1))
+	for i in maxi(periods, 1):
+		var base := float(i) * span
+		# Per-board offset, centred on zero, so the *mean* is unchanged and only
+		# the spread moves. Brightening every board by a positive jitter is how a
+		# cladding material turns into a lighter one by accident.
+		var off := rng.randf_range(-jitter, jitter)
+		for pair in profile:
+			var p: float = float(pair[0])
+			var v: float = float(pair[1]) + off
+			v = clampf(v, 0.0, 1.0)
+			offs.append(base + p * span)
+			cols.append(Color(v * (1.0 + warm * 0.10), v, v * (1.0 - warm * 0.08)))
+	var tex := GradientTexture2D.new()
+	tex.gradient = g
+	g.offsets = offs
+	g.colors = cols
+	tex.width = 8 if vertical else 128
+	tex.height = 128 if vertical else 8
+	if vertical:
+		tex.fill_from = Vector2(0.0, 0.0)
+		tex.fill_to = Vector2(1.0, 0.0)
+	else:
+		tex.fill_from = Vector2(0.0, 0.0)
+		tex.fill_to = Vector2(0.0, 1.0)
+	_band_cache[key] = tex
+	return tex
+
+
+## The weatherboard profile. Read it as one board, top to bottom: a hard dark line
+## where the board above overhangs this one, the face coming up into the light, the
+## face holding, then falling away into the next shadow.
+const BOARD_PROFILE := [
+	[0.00, 0.30], [0.06, 0.78], [0.18, 1.00], [0.74, 0.94], [0.90, 0.52], [1.00, 0.30],
+]
+
+## A paling fence: narrower boards, a wider dark gap, and more spread between them.
+const PALING_PROFILE := [
+	[0.00, 0.22], [0.10, 0.86], [0.62, 1.00], [0.80, 0.44], [1.00, 0.22],
+]
+
+## A corrugated rib: narrow crest, wide dark valley, and a hard shoulder. Ribs are
+## much finer than boards and there are many more of them per tile.
+const RIB_PROFILE := [
+	[0.00, 0.34], [0.14, 0.62], [0.42, 1.00], [0.58, 0.96], [0.86, 0.50], [1.00, 0.34],
+]
+
+
 ## Seamless procedural noise texture.
 static func noise_tex(size: int, freq: float, octaves: int, seed_v: int,
 		as_normal: bool = false) -> NoiseTexture2D:
@@ -229,14 +313,42 @@ static func concrete(tint: Color = Color(0.26, 0.25, 0.235)) -> StandardMaterial
 	return m
 
 
-## Ground beyond the kerb: tropical grass and bare earth.
+## Ground beyond the kerb: the grass verge, and bare earth further out.
+##
+## ## Two measured faults, both fixed here
+##
+## **It was fed raw noise.** Every other material in this file ramps its noise,
+## because FastNoiseLite averages ~0.5 and a raw ramp-less texture silently halves
+## whatever albedo it multiplies. `ground()` was the one that did not, so the verge
+## was not the 0.095 it asked for - it was about half that. Ramped 0.62-1.16 it keeps
+## the clumping and stops losing half the value.
+##
+## **It was darker than the road it sits beside.** At 0.095 luma the verge sat at
+## 24/255 while the wet tarmac it borders is at 28/255, so the one surface in the
+## reference that reads instantly was, in ours, a hole. The value is lifted to 0.198
+## (51/255) which puts it clearly above the carriageway - a distinct band, not a void.
+##
+## The hue keeps the palette's `grass` ratio (#17220f) and its saturation is 0.65
+## against the palette's 0.54, which is a small deliberate departure in the direction
+## of the reference's saturated green. It is the only place in this library that
+## brightens a surface role rather than darkening one, and the reason is measured
+## rather than aesthetic: no light reaches the verge in this scene, so albedo is the
+## only lever there is, and the alternative is a black band.
 static func ground() -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(0.075, 0.105, 0.055)
+	m.albedo_color = Color(0.115, 0.235, 0.082)
 	m.roughness = 0.95
-	m.uv1_scale = Vector3(0.04, 0.04, 0.04)
+	# Clumps at roughly 1.2 m, not the 25 m the old 0.04 scale gave: at 25 m a
+	# "texture" is one cycle across the entire suburb, which is a gradient, and a
+	# gradient is what the verge already looked like.
+	m.uv1_scale = Vector3(0.85, 0.85, 0.85)
 	m.uv1_triplanar = true
-	m.albedo_texture = noise_tex(256, 0.7, 4, 91)
+	var clumps := noise_tex(256, 0.85, 4, 91)
+	var ground_ramp := Gradient.new()
+	ground_ramp.set_color(0, Color(0.62, 0.62, 0.62))
+	ground_ramp.set_color(1, Color(1.16, 1.16, 1.16))
+	clumps.color_ramp = ground_ramp
+	m.albedo_texture = clumps
 	m.normal_enabled = true
 	m.normal_texture = noise_tex(256, 1.2, 3, 103, true)
 	m.normal_scale = 0.6
@@ -244,43 +356,168 @@ static func ground() -> StandardMaterial3D:
 
 
 ## Corrugated iron roofing - the defining Queensland surface.
+##
+## ## The ribs were a comment, not an implementation
+##
+## This function used to set `uv1_scale` and call it a day. The comment said
+## "stripes in UV give the corrugation without a texture lookup", and there was no
+## stripe: `uv1_scale` alone changes how often a texture repeats, and this material
+## had no texture. So every roof in the city was one flat angled plane at one
+## roughness, which is exactly what the reference is not - Colorbond reads as a row of
+## half-round ribs because each one catches the sky at its own angle.
+##
+## What actually makes ribbing read at street distance is not the albedo, it is the
+## ROUGHNESS. A crest is a different angle from the plane either side of it, so under
+## a lamp a crest returns a specular smear and a valley returns almost nothing. One
+## ramp drives both channels: albedo picks up a little of it so the ribs are also
+## visible in flat ambient, and roughness carries the rest. Rib pitch is 76 mm, the
+## real Colorbond figure the artkit constant already quoted, and a tile holds 32 of
+## them over 2.43 m.
 static func corrugated(tint: Color) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = tint
 	m.roughness = 0.42
 	m.metallic = 0.35
 	m.metallic_specular = 0.6
-	# Stripes in UV give the corrugation without a texture lookup.
-	m.uv1_scale = Vector3(0.5, 0.5, 0.5)
+	## Triplanar is not a stylistic choice here, it is the only thing that can work.
+	## `osm_buildings.gd` has two `set_uv` calls in the whole file and neither is in
+	## `_pitched()` or `_cap()`, so all 2198 roof meshes carry **no UVs at all** -
+	## every vertex is (0,0). A texture on a mesh with no UVs samples one texel, so
+	## the first version of this function set a uv1_scale and nothing appeared at
+	## all: the scale was being applied to a UV that did not exist. Triplanar derives
+	## its UVs from world position instead, which is why a roof mesh with no UV
+	## channel can carry a rib pattern. Measured on the `street` pose, the flat-UV
+	## version moved the roof pixels not at all.
+	var rib_m := 0.076          # real Colorbond pitch
+	var ribs := 32
+	var tile := rib_m * float(ribs)
+	m.uv1_scale = Vector3(1.0 / tile, 1.0 / tile, 1.0 / tile)
+	m.uv1_triplanar = true
+	var ramp := bands_tex(ribs, RIB_PROFILE, 0.15, false, 6607, 0.05)
+	m.albedo_texture = ramp
+	m.roughness_texture = ramp
+	m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
 	return m
 
 
-## Painted / rendered house wall.
+## Painted / rendered house wall - and, since this is the function the world
+## actually calls for every wall it builds, the boarding lives here.
+##
+## ## Why the boarding is in `wall()` and not somewhere the caller chooses
+##
+## `Wall.tint` is reached from four places that are not all walls: the OSM building
+## walls, a glass surround band, a light pole, a wire, a pedestrian and a parked car
+## all come through this same function. Putting the boarding behind a flag would mean
+## every one of those call sites had to opt in, and none of them can be edited from
+## here - so the flag would never be passed and the walls would stay flat. That is the
+## "graceful fallback nobody notices" failure: the code would look correct and the
+## frame would not change.
+##
+## So the boarding is unconditional, and it is made safe by *scale* instead of by a
+## flag. `uv1_triplanar` projects from world position, so one texture tile is a fixed
+## number of metres everywhere and the pattern is automatically the right size on
+## whatever it lands on:
+##
+## | surface | width | tile it spans | reads as |
+## |---|---|---|---|
+## | a two-storey house wall | 9 m | ~2.7 tiles | ~44 boards, unmistakable |
+## | a pedestrian | 0.4 m | 0.12 of a tile | a soft gradient, no stripes |
+## | a light pole | 0.15 m | 0.05 of a tile | flat |
+##
+## The board pitch is therefore set once, in metres, and every surface gets the pitch
+## its own size can afford. Measured before/after in `/tmp/reports/materials.md`.
 static func wall(tint: Color) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = tint
 	m.roughness = 0.85
-	m.uv1_scale = Vector3(0.1, 0.1, 0.1)
+	# One tile is 3.33 m of wall with 16 boards in it, so a board is 208 mm - a real
+	# block-board reveal. `uv1_scale` is per-metre because the projection is triplanar.
+	var tile := 3.33
+	m.uv1_scale = Vector3(1.0 / tile, 1.0 / tile, 1.0 / tile)
 	m.uv1_triplanar = true
-	# Albedo speckle as well as a normal map. Flat albedo under a sodium lamp is
-	# cardboard: one value across a whole wall, so the only thing giving the
-	# surface any variation is the normal map, and a normal map alone reads as
-	# relief on a sheet of card. Painted render is patchy - a roller leaves the
-	# wall lighter where it was laid down and darker where the weather got it -
-	# and that mottle is what stops the flat side of a building reading as a
-	# rectangle of colour.
-	#
-	# Ramped like the tarmac's, for the same reason: fed raw, FastNoiseLite
-	# averages ~0.5 and silently halves the tint, which reads as every wall being
-	# grubby rather than mottled. 0.74-1.0 keeps the mottle and loses ~13%.
-	m.albedo_texture = noise_tex(128, 1.6, 4, 907)
-	var wall_ramp := Gradient.new()
-	wall_ramp.set_color(0, Color(0.74, 0.74, 0.74))
-	wall_ramp.set_color(1, Color(1.0, 1.0, 1.0))
-	(m.albedo_texture as NoiseTexture2D).color_ramp = wall_ramp
+	# The board profile IS the albedo variation now. The old flat mottle is what a
+	# wall had before this task, and it was measured at WALL_VARIATION=0 on every
+	# pose: isotropic speckle has no direction, so there is no edge anywhere in it for
+	# an eye to find. Boarding has horizontal edges, which is the entire point.
+	var boards := bands_tex(16, BOARD_PROFILE, 0.55, false, 4407, 0.11)
+	m.albedo_texture = boards
+	# The same ramp drives roughness. The shadow line under a board's lip is where
+	# water sits and dirt collects, so it is the matt part of the wall and the face is
+	# the part that has been washed by rain. One ramp, two channels - no second
+	# texture, no extra fetch.
+	m.roughness_texture = boards
+	m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
+	# Grain stays on the normal map, where grain belongs. Feeding the same noise into
+	# the albedo as well is what made the old wall read as grubby rather than boarded:
+	# a low-frequency mottle over a wall hides the edges instead of sitting under them.
 	m.normal_enabled = true
-	m.normal_texture = noise_tex(128, 2.5, 3, 131, true)
+	m.normal_texture = noise_tex(256, 2.5, 3, 131, true)
 	m.normal_scale = 0.15
+	return m
+
+
+## Weatherboard as its own entry point, for the geometry worker who can pass a tint
+## per building. `wall()` is the same surface with the boarding baked in; this exists
+## so a caller that knows it is drawing a house does not have to take the poles and
+## the wires' material to get one.
+static func weatherboard(tint: Color, board_h: float = 0.208) -> StandardMaterial3D:
+	var m := wall(tint)
+	var tile := board_h * 16.0
+	m.uv1_scale = Vector3(1.0 / tile, 1.0 / tile, 1.0 / tile)
+	return m
+
+
+## Timber paling fence: vertical boards, a wider shadow gap and more spread between
+## them than weatherboard has, because a paling is a 100 mm board with a 20 mm gap
+## and nothing overlaps. Warm - the reference fence is a red-brown, and under the
+## sodium in this scene a warm albedo is what keeps it from going grey.
+static func paling(tint: Color = Color(0.20, 0.105, 0.075)) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = tint
+	m.roughness = 0.90
+	var tile := 1.6
+	m.uv1_scale = Vector3(1.0 / tile, 1.0 / tile, 1.0 / tile)
+	m.uv1_triplanar = true
+	# 10 palings per 1.6 m tile = a 160 mm board-and-gap pitch, which is what a
+	# paling fence actually measures once the gap is counted.
+	m.albedo_texture = bands_tex(10, PALING_PROFILE, 0.85, true, 5501, 0.16)
+	m.roughness_texture = m.albedo_texture
+	m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
+	m.normal_enabled = true
+	m.normal_texture = noise_tex(128, 3.0, 3, 149, true)
+	m.normal_scale = 0.22
+	return m
+
+
+## Red-painted kerb return - the no-stopping treatment. Queensland paints these and
+## almost nothing else, which is why it reads as an accent rather than as a kerb that
+## happens to be red.
+##
+## ## A deliberate exception, stated so it can be overruled
+##
+## The palette's rule is that a surface role is never a saturated hue, because
+## saturated colour is a light source. This is a saturated red on a surface. Two
+## reasons it is here anyway: a no-stopping kerb *is* red in the world, and inventing
+## a colour that does not exist would be a worse lie than breaking a convention. It is
+## also the one material in the library with no palette role behind it, because the
+## palette cannot be edited from this task - so if the lead would rather it were a
+## named role, that is a one-line addition to `palette.gd` plus this spec dropping
+## its explicit albedo.
+##
+## It is dark and slightly rough rather than bright and gloss: under this scene's
+## sodium, which has almost no red in it, a vivid red albedo returns very little and
+## the honest result at night is a deep maroon that separates from grey concrete by
+## hue *and* by value. Measured, not assumed - see the report.
+static func kerb_red() -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(0.26, 0.045, 0.032)
+	m.roughness = 0.58
+	m.metallic_specular = 0.42
+	m.uv1_scale = Vector3(0.5, 0.5, 0.5)
+	m.uv1_triplanar = true
+	m.normal_enabled = true
+	m.normal_texture = noise_tex(256, 2.2, 3, 71, true)
+	m.normal_scale = 0.25
 	return m
 
 
