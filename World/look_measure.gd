@@ -103,6 +103,24 @@ const MIN_ROAD_LUMA := 6.0
 ## two thirds of it is the report's headline.
 const MAX_ROAD_DARK := 0.75
 
+## ASPHALT, fourth - and this is the one that decides whether any of the others
+## were measured on a street at all: the mean absolute horizontal gradient in the
+## road band, i.e. `detail` (see `_detail`). Every other threshold in this file is
+## a statement about a road, and a wall, a field or the inside of a hillside all
+## satisfy them. A uniformly lit surface has no horizontal structure to measure,
+## so `detail` collapses toward zero and everything else reads as a healthy dim
+## orange road.
+##
+## Measured 2026-10-03 on tag vf-before, same camera, six poses: `street` 4.69,
+## `junction` 4.93, `kerb` 2.62, `walk1` 2.26 - and `walk2` 0.044 and `walk3`
+## 0.79, which are a building wall and bare terrain. Both of those poses reported
+## 90 m of covered carriageway and passed the luma, dark, clip and orange checks,
+## so the 500 m coverage gate was cleared by frames with no street in them. 1.00
+## rejects both of those and keeps all four that are on tarmac; the margin over
+## `walk3` is deliberately thin, because a pose that is nearly this bad should
+## fail rather than be tolerated.
+const MIN_ROAD_DETAIL := 1.00
+
 ## LIGHTING. A night frame whose near field clips is a frame with no night in it.
 ## The before frame loses its whole right-hand third to white, so this is the
 ## threshold that has to move and it is the one that could redden a release.
@@ -360,6 +378,18 @@ static func checks(poses: Array) -> Array:
 		out.append(_c("asphalt %s: the road is not a black band" % name,
 			float(road["dark"]) <= MAX_ROAD_DARK, "road dark share",
 			float(road["dark"]), 1.0, MAX_ROAD_DARK, "asphalt"))
+		# And is it a road? Every check above reads a rectangle of frame and
+		# calls it tarmac because the pose put it there. Measured on
+		# 2026-10-03: `walk2` framed a building wall and `walk3` bare terrain,
+		# both at road detail 0.04-0.79 against 2.3-4.9 on the four poses that
+		# were on tarmac, and both passed everything above - so the coverage gate
+		# below was satisfied by two frames that contained no street. This check
+		# goes first for that reason: a pose that fails it invalidates its own
+		# numbers, and it is cheaper to find out from one threshold than from a
+		# reader wondering why the junction is so smooth.
+		out.append(_c("asphalt %s: the band is a road and not a surface" % name,
+			float(road.get("detail", 0.0)) >= MIN_ROAD_DETAIL, "road detail",
+			float(road.get("detail", 0.0)), 1.0, MIN_ROAD_DETAIL, "asphalt"))
 
 		if p.has("paint") and bool(p["paint"].get("ok", false)):
 			paint_ratio_sum += float(p["paint"]["p95"]) / maxf(float(road["mean"]), 0.001)

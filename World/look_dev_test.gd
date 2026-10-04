@@ -312,6 +312,26 @@ func _measure_code(t: TestHarness) -> void:
 	t.near(float(sb["mean"]), 112.0, 3.0,
 		"and a checkerboard has the mean of its two values (%.2f)" % float(sb["mean"]))
 
+	# The road-detail check has to be able to FAIL. It exists because two frames
+	# of a building wall and a field cleared every other threshold in
+	# `LookMeasure` (measured 2026-10-03, tag vf-before: road detail 0.044 and
+	# 0.79 against 2.26-4.93 on the four poses that were on tarmac), so a check
+	# that cannot fail on a flat band is not the check that would have caught
+	# them. Both directions are asserted here, against `checks()` itself rather
+	# than against a copy of the comparison.
+	var paint := {"ok": true, "p95": 200.0, "p50": 40.0}
+	var probe := func(band_m: Dictionary, nm: String) -> bool:
+		var poses := [{"name": nm, "covered_m": 90.0, "report": band_m,
+			"road": band_m, "paint": paint}]
+		for c in LookMeasure.checks(poses):
+			if String(c["name"]) == "asphalt %s: the band is a road and not a surface" % nm:
+				return bool(c["ok"])
+		return false
+	t.ok(not probe.call(band, "flat"),
+		"a flat band fails the road-detail check instead of passing it")
+	t.ok(probe.call(sb, "stepped"),
+		"and a band with a kerb edge or a line of paint in it passes")
+
 
 # ------------------------------------------------------------------- image gate
 ## The four rubric points that can only be settled by looking at a rendered frame.
