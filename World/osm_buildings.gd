@@ -158,6 +158,39 @@ const AWNING_DROP := 0.55
 static var _data: Variant = null
 static var _raw: Array = []
 
+## Frontage telemetry for the last `plan()`/`build()` pair. `FRONTAGE_M` is a
+## limit on what may be *glazed*, not on what may be *built*: a backland wall
+## still wants a window grid so the far side of the map is not a black field, but
+## a veranda is 1.45 m of deck and rail projecting off the building, and on a wall
+## 40 m from a carriageway that is geometry facing a fence.
+##
+## `_faces_total` counts every face handed to `_veranda()`, `_faces_front` the ones
+## within FRONTAGE_M, and `_fallback` the ones that exist only because
+## `_street_faces()` had nothing better to return. `_verandas_built` is drawn
+## only from `_faces_front`, and `_fallback_verandas` counts the offers refused
+## for want of frontage - so `_faces_front == _fallback_verandas + <refused by
+## span> + _verandas_built`. The two numbers to watch are `_verandas_built`
+## against `_fallback_verandas`: before the gate existed the first was ~26x the
+## total offered.
+static var _faces_total: int = 0
+static var _faces_front: int = 0
+static var _fallback: int = 0
+static var _fallback_verandas: int = 0
+static var _verandas_built: int = 0
+
+
+## What the last `plan()`/`build()` pair did with frontage. Public so a capture or
+## a test can read the ratio without re-deriving it from geometry.
+static func frontage_stats() -> Dictionary:
+	return {
+		"faces_total": _faces_total,
+		"faces_front": _faces_front,
+		"fallback": _fallback,
+		"verandas_built": _verandas_built,
+		"fallback_verandas": _fallback_verandas,
+		"frontage_m": FRONTAGE_M,
+	}
+
 
 static func data() -> Dictionary:
 	if _data == null:
@@ -193,6 +226,14 @@ static func footprints() -> Array:
 ## shape decided. No geometry, so the test and the world agree on which buildings
 ## exist without either of them having to build anything.
 static func plan(graph: RoadGraph) -> Dictionary:
+	# Reset here, not in `build()`: `build()` calls `plan()`, and a caller that
+	# asks for the plan first (every test does) would otherwise leave the counters
+	# describing a plan whose faces were never built.
+	_faces_total = 0
+	_faces_front = 0
+	_fallback = 0
+	_fallback_verandas = 0
+	_verandas_built = 0
 	var roads := road_index(graph)
 	var rng := RandomNumberGenerator.new()
 	var kept: Array = []
@@ -335,6 +376,12 @@ static func build(parent: Node3D, graph: RoadGraph) -> Dictionary:
 	out["stumps"] = posts.size()
 	print("[OSM buildings] %d real footprints: %d clear, %d clipped (%d vertices moved), %d dropped, %d draw calls"
 		% [int(p["read"]), int(p["clear"]), int(p["clipped"]), int(p["moved"]), int(p["dropped"]), nodes])
+	# The frontage line is printed next to the geometry line because the two are
+	# the same argument: `faces_total` is what the old code would have built a
+	# veranda on, `verandas_built` is what it does. They were not equal before
+	# FRONTAGE_M was enforced here.
+	print("[OSM frontage] %d faces offered to _veranda, %d within %.1f m of a carriageway, %d verandas built, %d refused for want of frontage (%d buildings had no frontage at all and were glazed anyway)"
+		% [_faces_total, _faces_front, FRONTAGE_M, _verandas_built, _fallback_verandas, _fallback])
 	return out
 
 
@@ -416,9 +463,16 @@ static func _street_faces(ring: PackedVector2Array, cand: Array, roads: Dictiona
 		out.append({"i": i, "cls": cls, "gap": gap})
 	# A building with no road in front of it still gets one glazed face, or the
 	# far side of the map goes dark. Same fallback the old single-edge search was.
+	#
+	# This face is tagged, and it is the ONLY thing the tag is for: glazing a
+	# backland wall is right, hanging a veranda off one is not. `_veranda()` gates
+	# on the tag. Before the tag existed this face was indistinguishable from a
+	# real frontage, and `_veranda()` - which takes `faces[0]` and `faces[1]` with
+	# no question asked - built a veranda on it.
 	if out.is_empty() and not cand.is_empty():
 		out.append({"i": int(nearest["i"]), "cls": RoadGraph.RoadClass.LANE,
-				"gap": float(nearest["gap"])})
+				"gap": float(nearest["gap"]), "fallback": true})
+		_fallback += 1
 	out.sort_custom(func(x, y): return float(x["gap"]) < float(y["gap"]))
 	return out
 
@@ -726,11 +780,35 @@ static func _veranda(st: SurfaceTool, roof_st: SurfaceTool, ring: PackedVector2A
 	var faces: Array = e["faces"]
 	var n: int = mini(faces.size(), 2)
 	for k in n:
-		_veranda_face(st, roof_st, ring, e, faces[k], lift, top)
+		var f: Dictionary = faces[k]
+		# FRONTAGE_M is BINDING here, not advisory. `_street_faces()` drops faces
+		# past it, but when a building has no frontage at all its fallback hands
+		# back one face anyway - and that face is by definition a backland wall,
+		# `gap` > FRONTAGE_M. A veranda is the only thing in this file that
+		# PROJECTS off the building (VERANDA_OUT 1.45 m, DECK_OUT 1.32 m), so on a
+		# backland elevation it is deck, rail, apron and fascia aimed at another
+		# building's fence, which is why no camera had ever photographed one.
+		#
+		# The fallback face is kept for glazing - a window grid on a backland wall
+		# is correct, and removing it would put a black field where the far side of
+		# the map used to be. The building simply gets no veranda.
+		_faces_total += 1
+		var gap := float(f["gap"])
+		if gap > FRONTAGE_M:
+			_fallback_verandas += 1
+			continue
+		_faces_front += 1
+		if _veranda_face(st, roof_st, ring, e, f, lift, top):
+			_verandas_built += 1
 
 
+## Returns true if it actually built something. A face can pass the frontage
+## test and still get nothing here: too short to stand a veranda on. The
+## frontage telemetry counts what was BUILT rather than what was offered, so the
+## 85-vs-73 gap between "on a real frontage" and "built" is visible instead of
+## being absorbed into a single number.
 static func _veranda_face(st: SurfaceTool, roof_st: SurfaceTool, ring: PackedVector2Array,
-		e: Dictionary, f: Dictionary, lift: float, top: float) -> void:
+		e: Dictionary, f: Dictionary, lift: float, top: float) -> bool:
 	var i := int(f["i"])
 	var a := ring[i]
 	var b := ring[(i + 1) % ring.size()]
@@ -738,7 +816,7 @@ static func _veranda_face(st: SurfaceTool, roof_st: SurfaceTool, ring: PackedVec
 	# A face too short to stand a veranda on gets nothing at all. Half a veranda
 	# is a projecting shelf.
 	if span < VERANDA_OUT + CORNER_MARGIN * 2.0 + 0.6:
-		return
+		return false
 	var dir := (b - a) / span
 	var nrm := Vector3(dir.y, 0.0, -dir.x)
 	var along := Vector3(dir.x, 0.0, dir.y)
@@ -764,6 +842,7 @@ static func _veranda_face(st: SurfaceTool, roof_st: SurfaceTool, ring: PackedVec
 	_edge(roof_st, q0, q1, nrm, y_edge - VERANDA_FASCIA, y_edge)
 	_post(st, q0, nrm, along, POST_W * 0.5, lift - DECK_T - APRON, y_edge - VERANDA_FASCIA)
 	_post(st, q1, nrm, along, POST_W * 0.5, lift - DECK_T - APRON, y_edge - VERANDA_FASCIA)
+	return true
 
 
 ## A tin awning over a shopfront, on the same principle as the veranda: the shop
