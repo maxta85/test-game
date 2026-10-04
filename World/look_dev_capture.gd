@@ -30,6 +30,46 @@ const HERO_POSES := ["kerb", "street", "junction"]
 ## has to be good before the map is allowed to grow.
 const WALK_BACK_M := [0.0, 250.0, 500.0]
 
+## The residential poses, deliberately NOT in the default list.
+##
+## Every pose above is on the anchor street, which is a commercial strip: it
+## frames shopfronts, kerbs and junctions and never a house. The building detail
+## that `World/osm_buildings.gd` spends 1,659 verandas on lives on side streets
+## that nothing here could see, so `resi` and `resi_detail` were written to look
+## at one - and they are opt-in (`--only resi`) rather than added to
+## `HERO_POSES`, because `World/look_dev_test.gd::_image_gate` asserts every
+## rubric point in `World/look_measure.gd` over every pose in the report, and
+## those thresholds were calibrated on kerb/street/junction. Adding a fifth
+## subject nobody calibrated would hand the next agent a red gate for a scene
+## that is fine.
+const RESI_POSES := ["resi", "resi_detail"]
+## The shortest wall that gets a veranda, summed from `OSMBuildings`' own constants
+## rather than copied as a number, so a change to any of the three cannot leave
+## this quietly picking walls the builder would skip.
+const RESI_MIN_SPAN := OSMBuildings.VERANDA_OUT + OSMBuildings.CORNER_MARGIN * 2.0 + 0.6
+## Eye heights. `resi` is 1.65 m, a standing adult on the footpath.
+##
+## `resi_detail` is the same eye height and looks at the same building; only the
+## standoff changes.
+##
+## Three attempts at this pose, and the two that failed are the useful part. In the
+## near lane for a steep 3/4 angle, the view went through a parked car; raised to
+## 2.4 m to clear it, through a tree instead - a faceted `(0, 0, 0)` artkit canopy
+## that did not move when the camera rose 0.8 m, which is what said "not a car".
+## Moved onto the footpath it went through a *second* tree, bigger, because these
+## footpaths have trees on them. The conclusion is not "raise it higher": it is that
+## eye level on this street is inside the canopy, so the detail pose crosses the
+## road and shoots back, where the only thing between camera and wall is air.
+const RESI_EYE := 1.65
+const RESI_EYE_DETAIL := 1.65
+## A house-sized frontage, for the pose that has to show one veranda rather than a
+## whole street. The longest street-facing wall in this map is 26.1 m, which is
+## two shops or a small block: a 26 m veranda is a veranda on nothing anybody
+## lives in. The detail pose takes the longest frontage inside this band instead.
+const RESI_HOUSE_SPAN := Vector2(7.0, 14.0)
+
+var _resi: Dictionary = {}
+
 
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
@@ -251,6 +291,8 @@ func _pose_spec(pose: String, at: Vector3, fwd: Vector3, side: Vector3, g: RoadG
 				"road": Rect2(0.15, 0.66, 0.70, 0.26),
 				"paint": Rect2(0.30, 0.52, 0.40, 0.10)}
 		_:
+			if RESI_POSES.has(pose):
+				return _residential_spec(String(pose), g)
 			# walk1..3: the same pose, walked back along the street.
 			#
 			# Snapped to the road network, because walking a fixed 500 m back
@@ -294,6 +336,151 @@ func _pose_spec(pose: String, at: Vector3, fwd: Vector3, side: Vector3, g: RoadG
 	# like a report that passed. Stamp it on once, here, where it cannot be lost.
 	out["name"] = pose
 	return out
+
+
+## The residential poses: a house with a veranda on it, found in the data.
+##
+## Everything else in this file is anchored to `OSMLayout.start_line()`, which is
+## a shopfront strip, so no pose here can frame a Queenslander. The subject is
+## therefore looked up rather than written down, and it is looked up in
+## `OSMBuildings.plan()` - the same `faces` array the builder glazes the veranda
+## from - so "this camera is pointed at a veranda" is true by construction. A
+## literal coordinate would drift onto the wrong house the first time
+## `Tools/osm_cairns.py` re-cut a footprint, and nothing would say so.
+##
+## The `gap <= FRONTAGE_M` test is load-bearing and is why this pose is also the
+## evidence for a defect: `OSMBuildings._street_faces()` hands back one face for
+## a building that has *no* frontage at all, so of the 1,659 verandas the builder
+## emits, only 21 are on a wall a person on the street can see. A camera that
+## picks its subject by span alone would frame a backland wall nine times out of
+## ten, which is exactly the mistake this function refuses to make.
+func _residential_spec(pose: String, g: RoadGraph) -> Dictionary:
+	var s := _resi_subject(g, "street")
+	if s.is_empty():
+		push_error("[LookDev] no street-facing veranda in the map - the resi poses need one")
+		return {"name": pose, "at": Vector3.ZERO, "look": Vector3(0.0, 1.0, -1.0),
+			"fov": 50.0, "run_m": 0.0, "road": Rect2(0.1, 0.7, 0.8, 0.2),
+			"paint": Rect2(0.3, 0.8, 0.4, 0.06)}
+	var wall: Vector2 = s["mid"]
+	var along: Vector2 = s["dir"]
+	var out: Vector2 = s["nrm"]
+	var hw: float = g.width_for(int(s["cls"])) * 0.5
+	var span: float = s["span"]
+	var ground: float = s["lift"]
+	var gap: float = s["gap"]
+	# Where the camera stands, measured out from the wall along `out` and then
+	# along the frontage.
+	#
+	# `resi` is the shot the anchor-street poses cannot make: 21 m down its own
+	# frontage, on the footpath, so the veranda recedes and the street is in frame.
+	# Across the road it cannot work - a 9 m street puts the far kerb 11.5 m from
+	# the wall, which at fov 50 crops a 26 m frontage to ten metres of it.
+	#
+	# `resi_detail` crosses the carriageway and shoots back at the same veranda
+	# from the far footpath, which is the only sightline on this street with
+	# nothing in it: the near lane is parked cars and the near footpath is trees.
+	var detail := pose == "resi_detail"
+	var standoff := (hw + gap + 1.8) if detail else (gap - 0.6)
+	var along_m := span * (0.80 if not detail else 0.34)
+	var stand := wall + out * standoff + along * along_m
+	var look_at := wall + along * (span * 0.30) - out * (0.3 if detail else 0.0)
+	# The camera has to be on the road network, or it is inside a block looking at
+	# the back of a wall - which is a frame that renders fine and measures fine and
+	# is worth nothing. `nearest_road` is the same call the layout uses, so this is
+	# the real carriageway and not a guess at it.
+	var nr := g.nearest_road(Vector3(stand.x, 0.0, stand.y))
+	var eid := int(nr["edge"])
+	# `nearest_road()` answers `{edge, dist_along, point, lateral}` - there is no
+	# "class" on it. The width of the carriageway it found lives on the edge, which
+	# is the same two-step Tests/test_osm_buildings.gd takes.
+	var off_road := 9999.0
+	if eid >= 0:
+		var hw_here := g.width_for(int(g.edges[eid]["class"])) * 0.5
+		off_road = float(nr["lateral"]) - hw_here
+		# Past the footpath is the failure, not past the kerb: standing on the
+		# footpath is the whole point of `resi`, and warning about it trained me to
+		# ignore the warning. `FOOTPATH_W` is the project's own number for how far
+		# back the footpath goes, so this threshold is not one I picked.
+		if off_road > LookDev.FOOTPATH_W:
+			push_warning("[LookDev] %s camera is %.1f m past the footpath, not on the street (lateral %.1f m, half-width %.1f m)" % [
+				pose, off_road - LookDev.FOOTPATH_W, float(nr["lateral"]), hw_here])
+	var eye := RESI_EYE if not detail else RESI_EYE_DETAIL
+	# The pose to two decimals, not the rounded one the generic print below shows.
+	# This harness's own argument is that a camera nobody can check is a camera
+	# nobody can trust, and `Systems/camera/shot_poser.gd` carries a copy of these
+	# numbers for `./render.sh residential` - a copy needs a source worth copying.
+	print("[LookDev] %s pose: at=(%.2f, %.2f, %.2f) look=(%.2f, %.2f, %.2f) fov=%.0f standoff=%.2f along=%.2f" % [
+		pose, stand.x, eye, stand.y, look_at.x, ground + (1.40 if not detail else 1.45),
+		look_at.y, 50.0 if detail else 55.0, standoff, along_m])
+	# The veranda occupies deck (0.85 m here) to roof edge (~3.1 m), so the detail
+	# pose aims into the middle of it rather than at the windows above.
+	var aim_y := ground + (1.40 if not detail else 1.45)
+	return {
+		"name": pose,
+		"at": Vector3(stand.x, eye, stand.y),
+		"look": Vector3(look_at.x, aim_y, look_at.y),
+		"fov": 50.0 if detail else 55.0,
+		"run_m": span,
+		# The bands the rubric reads. The road is the bottom of the frame in both,
+		# and `resi` is the wider one so its band sits lower.
+		"road": Rect2(0.06, 0.74, 0.88, 0.22) if pose == "resi" else Rect2(0.02, 0.80, 0.96, 0.18),
+		"paint": Rect2(0.30, 0.86, 0.40, 0.08),
+	}
+
+
+## The wall a resi pose looks at, chosen from the map and cached per subject.
+##
+## `street` takes the longest street-facing frontage in the map, because a 5 m
+## wall gives a camera nothing to stand back from and a long one gives it a run
+## of veranda receding down the street. `detail` takes the longest one inside
+## RESI_HOUSE_SPAN instead, because the point of that pose is one readable
+## veranda and the longest wall on the map is a 26 m block nobody would give a
+## veranda to.
+func _resi_subject(g: RoadGraph, key: String) -> Dictionary:
+	if _resi.has(key):
+		return _resi[key]
+	var house := key == "detail"
+	var plan := OSMBuildings.plan(g)
+	var longest := 0.0
+	var pick: Dictionary = {}
+	for e in plan["buildings"]:
+		# A shop has an awning, not a veranda; `flat` is the same test the builder
+		# uses to decide which of the two it is drawing.
+		if bool(e["flat"]):
+			continue
+		var ring: PackedVector2Array = e["ring"]
+		for f in e["faces"]:
+			if float(f["gap"]) > OSMBuildings.FRONTAGE_M:
+				continue
+			var i := int(f["i"])
+			var a := ring[i]
+			var b := ring[(i + 1) % ring.size()]
+			var span := a.distance_to(b)
+			if span < RESI_MIN_SPAN or span <= longest:
+				continue
+			if house and span > RESI_HOUSE_SPAN.y:
+				continue
+			longest = span
+			var dir := (b - a) / span
+			pick = {
+				"mid": (a + b) * 0.5,
+				# Same outward normal as `OSMBuildings._band`: rings are wound so
+				# the outward normal of a -> b is (dy, -dx).
+				"dir": dir,
+				"nrm": Vector2(dir.y, -dir.x),
+				"span": span,
+				"gap": float(f["gap"]),
+				"cls": int(f["cls"]),
+				"id": int(e["id"]),
+				"lift": float(e["lift"]),
+				"wall": float(e["wall"]),
+			}
+	_resi[key] = pick
+	if not pick.is_empty():
+		print("[LookDev] resi/%s subject: osm %d, %.1f m frontage, %.1f m off the kerb, class %d, deck %.2f m, wall %.2f m"
+			% [key, int(pick["id"]), float(pick["span"]), float(pick["gap"]),
+				int(pick["cls"]), float(pick["lift"]), float(pick["wall"])])
+	return pick
 
 
 ## The first three-way junction ahead of `at` along `fwd`, or `at` itself.

@@ -15,6 +15,23 @@ const PRESETS := {
 	"carmeet":    [Vector3(-60, 8, 100), Vector3(-84, 1.5, 118), 55.0],
 	"aerial":     [Vector3(0, 420, 340), Vector3(0, 0, 0), 60.0],
 	"motorway":   [Vector3(0, 12, -420), Vector3(30, 2, -300), 55.0],
+	# A residential frontage with a veranda on it, on the far side of the city
+	# from every preset above: all of those frame the anchor street, which is a
+	# shopfront strip, so nothing here had ever seen a Queenslander.
+	#
+	# These two numbers are a *copy* of what `World/look_dev_capture.gd --only
+	# resi` computes, and the copy is deliberate - this is the `./render.sh
+	# residential` path a human uses, and it cannot ask for a graph. The source is
+	# the longest street-facing wall on a raised house in
+	# `assets/maps/cairns_buildings.json`: osm 311035040, a 26.1 m frontage 5.1 m
+	# off the kerb on a class-1 street, deck at 0.85 m, wall at 3.35 m. Re-run the
+	# capture after `python3 Tools/osm_cairns.py` and take the numbers from its
+	# `[LookDev] resi pose:` line rather than trusting these.
+	"residential": [Vector3(136.89, 1.65, -60.76), Vector3(148.73, 2.25, -53.65), 55.0],
+	# The same veranda from the opposite footpath: the only sightline on that
+	# street with nothing in it, because the near lane is parked cars and the near
+	# footpath is trees.
+	"resi_detail": [Vector3(139.31, 1.65, -47.12), Vector3(148.96, 2.30, -53.84), 50.0],
 }
 
 ## Shots framed on the player's car rather than on a fixed point in the world,
