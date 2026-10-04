@@ -381,9 +381,11 @@ func _terrain_quad(st: SurfaceTool, x0: float, z0: float, x1: float, z1: float) 
 ## the corridor - a road clipping the corner of an otherwise distant cell still
 ## buries the carriageway.
 func _cell_subdivisions(centre: Vector2, step: float) -> int:
-	var near := graph.nearest_road(Vector3(centre.x, 0.0, centre.y))
+	var near := OSMBuildings.nearest_corridor(centre, _road_grid())
+	if int(near["seg"]) < 0:
+		return 1
 	var reach := _carve_half_width(near) + CARVE_BLEND + step * 0.70711
-	if float(near["lateral"]) >= reach:
+	if float(near["d"]) >= reach:
 		return 1
 	return CARVE_SUBDIV
 
@@ -429,8 +431,8 @@ func _terrain_height(x: float, z: float) -> float:
 	#    CARVE_Y, hollows are left exactly as they were. That also bounds the
 	#    height the blend ever has to cross at 2.0 m, which keeps the surface
 	#    gentle enough that a water triangle's chord cannot dip under it.
-	var near: Dictionary = graph.nearest_road(Vector3(x, 0, z))
-	var lateral := float(near["lateral"])
+	var near: Dictionary = OSMBuildings.nearest_corridor(Vector2(x, z), _road_grid())
+	var lateral := float(near["d"])
 	var corridor := _carve_half_width(near)
 	if lateral < corridor:
 		h = minf(h, CARVE_Y)
@@ -445,11 +447,9 @@ func _terrain_height(x: float, z: float) -> float:
 ## (`LookDev.channel_to_back_of_footpath`) plus a margin for the verge, so adding
 ## a section to the street cannot silently leave it buried.
 func _carve_half_width(near: Dictionary) -> float:
-	var eid := int(near["edge"])
-	if eid < 0 or eid >= graph.edges.size():
+	if int(near["seg"]) < 0:
 		return 0.0
-	var w: float = float(graph.edges[eid]["width"])
-	return w * 0.5 + LookDev.channel_to_back_of_footpath() + CARVE_MARGIN
+	return float(near["hw"]) + LookDev.channel_to_back_of_footpath() + CARVE_MARGIN
 
 
 ## One quad, two triangles, from four corners walked in order around the patch.
@@ -1689,12 +1689,14 @@ func _frontage_offset(width: float) -> float:
 ## the city and left only the arterials standing. Measured: 413 buildings, all of
 ## them `qld_shop`, zero houses, on a network that is 270 streets and 131 arterials.
 func _too_close_to_road(p: Vector2, min_offset: float = -1.0) -> bool:
-	var near: Dictionary = graph.nearest_road(Vector3(p.x, 0.0, p.y))
-	var eid := int(near["edge"])
-	if eid < 0 or eid >= graph.edges.size():
+	var roads := _road_grid()
+	if (roads["segs"] as Array).is_empty():
 		return true
-	var want: float = min_offset if min_offset >= 0.0 else _frontage_offset(float(graph.edges[eid]["width"]))
-	return float(near["lateral"]) < want
+	var near: Dictionary = OSMBuildings.nearest_corridor(p, roads)
+	if int(near["seg"]) < 0:
+		return false
+	var want: float = min_offset if min_offset >= 0.0 else _frontage_offset(float(near["hw"]) * 2.0)
+	return float(near["d"]) < want
 
 ## Coconut palms. The single most identifiable thing about a north Queensland
 ## street, and they break up the roofline so the suburb is not a row of boxes.
