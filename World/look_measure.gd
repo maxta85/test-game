@@ -119,6 +119,47 @@ const MAX_ROAD_DARK := 0.75
 ## rejects both of those and keeps all four that are on tarmac; the margin over
 ## `walk3` is deliberately thin, because a pose that is nearly this bad should
 ## fail rather than be tolerated.
+##
+## ---------------------------------------------------------------------------
+## RE-MEASURED 2026-10-04 (tag grade2-base, after `bc7efef`): THIS CHECK HAS
+## THREE FALSE NEGATIVES, and it is left in place rather than quietly tuned down.
+##
+## The poses moved. `bc7efef` stopped RDP collapsing road centrelines into
+## straight chords, so the road graph went 359 junctions / 401 edges / 31 694 m
+## -> 1872 / 2021 / 50 845 m, and every pose in that capture sits on different
+## street than it did on `vf-before` (all six are on Hoare Street now). Its
+## `walk2`/`walk3` observation may well have been true here and false there.
+##
+## Ground truth by frame difference rather than by proxy: the capture was
+## repeated with **only** `MatLib.wet_asphalt()` changed (albedo plus a magenta
+## emission floor, both inside `World/mat_lib.gd`), so a pixel that moved *is*
+## asphalt. Asphalt share of the road band, threshold 8 against a **measured**
+## jitter floor of max 1 level taken from sky regions of the same frame pair:
+##
+##     kerb 99.6%   street 99.9%   junction 97.3%
+##     walk1 100.0%  walk2  100.0%  walk3  100.0%
+##
+## 85 676 road pixels against 562 non-road - 99.3% of every band is tarmac. So
+## on this geometry `walk1` (0.284), `walk2` (0.106) and `walk3` (0.096) fail for
+## low detail while demonstrably being road.
+##
+## Why the statistic cannot do this job, measured over those 86 238 labelled
+## pixels: `detail` is the mean absolute *horizontal* gradient, and it separates
+## the two classes at AUC 0.879 - but **inverted**. Road pixels have a median
+## horizontal gradient of 0.000 against 1.000 for non-road. The road here is dark
+## (luma p50 3.0) and wet, so it has almost no horizontal structure to measure.
+## What the statistic actually measures is "how much texture is in this surface",
+## which is a different question - and it cuts against this file's own wet-road
+## direction, since the fix for the glitter these thresholds were written against
+## was a smooth near-mirror, which is exactly what drives `detail` toward zero.
+##
+## No threshold repairs it: a floor below 0.096 admits every band and can then
+## never fire, which is a check that cannot fail. Identifying road needs a
+## geometric answer - a downward ray per band reporting its collider or material -
+## and that has to be taken in `World/look_dev_capture.gd`, whose owner this file
+## does not share. Left fail-closed and documented rather than weakened on the
+## strength of a proxy that is known to point the wrong way.
+## ---------------------------------------------------------------------------
 const MIN_ROAD_DETAIL := 1.00
 
 ## LIGHTING. A night frame whose near field clips is a frame with no night in it.
