@@ -21,6 +21,39 @@ const CLASS_LANES := {
 	RoadClass.ARTERIAL: 2,
 	RoadClass.HIGHWAY: 3,
 }
+## How far a surveyed per-street width may move a class default, as [floor, ceiling].
+##
+## The ceiling is the class default itself, so an attribute can only ever *narrow*
+## a street. That asymmetry is deliberate, and it is about what the width is used
+## for downstream: `WorldBuilder._frontage_offset()` puts artkit buildings and
+## footpaths a fixed distance outside `edges[].width`, and the OSM building
+## footprints in `assets/maps/cairns_buildings.json` are placed by OSM, not by
+## this width. A wider carriageway therefore moves geometry the world already has
+## and can leave a mapped frontage standing in the tarmac, while a narrower one
+## only widens the nature strip behind the kerb - which is what a 6 m street with
+## a wide verge actually looks like. The floor is the narrowest carriageway a car
+## fits on, so a `lanes=1` tag becomes a real single-lane street and not a
+## 4.5 m alley with the kerbs nearly touching.
+const WIDTH_LIMITS := {
+	RoadClass.LANE: Vector2(3.5, 6.0),
+	RoadClass.STREET: Vector2(6.0, 9.0),
+	RoadClass.ARTERIAL: Vector2(9.0, 14.0),
+	RoadClass.HIGHWAY: Vector2(13.0, 18.0),
+}
+## Lane counts a tag may claim, for the whole road both ways. Above four, the tag
+## is counting turn lanes or a divided carriageway that this graph does not model.
+const LANE_LIMITS := Vector2(1.0, 4.0)
+
+## Per-street width/lane table emitted by `Tools/osm_cairns.py`.
+##
+## Read from the map file rather than handed in, because `World/osm_layout.gd`
+## projects each corridor to `{name, class, points}` and drops everything else -
+## it is not this file's to edit, and a corridor dictionary that cannot carry its
+## own width is the only place the graph can still get one. Keyed by geometry
+## rather than by street name, because a name is not a corridor: this map's 247
+## corridors carry 61 distinct names and "Mulgrave Road" alone is 66 ways that
+## disagree about their lane count. `corridor_key()` is the shared format.
+const WIDTH_ATTR_PATH := "res://assets/maps/cairns_map.json"
 ## Speed limit in m/s, used by the traffic AI and the race AI.
 const CLASS_SPEED := {
 	RoadClass.LANE: 8.0,
@@ -36,9 +69,76 @@ var edges: Array = []
 ## Street names, so the HUD and the AI can say something sensible.
 var street_names: Dictionary = {}
 
+## Parsed once per process. `{}` means "no table", which is a valid state: the
+## Manunda layout has no surveyed widths and every class default stands.
+static var _width_attrs: Variant = null
+
 
 func width_for(cls: int) -> float:
 	return float(CLASS_WIDTH.get(cls, 9.0))
+
+
+## Identity of a corridor for the width table, shared with `corridor_key()` in
+## `Tools/osm_cairns.py`: every point as `%.2f,%.2f`, joined with `|`.
+##
+## Untyped on purpose: `points` is a `PackedVector2Array` from `OSMLayout` and a
+## plain `Array[Vector2]` from `ManundaLayout` and from the miniature networks in
+## the tests, and a static type here would reject half the callers.
+static func corridor_key(pts) -> String:
+	var parts := PackedStringArray()
+	for p in pts:
+		parts.append("%.2f,%.2f" % [p.x, p.y])
+	return "|".join(parts)
+
+
+static func width_attrs() -> Dictionary:
+	if _width_attrs == null:
+		_width_attrs = _load_width_attrs()
+	return _width_attrs if _width_attrs is Dictionary else {}
+
+
+static func _load_width_attrs() -> Dictionary:
+	var parsed: Variant = null
+	# ResourceLoader first so this works in an exported PCK, where the .json is an
+	# imported JSON resource rather than a loose file.
+	if ResourceLoader.exists(WIDTH_ATTR_PATH):
+		var res := ResourceLoader.load(WIDTH_ATTR_PATH)
+		if res is JSON:
+			parsed = (res as JSON).data
+	if not (parsed is Dictionary) and FileAccess.file_exists(WIDTH_ATTR_PATH):
+		parsed = JSON.parse_string(FileAccess.get_file_as_string(WIDTH_ATTR_PATH))
+	if not (parsed is Dictionary):
+		return {}
+	var table: Variant = (parsed as Dictionary).get("width_attrs", {})
+	return table if table is Dictionary else {}
+
+
+## Attribute for a corridor: its own `width_m`/`lanes` keys when the caller
+## supplied them, else the map table looked up by geometry. `{}` rather than a
+## class default, so a caller can tell "the table has nothing for this street"
+## from "this street is one lane wide" - the second is a real narrowing and must
+## not read as a miss.
+func corridor_attr(corridor: Dictionary, pts) -> Dictionary:
+	if corridor.has("width_m") or corridor.has("lanes"):
+		return {"width_m": corridor.get("width_m"), "lanes": corridor.get("lanes")}
+	var hit: Variant = width_attrs().get(corridor_key(pts))
+	return hit if hit is Dictionary else {}
+
+
+## `{ width, lanes }` for a corridor: its attribute clamped into the class band,
+## or the class defaults when it has none. Every corridor in a graph built from
+## the same street shares one answer, which is what an edge wants.
+func dims_for(cls: int, attr: Dictionary) -> Dictionary:
+	var width := width_for(cls)
+	var lanes := lanes_for(cls)
+	var band: Vector2 = WIDTH_LIMITS.get(cls, Vector2(4.0, 9.0))
+	var raw_w: Variant = attr.get("width_m")
+	if raw_w != null and is_finite(float(raw_w)) and float(raw_w) > 0.0:
+		width = clampf(float(raw_w), band.x, band.y)
+	var raw_l: Variant = attr.get("lanes")
+	if raw_l != null and is_finite(float(raw_l)):
+		lanes = clampf(round(float(raw_l)), LANE_LIMITS.x, LANE_LIMITS.y)
+	return {"width": width, "lanes": lanes}
 
 
 func lanes_for(cls: int) -> float:
@@ -50,7 +150,8 @@ func speed_for(cls: int) -> float:
 
 
 ## Builds the graph from corridors.
-## corridor = { name, class, points: Array[Vector2], oneway: bool }
+## corridor = { name, class, points: Array[Vector2], oneway: bool,
+##              width_m: float, lanes: int }
 func build(corridors: Array) -> void:
 	nodes.clear()
 	edges.clear()
@@ -66,6 +167,9 @@ func build(corridors: Array) -> void:
 		var cls: int = int(corridor.get("class", RoadClass.STREET))
 		var name: String = String(corridor.get("name", ""))
 		street_names[name] = cls
+		# One lookup per corridor, not per edge: the whole street is one width, and
+		# a 900 m corridor is split into a dozen edges that all inherit it.
+		var dims: Dictionary = dims_for(cls, corridor_attr(corridor, pts))
 
 		# Collect split parameters for every segment.
 		var splits: Array = []      # one array of floats per segment
@@ -104,7 +208,8 @@ func build(corridors: Array) -> void:
 				chain.append(a.lerp(b, float(t)))
 			chain.append(b)
 			for k in chain.size() - 1:
-				_add_edge_between(chain[k], chain[k + 1], cls, name, corridor.get("oneway", false))
+				_add_edge_between(chain[k], chain[k + 1], cls, name,
+						corridor.get("oneway", false), dims)
 	# Weld near-coincident junctions once every corridor has been added.
 	_merge_close_nodes(0.75)
 
@@ -166,9 +271,12 @@ func _merge_close_nodes(tolerance: float) -> void:
 	edges = new_edges
 
 
-func _add_edge_between(p: Vector2, q: Vector2, cls: int, name: String, oneway: bool) -> void:
+func _add_edge_between(p: Vector2, q: Vector2, cls: int, name: String, oneway: bool,
+		dims: Dictionary = {}) -> void:
 	if p.distance_squared_to(q) < 0.25:
 		return
+	var width: float = float(dims.get("width", width_for(cls)))
+	var lanes: float = float(dims.get("lanes", lanes_for(cls)))
 	var a := _node_at(p)
 	var b := _node_at(q)
 	if a == b:
@@ -181,17 +289,20 @@ func _add_edge_between(p: Vector2, q: Vector2, cls: int, name: String, oneway: b
 	for eid in nodes[a]["edges"]:
 		var e: Dictionary = edges[eid]
 		if (e["a"] == a and e["b"] == b) or (e["a"] == b and e["b"] == a):
-			# A street crossing a higher-class road is upgraded in place.
+			# A street crossing a higher-class road is upgraded in place, and takes
+			# that road's surveyed width with it: a lane crossing Mulgrave Road
+			# becomes part of Mulgrave Road, so painting it at the laneway's width
+			# would leave a notch in the arterial.
 			if cls > int(e["class"]):
 				e["class"] = cls
-				e["width"] = width_for(cls)
-				e["lanes"] = lanes_for(cls)
+				e["width"] = width
+				e["lanes"] = lanes
 				e["name"] = name
 			return
 	var id := edges.size()
 	edges.append({
 		"id": id, "a": a, "b": b, "class": cls,
-		"width": width_for(cls), "lanes": lanes_for(cls),
+		"width": width, "lanes": lanes,
 		"name": name, "oneway": oneway,
 	})
 	nodes[a]["edges"].append(id)
