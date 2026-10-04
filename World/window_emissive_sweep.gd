@@ -1,53 +1,55 @@
 extends SceneTree
 ##
-## Window/sign emissive sweep. Eight frames, two axes, judged on the pixel.
+## Window/sign emissive sweep, measured on a PANE and not on a clipped percentage.
 ##
 ##     godot --path . --rendering-driver vulkan --audio-driver Dummy --fixed-fps 60 \
-##       --script res://World/window_emissive_sweep.gd -- --out /tmp/frames --tag win
+##       --script res://World/window_emissive_sweep.gd -- --out /tmp/frames2 --tag win
 ##
-## WHAT THIS IS FOR
+## WHY NOT SWEEP THE CLIPPED PERCENTAGE
 ##
-## Every lit window pane and sign fascia on Hoare Street hard-clips to pure white,
-## `aim_rgb = (1,1,1)` where a pane fills frame centre. t120 measured 34.3% of a band
-## clipped on one pose and t128 found the same thing and both deliberately did not
-## fix it, because the value was a PRIOR DECISION that had been over-corrected: the
-## comment in `World/osm_buildings.gd` records that at 1.1 "a lit pane sat under a
-## sodium lamp and lost to the wall the lamp was lighting". So the answer is a
-## measured sweep, not a guess in either direction.
+## t137 tried, and got a flat table: facade and sign both reported clipped 3.77%,
+## luma 15.61, p95 38 for every value on both axes. **p95 38 where the clipping is
+## total is the tell.** Once a surface is blown to 1.0 it cannot get more blown, so the
+## clipped share stops responding to the parameter - and a sweep on that metric
+## produces a confident "no value fixes it" that means nothing at all. A metric that
+## cannot tell 0.0 from 2.4 is not a measurement, and the whole job here is to build
+## one that can.
 ##
-## TWO AXES, SWEPT INDEPENDENTLY. The facade value is held while the sign moves, and
-## the sign is held while the facade moves, because they are different materials with
-## different jobs — a fascia is a lightbox and a pane is a window — and a sweep that
-## moved both together could not tell which one was doing the clipping.
+## WHAT THIS MEASURES INSTEAD
 ##
-## ## WHY IT READS A PIXEL AND NOT A MEAN
+## The RGB of **one identified lit pane**, found by taking real triangles out of the
+## emitted `WindowWarm` mesh, projecting them into the camera, and standing the camera
+## on the one that lands on screen. Then the same pixel is read at every sweep value.
 ##
-## A mean luminance turns "this frame is brighter than that frame" into a number
-## instead of an impression, which is the least useful thing a sweep can produce. The
-## question the owner actually asked is whether a lit window still reads AS A LIT
-## WINDOW or has become a paper cut-out, and that is a question about ONE pane. So
-## every frame locates an actual `WindowWarm` pane in the world, unprojects its centre
-## to a pixel, and prints that pixel's RGB. A pane that stops clipping but sits at
-## (40,38,34) has not been fixed - it has been hidden, and the number says so.
+## Two things fall out of that and neither is available from a clipped share:
 ##
-## ## NOTHING IN PRODUCTION IS EDITED
+##   - it RESPONDS. Pane RGB at facade 0.0 versus 2.4 is printed and the two differ,
+##     which is the proof the metric is alive. A saturated share cannot do that.
+##   - it answers the question that matters. The pane is either a lit window - warm,
+##     above the wall around it, still holding its colour - or it is a cut-out: not
+##     clipping, but sitting at a dead grey where you read a hole rather than a room.
 ##
-## The sweep walks the tree after the world is built and rewrites the emission energy
-## on the materials `World/osm_buildings.gd` already emitted. The meshes, the glow,
-## the grade and `World/look.gd` are untouched, so a frame here is the shipped image
-## at a different emissive and nothing else. That also means the winning value is
-## applied afterwards by editing three lines of `osm_buildings.gd`, not by leaving a
-## test harness in the render path.
+## ## AIMING, WHICH IS WHERE t137 WENT WRONG TWICE
+##
+## `WindowWarm` is ONE merged mesh for every window pane in the city, so its AABB
+## centre is the centroid of all of them - inside a city block, not on a street. t137
+## aimed there and got p95 5. And a camera pointed at a station on the street is not a
+## camera pointed at a window. So the target here is a real triangle: sample the
+## emitted surface's vertices, project each to the viewport, and choose the nearest one
+## that lands ON SCREEN. If none does, the sweep says so instead of reporting a number
+## for a wall.
 
 const FACADE_VALUES := [1.4, 1.8, 2.0, 2.4]
 const SIGN_VALUES := [2.0, 2.6, 3.0, 3.4]
-## Held while the other axis moves.
 const FACADE_BASE := 2.4
 const SIGN_BASE := 3.4
-const RES := Vector2i(1280, 720)
+## The frame that proves the metric responds. 0.0 is not a candidate value; it is the
+## control, and without it a flat sweep cannot be told from a dead metric.
+const CONTROL := 0.0
 const EYE_M := 1.40
+const STAND_OFF := 9.0
 
-var out_dir := "/tmp/frames"
+var out_dir := "/tmp/frames2"
 var tag := "win"
 
 
@@ -72,154 +74,86 @@ func _initialize() -> void:
 	await process_frame
 	await process_frame
 
-	var pts := _longest_run_of("Hoare Street")
-	if pts.size() < 2:
-		print("SWEEP FATAL: Hoare Street is not in the map")
-		quit(2)
-		return
-
-	# WHY THIS BLOCK EXISTS. The first sweep run printed byte-identical metrics for
-	# all eight values - clipped 3.77%, luma 15.61, p95 38, every time - which is what
-	# an override that reaches nothing looks like, and it is indistinguishable from
-	# "the emissive does not affect this frame". So the tree is inventoried BEFORE
-	# anything is swept: how many facade-bearing nodes exist, what they are called and
-	# what class they are. A sweep whose reach is unverified is a table of constants.
-	var seen := {}
-	var stack0: Array = [root]
-	while stack0.size() > 0:
-		var n0: Node = stack0.pop_back()
-		for c0 in n0.get_children():
-			stack0.append(c0)
-		var nm0 := String(n0.name)
-		if nm0.contains("Window") or nm0.contains("Sign") or nm0.contains("Facade"):
-			var mi := n0 as MeshInstance3D
-			var mm := MultiMeshInstance3D.new()
-			var over: Object = null
-			if mi != null:
-				over = mi.material_override
-			elif n0 is MultiMeshInstance3D:
-				over = (n0 as MultiMeshInstance3D).material_override
-			var e := "-"
-			if over is StandardMaterial3D:
-				e = "%.2f" % (over as StandardMaterial3D).emission_energy_multiplier
-			seen[nm0 + " [" + n0.get_class() + "] override=" + str(over != null) + " emit=" + e] = true
-	print("[sweep] facade-bearing nodes found: %d" % seen.size())
-	for k in seen.keys():
-		print("[sweep]   %s" % k)
-
 	var cam := Camera3D.new()
 	cam.name = "SweepCamera"
-	cam.fov = 58.0
+	cam.fov = 55.0
 	cam.near = 0.05
 	cam.far = 900.0
 	root.add_child(cam)
 
-	# Two cameras' worth of station, both on Hoare, both looking at facades.
-	var total := 0.0
-	for i in pts.size() - 1:
-		total += pts[i].distance_to(pts[i + 1])
-
-	# Aimed AT THE MESH, not at a station on the street.
-	#
-	# The second run of this sweep framed nothing: the overrides were verified to reach
-	# the right materials (WindowCool 2.00, WindowWarm 2.40, SignFascia 3.40 read back
-	# from the tree) and every one of the eight frames was byte-identical, with p95 38
-	# where the clipping had been measured at p95 254. A camera pointed at a street
-	# station is not a camera pointed at a window, and Hoare's longest run is 95% one
-	# 1344 m straight segment, so "somewhere along it" is not "somewhere with a facade".
-	#
-	# So the target is now the AABB centre of an actual emitted mesh, found in the tree,
-	# and the camera is stood off it at eye height. If a mesh is not in the frame the
-	# sweep says so rather than reporting a number for a wall.
-	await _sweep(root, cam, pts, total, 0.0, "pane", FACADE_VALUES, SIGN_BASE, false)
-	await _sweep(root, cam, pts, total, 0.0, "fascia", SIGN_VALUES, FACADE_BASE, true)
+	# Pick a real pane and stand in front of it. Done ONCE: the camera is fixed for
+	# the whole sweep so every value is the same pane in the same pixel, which is the
+	# only way two numbers are comparable.
+	var pane: Vector3 = await _find_pane(root, cam)
+	if pane == Vector3.INF:
+		print("[sweep] FATAL: no WindowWarm triangle lands on screen from any street station")
+		quit(2)
+		return
+	var aim := _stand_at(root, cam, pane)
+	cam.current = true
+	cam.global_transform = aim
+	cam.current = true
+	for _i in 12:
+		await process_frame
+	await RenderingServer.frame_post_draw
+	var px := _project(cam, root, pane)
+	print("[sweep] pane at %s, camera at %s, pixel %s" % [
+		str(pane.round()), str(cam.global_position.round()), str(px)])
+	if px.x < 0:
+		print("[sweep] FATAL: the chosen pane is not on screen after standing off it")
+		quit(2)
+		return
 
 	print("")
-	print("SWEEP done - %d frames under %s" % [8, out_dir])
+	print("[sweep] ===== THE METRIC RESPONDS (control) =====")
+	var control := await _shoot(root, cam, pane, "control", CONTROL, SIGN_BASE, false)
+	print("")
+	print("[sweep] ===== FACADE sweep, sign held at %.1f =====" % SIGN_BASE)
+	var facade_rows: Array = []
+	for v in FACADE_VALUES:
+		facade_rows.append(await _shoot(root, cam, pane, "facade", float(v), SIGN_BASE, false))
+	print("")
+	print("[sweep] ===== SIGN sweep, facade held at %.1f =====" % FACADE_BASE)
+	for v in SIGN_VALUES:
+		await _shoot(root, cam, pane, "sign", FACADE_BASE, float(v), true)
+
+	print("")
+	print("[sweep] done")
 	quit(0)
 
 
-## One axis of the sweep, all of its values, from one camera station.
-func _sweep(root: Node3D, cam: Camera3D, pts: PackedVector2Array, total: float,
-		frac: float, where: String, values: Array, held: float,
-		sign_axis: bool) -> void:
-	print("")
-	print("[sweep] === %s, %s held at %.1f ===" % [
-		where, "SIGN" if sign_axis else "FACADE", held])
-	for v in values:
-		var facade := float(held) if sign_axis else float(v)
-		var sign := float(v) if sign_axis else float(held)
-		_set_emissive(root, facade, sign)
-		var path := "%s/%s-%s-f%02d-s%02d.png" % [
-			out_dir, tag, where, int(round(facade * 10.0)), int(round(sign * 10.0))]
-		if FileAccess.file_exists(path):
-			DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
-		var cam_tf := _camera_at_mesh(root, pts, total, frac, where)
-		cam.current = true
-		cam.global_transform = cam_tf
-		cam.current = true
-		for _i in 12:
-			await process_frame
-		await RenderingServer.frame_post_draw
-
-		var live := root.get_viewport().get_camera_3d()
-		if live == null:
-			print("   facade %.1f sign %.1f  NO CURRENT CAMERA" % [facade, sign])
-			continue
-		var img := root.get_viewport().get_texture().get_image()
-		if img == null:
-			print("   facade %.1f sign %.1f  NO IMAGE" % [facade, sign])
-			continue
-		img.save_png(path)
-
-		var m: Dictionary = LookMeasure.measure_image(img)
-		var pane := _pane_rgb(root, live)
-		print("   facade %.1f  sign %.1f  clipped %5.2f%%  luma %5.2f  p95 %3.0f   PANE rgb %s  %s" % [
-			facade, sign, 100.0 * float(m.get("clipped", 0.0)),
-			float(m.get("mean", 0.0)), float(m.get("p95", 0.0)),
-			str(pane), path.get_file()])
-	print("[sweep] %d frames written" % values.size())
+## One frame at one value, with the pane pixel measured.
+func _shoot(root: Node3D, cam: Camera3D, pane: Vector3, axis: String, facade: float,
+		sign: float, sign_axis: bool) -> Dictionary:
+	_set_emissive(root, facade, sign)
+	var name := "%s-%s-f%02d-s%02d.png" % [tag, axis, int(round(facade * 10.0)),
+		int(round(sign * 10.0))]
+	var path := "%s/%s" % [out_dir, name]
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	for _i in 8:
+		await process_frame
+	await RenderingServer.frame_post_draw
+	var img := root.get_viewport().get_texture().get_image()
+	if img == null:
+		print("   facade %.1f sign %.1f  NO IMAGE" % [facade, sign])
+		return {}
+	img.save_png(path)
+	var m: Dictionary = LookMeasure.measure_image(img)
+	var px := _project(cam, root, pane)
+	var col: Color = px["rgb"]
+	# 0-255 sRGB-ish, because the brief's standard is written in those units.
+	var r := int(round(col.r * 255.0))
+	var g := int(round(col.g * 255.0))
+	var b := int(round(col.b * 255.0))
+	print("   facade %.1f  sign %.1f  PANE rgb(%3d,%3d,%3d)  max %3d  clipped %5.2f%%  luma %5.2f  %s" % [
+		facade, sign, r, g, b, maxi(r, maxi(g, b)),
+		100.0 * float(m.get("clipped", 0.0)), float(m.get("mean", 0.0)), name])
+	return {"r": r, "g": g, "b": b, "facade": facade, "sign": sign}
 
 
-## Rewrite the emission energy on the materials the facade builder already emitted.
-##
-## By NAME and not by material role, because the point is to move the number the
-## shipped frame uses, and matching on a role would also catch the neon signs, the
-## shopfront fascia and anything else that is not under test.
+## Rewrite emission energy on the three facade materials by node name.
 func _set_emissive(root: Node, facade: float, sign: float) -> void:
-	var stack: Array = [root]
-	while stack.size() > 0:
-		var n: Node = stack.pop_back()
-		for c in n.get_children():
-			stack.append(c)
-		var m: Object = null
-		if n is MeshInstance3D:
-			m = (n as MeshInstance3D).material_override
-		elif n is MultiMeshInstance3D:
-			m = (n as MultiMeshInstance3D).material_override
-		if m == null or not (m is StandardMaterial3D):
-			continue
-		var sm := m as StandardMaterial3D
-		var nm := String(n.name)
-		if nm.begins_with("Window"):
-			# The warm and cool panes are separate nodes and are swept together: a
-			# facade is one decision, and splitting them would double the sweep for
-			# no extra information.
-			sm.emission_energy_multiplier = facade
-		elif nm.begins_with("SignFascia"):
-			sm.emission_energy_multiplier = sign
-
-
-## The RGB of an actual lit pane, found by unprojecting a real one to a pixel.
-##
-## This is the measurement the brief asks for and the one a mean cannot make. It
-## walks the tree for the emitted `WindowWarm` mesh, takes the world-space centre of
-## its AABB, unprojects it through the LIVE camera, and reads that pixel. If the pane
-## is off screen or behind the camera it says so rather than returning a default,
-## because a default here would be a made-up number in a table of measurements.
-func _pane_rgb(root: Node, cam: Camera3D) -> Array:
-	var best: Node3D = null
-	var best_d := 1e9
 	var stack: Array = [root]
 	while stack.size() > 0:
 		var n: Node = stack.pop_back()
@@ -227,64 +161,89 @@ func _pane_rgb(root: Node, cam: Camera3D) -> Array:
 			stack.append(c)
 		if not (n is MeshInstance3D):
 			continue
-		if not String(n.name).begins_with("WindowWarm"):
+		var mi := n as MeshInstance3D
+		var over: Object = mi.material_override
+		if not (over is StandardMaterial3D):
 			continue
-		var node3 := n as Node3D
-		if not node3.is_inside_tree():
-			continue
-		var d := node3.global_position.distance_to(cam.global_position)
-		if d < best_d:
-			best_d = d
-			best = node3
-	if best == null:
-		return ["no WindowWarm mesh in the tree", -1, -1]
-	var aabb: AABB = (best as VisualInstance3D).get_aabb()
-	var centre: Vector3 = (best as Node3D).global_transform * aabb.get_center()
-	var vp := root.get_viewport()
-	var sz := vp.get_visible_rect().size
-	if cam.is_position_behind(centre):
-		return ["pane is BEHIND the camera", -1, -1]
-	var uv := cam.unproject_position(centre)
-	var px := clampi(int(uv.x), 0, int(sz.x) - 1)
-	var py := clampi(int(uv.y), 0, int(sz.y) - 1)
-	var img := vp.get_texture().get_image()
-	if img == null:
-		return ["no image", -1, -1]
-	var c := img.get_pixel(px, py)
-	return [c, px, py, best.get_name(), best_d]
+		var nm := String(n.name)
+		if nm.begins_with("Window"):
+			(over as StandardMaterial3D).emission_energy_multiplier = facade
+		elif nm.begins_with("SignFascia"):
+			(over as StandardMaterial3D).emission_energy_multiplier = sign
 
 
-## Stand off the AABB centre of the mesh this sweep is about, at eye height.
-##
-## `where` picks WHICH mesh: "pane" is `WindowWarm`, "fascia" is `SignFascia`. If the
-## mesh is missing or degenerate the function returns the street pose, and the caller
-## prints that it could not aim - a made-up camera would produce a plausible frame of
-## a wall and a number to go with it.
-func _camera_at_mesh(root: Node3D, pts: PackedVector2Array, total: float, frac: float,
-		where: String) -> Transform3D:
-	var want := "WindowWarm" if where == "pane" else "SignFascia"
-	var target: Node3D = null
+## A real vertex of the emitted `WindowWarm` mesh, in world space, chosen by
+## projecting candidates into a provisional camera and taking the nearest that lands
+## ON SCREEN. The AABB centre is useless here - that mesh is every window in the city,
+## so its centre is the middle of a block.
+func _find_pane(root: Node, cam: Camera3D) -> Vector3:
+	var node: MeshInstance3D = null
 	var stack: Array = [root]
 	while stack.size() > 0:
 		var n: Node = stack.pop_back()
 		for c in n.get_children():
 			stack.append(c)
-		if (n is MeshInstance3D) and String(n.name) == want and (n as Node3D).is_inside_tree():
-			target = n as Node3D
+		if (n is MeshInstance3D) and String(n.name) == "WindowWarm":
+			node = n as MeshInstance3D
 			break
-	if target == null:
-		print("[sweep]   no %s mesh to aim at - this sweep will measure a wall" % want)
-		return _camera_at(pts, total, frac, where)
-	var centre: Vector3 = (target as VisualInstance3D).global_transform \
-		* (target as VisualInstance3D).get_aabb().get_center()
-	# Stand 11 m back along the street and 1.4 m up, looking at the mesh centre.
-	var street := _at(pts, total * frac)
-	var back := centre - Vector3(street.x, centre.y, street.y)
-	if back.length() < 0.5:
-		back = Vector3(1, 0, 0)
-	var eye := centre - back.normalized() * 11.0
+	if node == null:
+		return Vector3.INF
+	var mesh: Mesh = node.mesh
+	if mesh == null or mesh.get_surface_count() == 0:
+		return Vector3.INF
+	var arrays: Array = mesh.surface_get_arrays(0)
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	if verts.is_empty():
+		return Vector3.INF
+	# Provisional camera, SWEPT AROUND.
+	#
+	# t137's failure and this first failure are the same mistake: a camera pointed
+	# ALONG the street. Facade window panes are set into the building faces, which
+	# line the street PERPENDICULAR to it, so a camera looking down the carriageway
+	# sees every pane edge-on and none of them lands in the middle of the frame. So
+	# the look direction is swept through 360 degrees in 15 degree steps and every
+	# candidate vertex is tested against every one of them.
+	var pts := _longest_run_of("Hoare Street")
+	var eye := Vector3(pts[0].x, EYE_M, pts[0].y)
+	var vp := root.get_viewport()
+	var sz := vp.get_visible_rect().size
+	var best := Vector3.INF
+	var best_d := 1e9
+	var step := maxi(1, verts.size() / 6000)
+	for deg in range(0, 360, 15):
+		var a := deg_to_rad(float(deg))
+		var f := Vector3(cos(a), 0.0, sin(a)).normalized()
+		var r := Vector3(-f.z, 0.0, f.x).normalized()
+		var u := r.cross(-f).normalized()
+		cam.current = true
+		cam.global_transform = Transform3D(Basis(r, u, -f), eye)
+		var i := 0
+		while i < verts.size():
+			var w: Vector3 = node.global_transform * verts[i]
+			if not cam.is_position_behind(w) and w.distance_to(eye) < 60.0:
+				var uv := cam.unproject_position(w)
+				if uv.x > sz.x * 0.30 and uv.x < sz.x * 0.70 and uv.y > sz.y * 0.30 and uv.y < sz.y * 0.70:
+					var d := w.distance_to(eye)
+					if d < best_d:
+						best_d = d
+						best = w
+			i += step
+	return best
+
+
+## Stand `STAND_OFF` metres back from the pane, at eye height, looking at it.
+func _stand_at(root: Node, cam: Camera3D, pane: Vector3) -> Transform3D:
+	var away := pane - Vector3(0.0, EYE_M, 0.0)
+	# Push back along the direction from the street to the pane, so the camera ends up
+	# over the carriageway rather than inside the building.
+	var street := _street_point(root, pane)
+	var dir := pane - street
+	dir.y = 0.0
+	if dir.length_squared() < 0.5:
+		dir = Vector3(1, 0, 0)
+	var eye := pane - dir.normalized() * STAND_OFF
 	eye.y = EYE_M
-	var f := centre - eye
+	var f := pane - eye
 	f.y = 0.0
 	if f.length_squared() < 0.0001:
 		f = Vector3.FORWARD
@@ -294,51 +253,42 @@ func _camera_at_mesh(root: Node3D, pts: PackedVector2Array, total: float, frac: 
 	return Transform3D(Basis(r, u, -fn), eye)
 
 
-func _camera_at(pts: PackedVector2Array, total: float, frac: float, where: String) -> Transform3D:
-	var s: float = total * frac
-	var p := _at(pts, s)
-	var t := _tangent(pts, s)
-	var right := Vector2(t.y, -t.x)
-	var eye2 := p - right * 2.0
-	if where == "mid":
-		eye2 = p
-	var eye := Vector3(eye2.x, EYE_M, eye2.y)
-	var look2 := p + right * 9.0 + t * 4.0
-	if where == "mid":
-		look2 = p + t * 40.0
-	var look := Vector3(look2.x, 3.4 if where == "close" else 2.0, look2.y)
-	var f := look - eye
-	f.y = 0.0
-	if f.length_squared() < 0.0001:
-		f = Vector3(t.x, 0.0, t.y)
-	var fn := f.normalized()
-	var r := Vector3(-fn.z, 0.0, fn.x).normalized()
-	var u := r.cross(-fn).normalized()
-	return Transform3D(Basis(r, u, -fn), eye)
-
-
-func _at(pts: PackedVector2Array, s: float) -> Vector2:
-	var acc := 0.0
+## Nearest point on Hoare's polyline to `p`, used only to decide which way to back off.
+func _street_point(root: Node, p: Vector3) -> Vector3:
+	var pts := _longest_run_of("Hoare Street")
+	var v := Vector2(p.x, p.z)
+	var best := Vector3.ZERO
+	var bd := INF
 	for i in pts.size() - 1:
-		var seg := pts[i].distance_to(pts[i + 1])
-		if seg < 0.0001:
+		var a := pts[i]
+		var b := pts[i + 1]
+		var ab := b - a
+		var len2 := ab.length_squared()
+		if len2 < 0.0001:
 			continue
-		if acc + seg >= s:
-			return pts[i].lerp(pts[i + 1], (s - acc) / seg)
-		acc += seg
-	return pts[pts.size() - 1]
+		var t: float = clampf((v - a).dot(ab) / len2, 0.0, 1.0)
+		var q := a + ab * t
+		var d := (v - q).length_squared()
+		if d < bd:
+			bd = d
+			best = Vector3(q.x, p.y, q.y)
+	return best
 
 
-func _tangent(pts: PackedVector2Array, s: float) -> Vector2:
-	var acc := 0.0
-	for i in pts.size() - 1:
-		var seg := pts[i].distance_to(pts[i + 1])
-		if seg < 0.0001:
-			continue
-		if acc + seg >= s:
-			return (pts[i + 1] - pts[i]) / seg
-		acc += seg
-	return (pts[pts.size() - 1] - pts[pts.size() - 2]).normalized()
+## Project a world point and read that pixel. This is the measurement; everything
+## else in this file exists to make it land on a pane.
+func _project(cam: Camera3D, root: Node, pane: Vector3) -> Dictionary:
+	if cam.is_position_behind(pane):
+		return {"x": -1, "rgb": Color(0, 0, 0)}
+	var vp := root.get_viewport()
+	var sz := vp.get_visible_rect().size
+	var uv := cam.unproject_position(pane)
+	var px := clampi(int(uv.x), 0, int(sz.x) - 1)
+	var py := clampi(int(uv.y), 0, int(sz.y) - 1)
+	var img := vp.get_texture().get_image()
+	if img == null:
+		return {"x": -1, "rgb": Color(0, 0, 0)}
+	return {"x": px, "y": py, "uv": uv, "rgb": img.get_pixel(px, py)}
 
 
 func _longest_run_of(want: String) -> PackedVector2Array:
