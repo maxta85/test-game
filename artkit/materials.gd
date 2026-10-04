@@ -143,8 +143,10 @@ static func noise_tex(size: int, freq: float, octaves: int, seed_value: int,
 ## without instantiating anything, and assert the library matches that intent.
 ## Emission energy at or above which a material counts as a light source for the
 ## albedo rule below, and as a bloom tier for `standards.md`. 0.5 sits in a real
-## gap: the loudest faint self-lit surface is lane paint at 0.09 and the quietest
-## source is a CBD window band at 1.1.
+## gap: the loudest faint self-lit surface is foliage at 0.05 and the quietest
+## source is `interior_warm` at 0.55. The retroreflective family - lane paint,
+## kerb paint, plate - sits below this line and is deliberately not a source; see
+## `retro` in `_build`.
 const BLOOM_FLOOR := 0.5
 
 ## How far a source's albedo is knocked down. Chosen so the brightest emitter in
@@ -171,8 +173,16 @@ const BLOOM_TIERS: Dictionary = {
 	1.5: {"max_extent_m": 12.0, "roles": ["glass_lit"]},
 	1.1: {"max_extent_m": 40.0, "roles": ["cbd_window"]},
 	0.55: {"max_extent_m": 12.0, "roles": ["interior_warm"]},
-	0.09: {"max_extent_m": 999.0, "roles": ["paint_white", "paint_yellow", "plate"]},
 }
+#
+# There is deliberately no 0.09 tier. It used to hold `paint_white`,
+# `paint_yellow` and `plate` - the retroreflective family - and its whole purpose
+# was to let a lane marking and a licence plate sit on the bloom budget. That was
+# the same category error as their emission, one layer over: a bloom tier is a
+# declaration that a material is a light source, and it is what a consumer reads to
+# decide how far it may scale a lens. A retroreflector has no business in the
+# table, so removing the emission removed the row. `interior_warm` at 0.55 is now
+# the quietest source in the library and foliage at 0.05 the loudest non-source.
 
 
 ## The bloom tier a material sits on, or an empty dictionary if it is not a source.
@@ -203,12 +213,35 @@ const _SPECS: Dictionary = {
 	"surface_asphalt_wet_d": {"role": "asphalt_wet_d", "rough": 1.0, "noise_seed": 14, "speckle": [0.66, 1.0], "normal": 0.34, "uv": 0.0625, "spec": 1.0, "wet": [0.13, 0.18]},
 	"surface_asphalt_dry": {"role": "asphalt_dry", "rough": 0.74, "noise_seed": 15, "speckle": [0.62, 1.0], "normal": 0.42, "uv": 0.08},
 
-	# ---- markings. Emissive, faintly: a night road's paint is the one surface
-	# ---- that has to survive being unlit, and a hint of emission is cheaper
-	# ---- than doubling every streetlight.
-	"paint_white": {"role": "paint_white", "rough": 0.22, "emit": 0.09, "emit_role": "paint_white"},
-	"paint_yellow": {"role": "paint_yellow", "rough": 0.24, "emit": 0.09, "emit_role": "paint_yellow"},
-	"kerb_paint": {"role": "kerb_paint", "rough": 0.46, "emit": 0.0},
+	# ---- markings. Retroreflective, NOT emissive.
+	# ----
+	# ---- These three were `rough: 0.22, emit: 0.09` - a faintly self-lit
+	# ---- mirror - and that is a category error, not a tuning miss. Retroreflection
+	# ---- is light returned *from* a source, near the direction it arrived from.
+	# ---- Emission is light the surface makes itself, from nowhere, in every
+	# ---- direction at once. The two read identically on a lit dash and
+	# ---- oppositely everywhere else: an emissive line is exactly as visible on a
+	# ---- stretch with no lamp as under one, which is the tell that it is a decal.
+	# ---- `World/mat_lib.gd` reached the same conclusion independently and
+	# ---- `artkit/props.gd` already documents it for the sign plates ("a sign
+	# ---- that glows is a lie about the world"), so the kit contradicting its
+	# ---- own neighbours was a real inconsistency, not a house style.
+	# ----
+	# ---- Roughness is the half that actually does the work here. 0.22 is a
+	# ---- near-mirror: a horizontal dash reflects the sky and the lamp heads down
+	# ---- its own length and reads as a strip of chrome. Thermoplastic measures
+	# ---- about 0.55-0.62, and matte is what returns the lamp diffusely - which is
+	# ---- the whole mechanism. So the paint is now matte and carries no emission
+	# ---- at all; a dash brightens as the car comes under a lamp and goes dark
+	# ---- between lamps, which is the behaviour that makes a street readable at
+	# ---- speed.
+	# ----
+	# ---- `retro` is what replaces the emission: it is the flag that says "this
+	# ---- surface returns light toward the viewer", and it drives the specular
+	# ---- below. It is not a light source and never enters a bloom tier.
+	"paint_white": {"role": "paint_white", "rough": 0.58, "retro": 0.52, "spec": 0.34, "wear": 0.13},
+	"paint_yellow": {"role": "paint_yellow", "rough": 0.60, "retro": 0.52, "spec": 0.34, "wear": 0.13},
+	"kerb_paint": {"role": "kerb_paint", "rough": 0.52, "retro": 0.40, "spec": 0.30},
 
 	# ---- concrete. Three values because a kerb, a footpath and a gutter run
 	# ---- side by side and are never the same pour.
@@ -308,7 +341,12 @@ const _SPECS: Dictionary = {
 	"tyre": {"role": "tyre", "rough": 0.92, "spec": 0.18},
 	"car_glass": {"role": "car_glass", "rough": 0.05, "metal": 0.10, "spec": 1.0},
 	"chrome": {"role": "chrome", "rough": 0.08, "metal": 1.0},
-	"plate": {"role": "plate", "rough": 0.35, "emit": 0.09, "emit_role": "plate"},
+	# A plate is the purest retroreflector in the library and it was authored the
+	# same wrong way as the road paint: `emit: 0.09`. A plate that glows is a
+	# plate you can see from directly above with every light off, which is not a
+	# property plates have. It is `retro` at a high value and matte - sheeting is
+	# matte, and the return toward the viewer is the entire point.
+	"plate": {"role": "plate", "rough": 0.44, "retro": 0.62, "spec": 0.38},
 	"contact_shadow": {"role": "night_base", "unshaded_mul": true, "core": 0.18},
 
 	"cbd_glass": {"role": "cbd_glass", "rough": 0.42, "metal": 0.2},
@@ -379,6 +417,48 @@ static func _build(key: String) -> StandardMaterial3D:
 		m.emission_enabled = true
 		m.emission = m.albedo_color
 		m.emission_energy_multiplier = t
+
+	# ## Retroreflection: light returned, not light made
+	#
+	# `retro` is how this library says "this surface returns light toward the
+	# viewer". It exists because the alternative was the mistake this file used to
+	# make on every marking and on the plate: a little emission, standing in for a
+	# physical effect it does not model. Emission has no direction. A dash with
+	# emission on it glows equally whether or not anything is lighting it, which is
+	# precisely why it reads as a decal rather than as paint.
+	#
+	# A real retroreflective surface - glass-bead thermoplastic, the sheeting on a
+	# sign plate or a licence plate - works by returning light back along the axis
+	# it arrived on, so the surface looks brightest to an observer *near the source*
+	# and dims for one standing off to the side. StandardMaterial3D has no
+	# retro-reflective lobe, so this is an approximation and is labelled as one:
+	# `metallic_specular` is raised so the specular lobe is tight and bright rather
+	# than a broad dim sheen, and `roughness` carries the rest. The two knobs pull
+	# against each other - a wide lobe returns more total light but from more
+	# directions, which is the wash this is avoiding - so the value is authored per
+	# material rather than shared.
+	#
+	# What this deliberately does NOT do is set emission. A retroreflector is not a
+	# light source: it never brightens an unlit stretch of road, never appears in
+	# `BLOOM_TIERS`, and never makes the frame's brightest thing a piece of tarmac.
+	# That last one is the ART_DIRECTION.md rule ("saturated colour is a light
+	# source, not a surface") applied to a case the file had been getting backwards:
+	# this is a *desaturated* surface that had been made to emit.
+	if spec.has("retro"):
+		m.metallic_specular = float(spec["retro"])
+
+	# Wear. A wheel track polishes thermoplastic off and rain scours the edges, so a
+	# flat albedo over a 0.12 m x 3 m dash is a rectangle. The ramp is held high
+	# (0.87-1.0) so it adds mottle without halving the value the way raw noise does.
+	if spec.has("wear"):
+		var wseed := int(spec.get("noise_seed", 11)) + 1200
+		m.uv1_scale = Vector3(1.0, 1.0, 1.0)
+		m.uv1_triplanar = true
+		m.albedo_texture = noise_tex(256, 2.4, 4, wseed, false, 0.87, 1.0)
+		var w := float(spec["wear"])
+		m.normal_enabled = true
+		m.normal_texture = noise_tex(256, 3.1, 3, wseed + 18, true)
+		m.normal_scale = w
 
 	# ## An emitter's brightness belongs to emission, never to albedo
 	#
@@ -467,6 +547,25 @@ static func _radial_falloff(core: float) -> GradientTexture2D:
 
 
 # ----------------------------------------------------------------- inspection
+
+## How strongly a key returns light toward the viewer, 0.0 for a material that
+## does not do it. Read from the spec rather than the built material because the
+## intent is the thing worth asserting: a retroreflector that quietly became a
+## light source, or a marking that quietly lost its return, both leave a plausible
+## StandardMaterial3D behind and only the spec says which one it was meant to be.
+static func retro_of(key: String) -> float:
+	if not _SPECS.has(key):
+		return 0.0
+	return float(_SPECS[key].get("retro", 0.0))
+
+
+## True for a surface that returns light rather than making it. The negative
+## direction matters as much as the positive: a retroreflective surface that also
+## emits is a light source wearing a marking's paint, which is the exact defect
+## the `retro` block in `_build` documents.
+static func is_retroreflexive(key: String) -> bool:
+	return retro_of(key) > 0.0
+
 
 ## The albedo a key actually ends up with, or Color(0,0,0,0) if the key is
 ## unknown. The check compares these across the library: N materials that all

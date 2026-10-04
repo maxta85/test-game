@@ -43,9 +43,13 @@ func _init(wallet: Object = null) -> void:
 
 # ------------------------------------------------------------------- lifecycle
 
-## The Cfg autoload, fetched off the scene tree rather than by its bare global
-## name. Autoload identifiers are not registered in a `--script` context, the
-## same trap RaceDirector._money() documents.
+## The Cfg autoload, fetched off the scene tree. The bare `Cfg` identifier would
+## do here too, and does: measured under the suite's `--script` runner,
+## `Cfg` and `root.get_node_or_null("Cfg")` are the same object, which
+## `Tests/test_1economy.gd` asserts so this paragraph cannot rot back into a lie.
+## The path is for the null, not for the name - a `Garage` built before the tree
+## is up comes up with no wallet, and every method below answers 0 or "" rather
+## than crashing. Same reason and same shape as `RaceDirector._money()`.
 static func _autoload() -> Object:
 	var loop := Engine.get_main_loop()
 	return loop.root.get_node_or_null("Cfg") if loop is SceneTree else null
@@ -64,23 +68,9 @@ func _load_profile() -> void:
 	if _cfg.owned_cars.is_empty() and not _cfg.load_game():
 		for c in _cfg.STARTING_CARS:
 			_cfg.buy_car(c, 0)
-	_dedupe_owned()
 	var mine := owned_cars()
 	if not mine.is_empty() and not owns(selected()):
 		_cfg.active_car = String(mine[0])
-
-
-## `Cfg.load_game()` seeds the default cars and then appends the saved list
-## whole, so the two starting cars come back twice - and twice again on the next
-## boot, because the bloated list is what gets saved. Measured: a save holding
-## three cars reads back as five. Deduped here because the garage is the thing
-## that calls `load_game()`.
-func _dedupe_owned() -> void:
-	var seen := {}
-	for c in _cfg.owned_cars.duplicate():
-		if seen.has(c):
-			_cfg.owned_cars.erase(c)
-		seen[c] = true
 
 
 ## Writes the profile. Every mutation ends here, so money, owned cars, upgrades

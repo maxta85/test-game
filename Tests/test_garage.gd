@@ -361,9 +361,10 @@ func _persistence(t: TestHarness) -> void:
 	t.eq(recovered.owned_cars(), ["kairo_s13", "hayate_turbo", "kaze_type_r"],
 		"and the owned list, still without the starting cars doubled")
 
-	# Reading a save twice must not grow the profile. load_game seeds the default
-	# cars and appends the saved list whole, so a save holding three cars reads
-	# back as five - and the garage is the only thing that calls load_game.
+	# Reading a save twice must not grow the profile. `load_game` used to seed the
+	# default cars and then append the saved list whole, so a save holding three
+	# cars read back as five - and again on the next boot, because the bloated
+	# list is what gets written. `Tests/test_1economy.gd` holds that shut too.
 	after.save()
 	_forget_profile()
 	var twice := Garage.new()

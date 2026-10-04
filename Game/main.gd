@@ -45,6 +45,10 @@ var hud: RaceHUD
 var menus: MenuFlow
 var garage: Garage
 var garage_screen: GarageScreen
+## The route, marked on the road. Built per race from the definition the
+## director is running, so the marks and the scoring can never be two different
+## routes.
+var track: TrackMarker
 var _rivals: Array = []
 var player_controller: PlayerController
 var _sun: DirectionalLight3D
@@ -155,6 +159,10 @@ func _open_menus() -> void:
 	hud.name = "RaceHUD"
 	add_child(hud)
 	hud.visible = false
+	# The map, off the same graph the streets are built from, so the shape on it
+	# is the shape under the car rather than a picture of somewhere else.
+	hud.minimap.set_graph(graph)
+
 	_wire_audio()
 
 
@@ -222,8 +230,24 @@ func _on_race_start_requested(race_id: String) -> void:
 	# what a visible menu board does with it.
 	menus.close()
 	hud.visible = true
+	_mark_the_route(d)
 	print("[Race] %s: %s, %d laps, %.0f m of street" % [
 		d.display_name, d.kind_name(), d.laps, d.length_m(graph)])
+
+
+## Puts the route on the road and on the map.
+##
+## Both read the one definition the director is scoring on, and the map is fed
+## the marker's own polyline rather than re-deriving it from the junction list -
+## so the line on the minimap is the line the barriers are built along, and the
+## two cannot drift apart.
+func _mark_the_route(d: RaceDef) -> void:
+	if track == null:
+		track = TrackMarker.new()
+		track.name = "TrackMarker"
+		add_child(track)
+	track.build(graph, d)
+	hud.minimap.set_route(track.route_points(), d.closed)
 
 
 ## The player is entrant 0, which is what the director treats as "the race is
@@ -253,6 +277,11 @@ func _conclude_if_over() -> void:
 		return
 	_results_shown = true
 	hud.visible = false
+	# The route stops being a race route the moment the race is over; the street
+	# goes back to being a street, and the map with it.
+	if track != null:
+		track.clear()
+	hud.minimap.clear()
 	Cfg.save_game()
 	menus.show_results(race)
 
