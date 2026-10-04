@@ -55,54 +55,20 @@ static func stats() -> Dictionary:
 	return data().get("stats", {})
 
 
-static func _run_length(pts: PackedVector2Array) -> float:
-	var total := 0.0
-	for i in pts.size() - 1:
-		total += pts[i].distance_to(pts[i + 1])
-	return total
-
-
-## Middle of the network, in metres.
-static func _centre() -> Vector2:
-	var lo := Vector2(INF, INF)
-	var hi := Vector2(-INF, -INF)
-	for c in corridors():
-		for p in c["points"]:
-			lo = Vector2(minf(lo.x, p.x), minf(lo.y, p.y))
-			hi = Vector2(maxf(hi.x, p.x), maxf(hi.y, p.y))
-	return (lo + hi) * 0.5
-
-
-## The anchor street's centreline run: the arterial whose midpoint is nearest the
-## middle of the network, among arterials long enough to race on.
+## The anchor street's centreline run. The rule lives in World/anchor_choice.gd
+## because it is a decision about the city, not a projection detail: the anchor is
+## the street the race network starts on, so the free-roam grid and the grid
+## RaceDirector builds from the route are the same piece of road. It used to be
+## "the arterial nearest the middle of the bounding box", which any outlying
+## corridor could move - Gordon Street in Earlville moved it 300 m and handed the
+## anchor to Alfred Street. Tools/diag_osm.gd prints both rules side by side.
 ##
-## "Longest arterial" is the obvious pick and it is wrong here. In this fetch the
-## longest is Hoare Street, 1408 m, but its midpoint sits 1019 m from the centre
-## of the city - a start line anchored to it opens the race in an empty corner.
-## Measured across the candidates, Aumuller Street wins on both counts: 825 m of
-## real arterial 553 m from the middle. See Tools/diag_osm.gd, which prints the
-## candidate table this rule is derived from.
-const MIN_ANCHOR_LEN := 200.0
-
-## { name: String, pts: PackedVector2Array } for the chosen street, or {}.
+## Returns { name, pts } as before, so every caller is unaffected.
 static func anchor() -> Dictionary:
-	var mid := _centre()
-	var best := {}
-	var best_score := INF
-	for c in corridors():
-		if int(c["class"]) < RoadGraph.RoadClass.ARTERIAL:
-			continue
-		var pts: PackedVector2Array = c["points"]
-		if pts.size() < 2 or _run_length(pts) < MIN_ANCHOR_LEN:
-			continue
-		var centre_of_run: Vector2 = (pts[0] + pts[pts.size() - 1]) * 0.5
-		# Nearest first; length breaks ties, so two equally central arterials
-		# resolve to the longer one.
-		var score: float = centre_of_run.distance_to(mid) - _run_length(pts) * 0.01
-		if score < best_score:
-			best_score = score
-			best = {"name": String(c["name"]), "pts": pts}
-	return best
+	var pick: Dictionary = AnchorChoice.pick(corridors())
+	if pick.is_empty():
+		return {}
+	return {"name": String(pick["name"]), "pts": pick["pts"]}
 
 
 ## Midpoint of the anchor street and the direction of travel there, as

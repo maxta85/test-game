@@ -446,6 +446,10 @@ func _measure(img: Image, spec: Dictionary) -> Dictionary:
 		"paint": LookMeasure.measure_band(img, p.position.x, p.position.y,
 			p.position.x + p.size.x, p.position.y + p.size.y),
 		"covered_m": float(spec["run_m"]),
+		# What the pose actually walked, for the poses that walk. A pose that
+		# reports 90 m of run it was not looking at is how the 500 m gate came to
+		# be satisfied by two frames of a wall and a field.
+		"achieved_m": float(spec.get("achieved_m", spec["run_m"])),
 	}
 
 

@@ -485,6 +485,62 @@ func _check_geometry() -> void:
 		tall = tall or h > 6.0
 	_ok(tall, "a walk-up block is over 6 m tall")
 
+	# A shopfront sign is a fascia, not a bar. This is a regression guard rather
+	# than a style opinion. `qld_shop` used to hang a 0.52 m x 3.5-6.0 m emissive
+	# panel 1.04 m in front of the facade with nothing under it, in a colour rolled
+	# per building out of three saturated neons and `lamp_lens`; at night that
+	# read as a tall glowing bar standing BESIDE the shop, dozens of them along an
+	# arterial, rather than a sign ON it. Parts are welded per material, so the
+	# geometry is the only place the proportion is visible - no palette check, no
+	# reachability check and no triangle budget can see it.
+	#
+	# `qld_shop` is the only building that lights a sign with these keys (the
+	# industrial shed's `lamp_lens_cool` is a wall pack, and this iterates shops
+	# only), which is what lets them be named here.
+	var sign_faces := ["sign_face_lit", "lamp_lens_cool", "neon_cyan", "neon_magenta", "neon_red"]
+	var neons := ["neon_cyan", "neon_magenta", "neon_red"]
+	var bar_shaped: Array[String] = []
+	var upright: Array[String] = []
+	var accents := {}
+	var signs := 0
+	for i in ArtKitBuildings.HOUSE_VARIANTS:
+		for p in ArtKitBuildings.variant("qld_shop", i):
+			if not sign_faces.has(p.mat):
+				continue
+			signs += 1
+			if neons.has(p.mat):
+				accents[p.mat] = int(accents.get(p.mat, 0)) + 1
+			var a: AABB = p.mesh.get_aabb()
+			if a.size.y > 1.30:
+				bar_shaped.append("%d %s %.2f m tall" % [i, p.mat, a.size.y])
+			if a.size.x < a.size.y * 2.0:
+				upright.append("%d %s %.2f x %.2f" % [i, p.mat, a.size.x, a.size.y])
+	_ok(signs == ArtKitBuildings.HOUSE_VARIANTS,
+			"every shop design carries exactly one sign (%d of %d)"
+			% [signs, ArtKitBuildings.HOUSE_VARIANTS])
+	_ok(bar_shaped.is_empty(), "no shop sign is taller than 1.30 m", str(bar_shaped))
+	_ok(upright.is_empty(), "every shop sign is at least twice as wide as it is tall",
+			str(upright))
+	# "signage only, and sparingly" - the accents are a minority, and all three
+	# documented neon roles stay in play so none of them becomes an unused role.
+	var one_each := accents.size() == 3
+	for k in accents:
+		one_each = one_each and int(accents[k]) == 1
+	_ok(one_each, "one of each neon accent across the variant set, and no more (%s)"
+			% str(accents))
+	# A wide flat emitter is judged on energy TIMES AREA, not on its energy
+	# setting, and every knob here moves that product: a wider fascia, a taller
+	# one, or the same panel at `lamp_lens_cool`'s 5.0 each push clipping up
+	# while every individual number still looks reasonable. Capping the product
+	# is the only assertion that survives all three.
+	var fascia := 0.0
+	for p in ArtKitBuildings.variant("qld_shop", 0):
+		if p.mat == "sign_face_lit":
+			fascia = ArtKitMaterials.emission_energy_of(p.mat) * p.mesh.get_aabb().size.x \
+					* p.mesh.get_aabb().size.y
+	_ok(fascia > 0.0 and fascia <= 10.0,
+			"the shop sign fascia stays under 10 of energy x m2 (got %.2f)" % fascia)
+
 	# The OSM path: a rectangle, an L, and a degenerate polygon.
 	var rect := PackedVector2Array([Vector2(0, 0), Vector2(12, 0), Vector2(12, 9), Vector2(0, 9)])
 	var ell := PackedVector2Array([Vector2(0, 0), Vector2(14, 0), Vector2(14, 8),
