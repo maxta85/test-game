@@ -68,7 +68,96 @@ const RESI_EYE_DETAIL := 1.65
 ## lives in. The detail pose takes the longest frontage inside this band instead.
 const RESI_HOUSE_SPAN := Vector2(7.0, 14.0)
 
+## ---------------------------------------------------------------------------
+## NIGHT VARIANTS: the before picture and the night pass, in ONE world build
+## ---------------------------------------------------------------------------
+##
+## `--night base,optics,probe,sdfgi_far,sdfgi_near` renders every pose once per
+## variant with the camera, the world and the menu state held identical, which is
+## the only night comparison that means anything here: a night look is a
+## whole-frame claim, and two runs that boot the world separately are two
+## different frames (the reason this harness exists in the first place).
+##
+## The variants are CUMULATIVE and ordered, so nothing has to be undone: each step
+## adds one decision and the last entries are the shipped configuration. `base` is
+## the tree exactly as `integration` ships it - `NightPass.pending` disables the
+## install before `Game/main.tscn` is instantiated, so the before picture is not
+## "the layer with everything switched off", it is "no layer".
+##
+## `sdfgi_near` exists to be measured and rejected. It is the configuration the
+## brief literally asks for - global illumination from the camera outwards at
+## Godot's own default energy - and it is in this list precisely so the report can
+## show what it costs instead of asserting that it would cost too much.
+##
+## Each variant is a COMPLETE option set rather than a single delta, because the
+## two optics numbers (cone width, aim) are properties of a light that has already
+## been converted and can be re-set freely, while the conversion itself cannot be
+## undone. Cumulative-per-step and full-option-set are the same thing here, and the
+## full set is the one that cannot silently inherit a previous row.
+const NIGHT_VARIANTS := {
+	"base": {"enabled": false},
+	# Cone width at a steep aim: the "does a narrow cone put the flux back on the
+	# road" row. The 96 deg version is in `NIGHT_VARIANTS_HISTORY` below because it
+	# is the measurement that chose this one.
+	"c65": {"enabled": true, "optics": true, "spot_cone": 65.0, "spot_aim_t": 0.45,
+		"probe_follow": false, "sdfgi_energy": 0.0},
+	"c65_probe": {"enabled": true, "optics": true, "spot_cone": 65.0, "spot_aim_t": 0.45,
+		"probe_follow": true, "sdfgi_energy": 0.0},
+	# Aim at the centreline instead of inboard of it: isolates the aim from the cone.
+	"c65_t100_probe": {"enabled": true, "optics": true, "spot_cone": 65.0, "spot_aim_t": 1.0,
+		"probe_follow": true, "sdfgi_energy": 0.0},
+	# A wider cone at the same aim: isolates the cone from the aim.
+	"c96_t45_probe": {"enabled": true, "optics": true, "spot_cone": 96.0, "spot_aim_t": 0.45,
+		"probe_follow": true, "sdfgi_energy": 0.0},
+	# SDFGI on the winner, near-field-excluded. Present so the decision to ship it
+	# OFF is a measurement in this file rather than an assertion in a comment.
+	"c65_probe_sdfgi_far": {"enabled": true, "optics": true, "spot_cone": 65.0,
+		"spot_aim_t": 0.45, "probe_follow": true, "sdfgi_energy": 1.0, "sdfgi_near": 120.0},
+	# And the configuration the brief asks for literally: global illumination from
+	# the camera outwards at Godot's default energy.
+	"c65_probe_sdfgi_near": {"enabled": true, "optics": true, "spot_cone": 65.0,
+		"spot_aim_t": 0.45, "probe_follow": true, "sdfgi_energy": 1.0, "sdfgi_near": 5.0},
+	# Added by t185 to test the CAUSE of the far-walk darkening rather than just
+	# its existence: identical to `c65_probe_sdfgi_far` except the sky is not read
+	# into the cascades. If the far road recovers here, the darkening was
+	# `sdfgi_read_sky_light` importing `#0a0d16` into a 120-1920 m volume with no
+	# bounce feedback to replace it, and SDFGI-as-shipped is a near-black ambient
+	# rather than the horizon glow the layer's own docstring claims it is.
+	"c65_probe_sdfgi_nosky": {"enabled": true, "optics": true, "spot_cone": 65.0,
+		"spot_aim_t": 0.45, "probe_follow": true, "sdfgi_energy": 1.0, "sdfgi_near": 120.0,
+		"sdfgi_read_sky": false},
+}
+
+## The first sweep's rows, kept because they are the argument for the rows above.
+## Measured on this same harness, same world build, same six poses; the numbers are
+## reproduced in `/tmp/reports/t185-night-pass.md`.
+##
+##     variant       kerb road mean  kerb road clip  street detail  junction detail
+##     base (omni)        88.47           7.14%            1.94           1.57
+##     cone 96 aim .62    81.67           6.63%            1.66           1.46
+##     + probe follow     83.70           7.37%            2.22           1.66
+##     + sdfgi far        80.60           6.72%            2.13           1.44
+##     + sdfgi near       80.64           6.72%            2.14           1.43
+##
+## Reading: the 96 deg cone lost 8% of the kerb road luma and 14% of the street
+## detail - a wide cone is a wide DIM wash. Probe-follow bought detail back and more
+## (+34% on the street). Both SDFGI rows made every road darker with no detail to
+## show for it.
+const NIGHT_VARIANTS_HISTORY := ["base", "optics(96/.62)", "optics+probe",
+	"optics+probe+sdfgi_far", "optics+probe+sdfgi_near"]
+
+## Frames to run after a variant is applied, before its first pose. The reflection
+## probe renders a cubemap per frame and SDFGI re-probes its cascades, so a pose
+## grabbed two frames after a change is a frame of a half-converged render - which
+## is exactly the kind of thing that reads as "the change did nothing".
+const VARIANT_SETTLE := 14
+
 var _resi: Dictionary = {}
+
+## The booted game, for the census and the light budget. A field rather than a
+## parameter because both the shoot loop and the census need it and threading it
+## through every helper is how a helper ends up measuring a different tree.
+var main_root: Node = null
 
 
 func _initialize() -> void:
@@ -78,6 +167,7 @@ func _initialize() -> void:
 	var settle := 10
 	var only := ""
 	var remeasure := false
+	var night := ""
 	var i := 0
 	while i < args.size():
 		match String(args[i]):
@@ -89,11 +179,28 @@ func _initialize() -> void:
 				settle = int(args[i + 1]); i += 2
 			"--only":
 				only = String(args[i + 1]); i += 2
+			"--night":
+				night = String(args[i + 1]); i += 2
 			"--measure":
 				remeasure = true; i += 1
 			_:
 				i += 1
 	DirAccess.make_dir_recursive_absolute(out)
+
+	# The variant list is validated BEFORE ten minutes of world build, and an
+	# unknown name is a hard failure rather than a silently skipped variant: a
+	# sweep that quietly rendered four of five rows is how a report ends up
+	# claiming a measurement that was never taken.
+	var sweep := night != ""
+	var variants: Array = []
+	if sweep:
+		variants = night.split(",", false)
+		for v in variants:
+			if not NIGHT_VARIANTS.has(String(v)):
+				push_error("[LookDev] unknown night variant '%s'; known: %s" % [
+					String(v), ", ".join(PackedStringArray(NIGHT_VARIANTS.keys()))])
+				quit(2)
+				return
 
 	var g := RoadGraph.new()
 	g.build(OSMLayout.corridors())
@@ -122,7 +229,15 @@ func _initialize() -> void:
 		return
 
 	print("[LookDev] booting world (settle=%d frames)" % settle)
+	# The first variant has to be decided BEFORE the world exists, because
+	# `WorldBuilder.build()` installs the night layer as its last step. `base`
+	# therefore has to suppress the install, not switch it off afterwards.
+	if sweep:
+		NightPass.pending = _variant_opts(String(variants[0]))
+		print("[LookDev] first night variant is '%s' -> %s" % [
+			String(variants[0]), JSON.stringify(NightPass.pending)])
 	var main: Node = load("res://Game/main.tscn").instantiate()
+	main_root = main
 	root.add_child(main)
 	for f in settle:
 		await process_frame
@@ -156,6 +271,47 @@ func _initialize() -> void:
 	# clock leaves the renderer running, which is the part that has to happen.
 	Engine.time_scale = 0.0
 
+	if sweep:
+		var summary: Array = []
+		for vi in variants.size():
+			var v := String(variants[vi])
+			if vi > 0:
+				_apply_variant(main, v)
+				for f in VARIANT_SETTLE:
+					await process_frame
+				await RenderingServer.frame_post_draw
+			_print_census(v, main)
+			var rtag := "%s-%s" % [tag, v]
+			var shot: Array = await _shoot_poses(cam, poses, at, fwd, side, g, out, rtag)
+			_write_report(shot, out, rtag)
+			var bad := LookMeasure.failures(LookMeasure.checks(shot))
+			print("[Night] %-11s %d pose(s), %d rubric failure(s)" % [v, shot.size(), bad.size()])
+			for c in bad:
+				print("           FAIL [%s] %s: %s %.4f limit %.4f" % [String(c["rubric"]),
+					String(c["name"]), String(c["got_label"]), float(c["got"]), float(c["limit"])])
+			summary.append({"variant": v, "poses": shot.size(), "failures": bad.size(),
+				"census": NightPass.census_of(main)})
+		var f2 := FileAccess.open("%s/%s-night.json" % [out, tag], FileAccess.WRITE)
+		f2.store_string(JSON.stringify({"variants": summary}, "  "))
+		f2.close()
+		print("[LookDev] wrote %s/%s-night.json" % [out, tag])
+	else:
+		var solo: Array = await _shoot_poses(cam, poses, at, fwd, side, g, out, tag)
+		_write_report(solo, out, tag)
+
+	Engine.time_scale = 1.0
+	quit(0)
+
+
+## One pass over the pose list, same camera discipline as it has always had.
+##
+## Split out of `_initialize` so the night sweep and the ordinary run go through
+## exactly the same code: a before/after pair produced by two different capture
+## paths is two different captures, which is the mistake this whole harness is
+## built to rule out.
+func _shoot_poses(cam: Camera3D, poses: Array, at: Vector3, fwd: Vector3, side: Vector3,
+		g: RoadGraph, out: String, tag: String) -> Array:
+	var pts: Array = []
 	for pose in poses:
 		var spec: Dictionary = _pose_spec(String(pose), at, fwd, side, g)
 		cam.global_position = spec["at"]
@@ -176,11 +332,55 @@ func _initialize() -> void:
 			pose, str(spec["at"].round()), str(cam.global_position.round()),
 			str(cam.current), float(spec["fov"]), str(spec.get("street", "")),
 			float(spec.get("run_m", 0.0)), path])
+		# The light actually standing where this camera is standing. A frame can be
+		# dark for two opposite reasons - nothing is lighting it, or nothing in it
+		# is emitting - and only one of those is a night-layer bug.
+		var bud: Dictionary = NightPass.budget_near(main_root, cam.global_position)
 		print("           %s" % JSON.stringify(m))
+		print("           light at camera: %d standard(s) inside %.0f m, flux %.0f, nearest %.1f m, %d above eye" % [
+			int(bud["standards_in_range"]), Look.STREETLIGHT_RANGE, float(bud["flux"]),
+			float(bud["nearest"]), int(bud["above_eye"])])
+	return pts
 
-	Engine.time_scale = 1.0
-	_write_report(pts, out, tag)
-	quit(0)
+
+## Apply a named variant to a booted game, installing the layer on the first
+## variant that wants it. `NightPass.pending` is left alone afterwards so a
+## variant can never leak into the next one through the static.
+func _apply_variant(main: Node, v: String) -> void:
+	var o := _variant_opts(v)
+	var world := main.get_node_or_null("World") as Node3D
+	if world == null:
+		push_error("[LookDev] night variant '%s': no World node to install into" % v)
+		return
+	var np: NightPass = NightPass._find_pass(main)
+	if o.get("enabled", true) and np == null:
+		NightPass.pending = o
+		np = NightPass.install(world)
+	elif np != null:
+		var opts := o.duplicate(true)
+		opts.erase("enabled")
+		np.apply(opts)
+	print("[Night] applied '%s' -> %s" % [v, JSON.stringify(NightPass.census_of(main))])
+
+
+func _variant_opts(v: String) -> Dictionary:
+	return (NIGHT_VARIANTS[v] as Dictionary).duplicate(true)
+
+
+## The lamp census, printed before the variant's frames. This is the inventory: what
+## the night is made of, and what it was one step ago.
+func _print_census(v: String, main: Node) -> void:
+	var c: Dictionary = NightPass.census_of(main)
+	print("[Night] census %-11s standards %d (%d road-aimed spots, cone %.0f-%.0f deg, tilt %.0f-%.0f deg, %d still omni) junction %d other-omni %d other-spots %d energy-sum %.0f" % [
+		v, int(c["standards"]), int(c["standards_spot"]), float(c["cone_min"]),
+		float(c["cone_max"]), float(c["tilt_min"]), float(c["tilt_max"]),
+		int(c["standard_omni"]), int(c["junction"]), int(c["other_omni"]),
+		int(c["spots"]), float(c["standard_energy_sum"])])
+	print("           probe %s follow=%s | sdfgi %s energy %.2f span %.0f-%.0f m | ambient %.2f exposure %.2f" % [
+		str(c.get("probe_pos", null)), str(c.get("probe_follow", false)),
+		str(c.get("sdfgi", false)), float(c.get("sdfgi_energy", 0.0)),
+		float(c.get("sdfgi_cascade0", 0.0)), float(c.get("sdfgi_max", 0.0)),
+		float(c.get("ambient", 0.0)), float(c.get("exposure", 0.0))])
 
 
 ## The camera the viewport is actually drawing with, in preference to the first
@@ -666,6 +866,14 @@ func _hide_ui(n: Node) -> void:
 			(c as CanvasItem).visible = false
 		else:
 			_hide_ui(c)
+
+
+
+
+
+
+
+
 
 
 
