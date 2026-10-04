@@ -1,0 +1,153 @@
+{
+  "axes": "+Y up, +Z out of the wall a piece fixes to, +X along the run",
+  "pieces": [
+    {
+      "aabb_max": [
+        0.665000021457672,
+        0.575000047683716,
+        0.0300000011920929
+      ],
+      "aabb_min": [
+        -0.66500002145767,
+        -0.75499999523163,
+        -0.09000000357628
+      ],
+      "archetype": "qld_house",
+      "fasten": "centre of the opening, in the outside face plane of the wall; +Z out of the wall",
+      "file": "res://assets/kits/kit_window_sash.glb",
+      "node": "kit_window_sash",
+      "roles": [
+        "timber",
+        "glass_dark"
+      ],
+      "sil_feature": "the 1.15 m frame band across the opening",
+      "sil_gate": "PASS",
+      "sil_m": 1.15,
+      "triangles": 116,
+      "vertices": 232
+    },
+    {
+      "aabb_max": [
+        4.19999980926514,
+        0.169999957084656,
+        3.90000009536743
+      ],
+      "aabb_min": [
+        -4.19999980926514,
+        -1.9099999666214,
+        -3.90000009536743
+      ],
+      "archetype": "qld_house,qld_shop,industrial_shed,walk_up_block",
+      "fasten": "midpoint of the ridge, on the ridge axis; ridge runs along +X, eaves at -RIDGE_H",
+      "file": "res://assets/kits/kit_roof_gable.glb",
+      "node": "kit_roof_gable",
+      "roles": [
+        "roof_iron"
+      ],
+      "sil_feature": "the 0.90 m eave overhang on both long sides, plus the 1.75 m ridge",
+      "sil_gate": "PASS",
+      "sil_m": 0.9,
+      "triangles": 53,
+      "vertices": 109
+    },
+    {
+      "aabb_max": [
+        4.19999980926514,
+        0.169999957084656,
+        3.90000009536743
+      ],
+      "aabb_min": [
+        -4.19999980926514,
+        -1.9099999666214,
+        -3.90000009536743
+      ],
+      "archetype": "qld_house,qld_shop",
+      "fasten": "midpoint of the ridge, on the ridge axis; ridge runs along +X, hipped both ends",
+      "file": "res://assets/kits/kit_roof_hip.glb",
+      "node": "kit_roof_hip",
+      "roles": [
+        "roof_iron"
+      ],
+      "sil_feature": "the 0.90 m eave overhang plus four slopes; reads hipped from any corner",
+      "sil_gate": "PASS",
+      "sil_m": 0.9,
+      "triangles": 84,
+      "vertices": 170
+    },
+    {
+      "aabb_max": [
+        0.110000133514404,
+        0,
+        0.245500013232231
+      ],
+      "aabb_min": [
+        -4,
+        -3.85500001907349,
+        -0.01999999955297
+      ],
+      "archetype": "qld_house,qld_shop",
+      "fasten": "the gutter's fixing line at y=0 on the fascia plane z=0, at the outlet end (x=0)",
+      "file": "res://assets/kits/kit_gutter_downpipe.glb",
+      "node": "kit_gutter_downpipe",
+      "roles": [
+        "steel_galv"
+      ],
+      "sil_feature": "the gutter run itself; the downpipe is a vertical rhythm line, not an outline",
+      "sil_gate": "UNDER-30cm",
+      "sil_m": 0.15,
+      "triangles": 234,
+      "vertices": 492
+    },
+    {
+      "aabb_max": [
+        0.670000076293945,
+        2.40000009536743,
+        2.45000004768372
+      ],
+      "aabb_min": [
+        -0.73000001907349,
+        0,
+        0
+      ],
+      "archetype": "qld_house",
+      "fasten": "frontage wall plane x=0 z=0 at grade: the datum a fitter sights off. The post stands forward on the deck edge at z=1.45",
+      "file": "res://assets/kits/kit_frontage_step_post.glb",
+      "node": "kit_frontage_step_post",
+      "roles": [
+        "timber"
+      ],
+      "sil_feature": "the 1.45 m veranda deck line at 1.10 m, its corner post, and the step flight projecting 1.00 m past it",
+      "sil_gate": "PASS",
+      "sil_m": 1.45,
+      "triangles": 138,
+      "vertices": 276
+    },
+    {
+      "aabb_max": [
+        2,
+        1.74800002574921,
+        0.100000001490116
+      ],
+      "aabb_min": [
+        -2,
+        0,
+        -0.10000000149012
+      ],
+      "archetype": "qld_house",
+      "fasten": "base of the leading post at y=0, on the fence line; the module runs +X over 4 m",
+      "file": "res://assets/kits/kit_fence_paling_gateling.glb",
+      "node": "kit_fence_paling_gateling",
+      "roles": [
+        "timber_dark"
+      ],
+      "sil_feature": "the 4 m paling module and the 1.28 m gateling bay's spear tops",
+      "sil_gate": "PASS",
+      "sil_m": 4,
+      "triangles": 432,
+      "vertices": 904
+    }
+  ],
+  "schema": "house-kit/1",
+  "sil_min_m": 0.3,
+  "units": "metre"
+}
