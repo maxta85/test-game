@@ -132,9 +132,10 @@ func _initialize() -> void:
 		# Print where the camera *ended up*, not where it was asked to go: the
 		# gap between those two numbers is the whole class of bug this harness
 		# exists to rule out, and it is invisible in the picture.
-		print("[LookDev] %s  asked=%s got=%s current=%s fov=%.0f  -> %s" % [
+		print("[LookDev] %s  asked=%s got=%s current=%s fov=%.0f street=%s run_m=%.0f -> %s" % [
 			pose, str(spec["at"].round()), str(cam.global_position.round()),
-			str(cam.current), float(spec["fov"]), path])
+			str(cam.current), float(spec["fov"]), str(spec.get("street", "")),
+			float(spec.get("run_m", 0.0)), path])
 		print("           %s" % JSON.stringify(m))
 
 	Engine.time_scale = 1.0
@@ -261,14 +262,22 @@ func _pose_spec(pose: String, at: Vector3, fwd: Vector3, side: Vector3, g: RoadG
 			# 1.000 - because there was no road in it to measure. So the pose is
 			# built from the edge the camera actually lands on and looks at that
 			# street's far junction.
+			#
+			# But `nearest_road` is not enough, and that was measured too. It snaps
+			# to the nearest edge *of any street*, so at 500 m the straight-line
+			# point came back `lateral=68.07 edge=238 len=58` - 68 m off the
+			# arterial, on a different 58 m residential street - and at 0 m it came
+			# back `lateral=8.86` on a 14 m road, i.e. 1.9 m outside the kerb. The
+			# chain walk below follows the anchor's own connected edges instead, so
+			# every walk pose is on the anchor street by construction.
 			var k := int(pose.replace("walk", ""))
 			var back: float = WALK_BACK_M[clampi(k - 1, 0, WALK_BACK_M.size() - 1)]
-			var snap := g.nearest_road(at - fwd * back)
-			var base: Vector3 = snap["point"]
-			var eid := int(snap["edge"])
-			if eid >= 0:
-				var na: Vector2 = g.node_pos(int(g.edges[eid]["a"]))
-				var nb: Vector2 = g.node_pos(int(g.edges[eid]["b"]))
+			var walk := _walk_along(g, at, back)
+			var base: Vector3 = walk["point"]
+			var weid := int(walk["edge"])
+			if weid >= 0:
+				var na: Vector2 = g.node_pos(int(g.edges[weid]["a"]))
+				var nb: Vector2 = g.node_pos(int(g.edges[weid]["b"]))
 				var toward_a: float = base.distance_squared_to(
 					Vector3(na.x, base.y, na.y))
 				var far: Vector2 = nb if toward_a > base.distance_squared_to(
@@ -277,15 +286,17 @@ func _pose_spec(pose: String, at: Vector3, fwd: Vector3, side: Vector3, g: RoadG
 					Vector3(nb.x, base.y, nb.y)) else nb
 				var d := (base - Vector3(near.x, 0.0, near.y))
 				d = d.normalized() if d.length() > 0.1 else -fwd
-				out = {"at": base - d * 18.0 + Vector3(0.0, 2.2, 0.0),
+				out = {"at": base - d * 18.0 + Vector3(0.0, 2.4, 0.0),
 					"look": Vector3(far.x, 1.0, far.y), "fov": 55.0,
 					"run_m": 90.0,
+					"street": walk["name"],
 					"road": Rect2(0.10, 0.78, 0.80, 0.16),
 					"paint": Rect2(0.28, 0.70, 0.44, 0.08)}
 			else:
-				out = {"at": at - fwd * back + Vector3(0.0, 2.2, 0.0),
+				out = {"at": at - fwd * back + Vector3(0.0, 2.4, 0.0),
 					"look": at + fwd * 60.0 + Vector3(0.0, 1.0, 0.0), "fov": 55.0,
 					"run_m": 0.0,
+					"street": "",
 					"road": Rect2(0.10, 0.78, 0.80, 0.16),
 					"paint": Rect2(0.28, 0.70, 0.44, 0.08)}
 	# Every branch above replaces `out` wholesale, which is how the pose name got
@@ -293,7 +304,116 @@ func _pose_spec(pose: String, at: Vector3, fwd: Vector3, side: Vector3, g: RoadG
 	# six poses came back as `{}` - a report that measured nothing and looked
 	# like a report that passed. Stamp it on once, here, where it cannot be lost.
 	out["name"] = pose
+	# Stamp the street every pose is on, in one place, so the log line can claim
+	# it instead of the report having to be trusted. A pose spec that says
+	# nothing about which street it is on is a pose spec that can silently be
+	# somewhere else - which is exactly what `nearest_road` did at 500 m.
+	if String(out.get("street", "")) == "":
+		var se := int(g.nearest_road(out["at"] as Vector3)["edge"])
+		out["street"] = String(g.edges[se].get("name", "")) if se >= 0 and se < g.edges.size() else ""
 	return out
+
+
+## Walk `back_m` back along the anchor street's OWN edge chain and return where
+## that lands. `nearest_road` is the wrong tool for this because it answers
+## "what is the closest edge of any street", which is how a pose that is meant
+## to be 500 m down a 4-lane arterial ended up 68 m sideways on a 58 m
+## residential street.
+##
+## From the anchor edge's near end, repeatedly take the incident edge that best
+## continues the current heading, and stop when the street turns too hard to be
+## the same street any more (`MIN_CONTINUE_DOT`) or the budget runs out. Every
+## hop is a real connected edge, so the answer is on the anchor by construction
+## rather than by hoping the nearest street is the right one.
+const MIN_CONTINUE_DOT := 0.55
+const MAX_CHAIN_HOPS := 64
+
+
+func _walk_along(g: RoadGraph, at: Vector3, back_m: float) -> Dictionary:
+	var snap := g.nearest_road(at)
+	var eid := int(snap["edge"])
+	if eid < 0 or eid >= g.edges.size():
+		return {"point": at, "edge": -1, "name": ""}
+	var base: Vector3 = snap["point"]
+	var na: Vector2 = g.node_pos(int(g.edges[eid]["a"]))
+	var nb: Vector2 = g.node_pos(int(g.edges[eid]["b"]))
+	# Stand on the end of the anchor edge that is behind `at`, and head away
+	# from `at`. Everything after this follows real edges.
+	var to_a: float = base.distance_squared_to(Vector3(na.x, base.y, na.y))
+	var to_b: float = base.distance_squared_to(Vector3(nb.x, base.y, nb.y))
+	var cur: int = int(g.edges[eid]["a"]) if to_a < to_b else int(g.edges[eid]["b"])
+	var far_node: int = int(g.edges[eid]["b"]) if to_a < to_b else int(g.edges[eid]["a"])
+	var cur_pos: Vector2 = g.node_pos(cur)
+	var heading: Vector2 = (cur_pos - Vector2(base.x, base.z)).normalized()
+	if heading.length() < 0.1:
+		heading = Vector2(base.x, base.z) - cur_pos
+		heading = heading.normalized() if heading.length() > 0.1 else Vector2(1.0, 0.0)
+	var from_eid := eid
+	var want_street := String(g.edges[eid].get("name", ""))
+	var left := back_m
+	var last_from: Vector2 = cur_pos
+	var last_to: Vector2 = cur_pos
+	var last_len := 1.0
+	var last_eid := eid
+	var hops := 0
+	while left > 0.0 and hops < MAX_CHAIN_HOPS:
+		hops += 1
+		var best := -1
+		var best_dot := MIN_CONTINUE_DOT
+		for cand in g.nodes[cur]["edges"]:
+			var ce := int(cand)
+			if ce == from_eid or ce < 0 or ce >= g.edges.size():
+				continue
+			# Same street or nothing. A heading test alone is not enough: measured
+			# with it, the 500 m pose wandered onto a side street 434 m from the
+			# anchor, because at every junction it just took the best-aligned edge
+			# and a side street off a bend can be perfectly aligned for one hop.
+			# The name is what makes "still on the anchor street" a fact.
+			var cn := String(g.edges[ce].get("name", ""))
+			if want_street != "" and cn != "" and cn != want_street:
+				continue
+			var ca: int = int(g.edges[ce]["a"])
+			var cb: int = int(g.edges[ce]["b"])
+			var other: int = cb if ca == cur else ca
+			if other < 0 or other == cur:
+				continue
+			var op: Vector2 = g.node_pos(other)
+			var dir := op - cur_pos
+			var l := dir.length()
+			if l < 1.0:
+				continue
+			var d: float = (dir / l).dot(heading)
+			if d > best_dot:
+				best_dot = d
+				best = ce
+		if best < 0:
+			break
+		var ba: int = int(g.edges[best]["a"])
+		var bb: int = int(g.edges[best]["b"])
+		var other2: int = bb if ba == cur else ba
+		var op2: Vector2 = g.node_pos(other2)
+		var seg := op2 - cur_pos
+		var seg_len := seg.length()
+		if seg_len < 1.0:
+			break
+		last_from = cur_pos
+		last_to = op2
+		last_len = seg_len
+		last_eid = best
+		heading = seg / seg_len
+		left -= seg_len
+		cur = other2
+		cur_pos = op2
+		far_node = cur
+		from_eid = best
+	# Slide the leftover budget along the last real segment so the camera lands
+	# at the requested distance instead of at the previous junction.
+	var t := 1.0
+	if left > 0.0 and last_len > 0.0:
+		t = clampf(1.0 - left / last_len, 0.0, 1.0)
+	var pt: Vector2 = last_from.lerp(last_to, t)
+	return {"point": Vector3(pt.x, base.y, pt.y), "edge": last_eid,
+		"name": String(g.edges[last_eid].get("name", ""))}
 
 
 ## The first three-way junction ahead of `at` along `fwd`, or `at` itself.
@@ -326,12 +446,36 @@ func _measure(img: Image, spec: Dictionary) -> Dictionary:
 		"paint": LookMeasure.measure_band(img, p.position.x, p.position.y,
 			p.position.x + p.size.x, p.position.y + p.size.y),
 		"covered_m": float(spec["run_m"]),
+		# What the pose actually walked, for the poses that walk. A pose that
+		# reports 90 m of run it was not looking at is how the 500 m gate came to
+		# be satisfied by two frames of a wall and a field.
+		"achieved_m": float(spec.get("achieved_m", spec["run_m"])),
 	}
 
 
+## Hide every Control in the tree, so two runs cannot differ by a lap counter or
+## a menu still fading out.
+##
+## The `CanvasLayer` case is the one that matters and the one the first version
+## got wrong: a `CanvasLayer` is **not** a `CanvasItem` (it extends `Node`, so it
+## has no `visible` and no transform of its own - it is a container that hands
+## its children a different camera). `(c as CanvasItem)` on one of those is
+## `null`, so the `if c is CanvasLayer or c is Control` branch took the cast and
+## the write threw
+##
+##     Invalid assignment of property or key 'visible' ... on a base object of type 'Nil'
+##
+## which aborts the function. Because GDScript unwinds the *callee* and hands
+## control back to `_initialize`, the capture did not die loudly - it stopped
+## posing frames and left a `SceneTree` with nothing to quit it, so the process
+## sat there until the timeout and produced zero PNGs and no marker. The
+## `CanvasLayer` is recursed into instead: the Control tree that actually draws
+## is always one level down from it.
 func _hide_ui(n: Node) -> void:
 	for c in n.get_children():
-		if c is CanvasLayer or c is Control:
+		if c is CanvasLayer:
+			_hide_ui(c)
+		elif c is CanvasItem:
 			(c as CanvasItem).visible = false
 		else:
 			_hide_ui(c)

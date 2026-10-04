@@ -30,6 +30,7 @@ func run(t: TestHarness) -> void:
 	self.t = t
 	tree = t.tree
 	await _cold_boot(t)
+	await _the_new_player(t)
 	await _the_garage(t)
 	await _the_race(t)
 	await _the_pause(t)
@@ -60,6 +61,109 @@ func _cold_boot(t: TestHarness) -> void:
 	t.gt(float(main.menus.races().size()), 0.0, "and a board of routes to pick from (%d)" % main.menus.races().size())
 	for d in main.menus.races():
 		t.ok(d.valid(), "%s is a route that exists on this map" % d.display_name)
+
+
+## Can a player who has never driven this before actually play it?
+##
+## Everything after this section sets the profile up first - `Cfg.money = 1500`,
+## two owned cars - because it is testing the menu chain for a player who already
+## has a garage and a wallet. That setup is exactly why this section has to come
+## first and run on the profile `Cfg` builds itself: with `money` overwritten, every
+## assertion below is still green if the cheapest route on the board becomes
+## unaffordable for a new player, or if the car a new player is handed stops being
+## one they own, or if nothing on the default board is a route that exists on this
+## map at all. None of those break the rest of the suite, so nothing else in the
+## run would notice them.
+##
+## This is the assertion behind "the game is playable by default": the default
+## profile, on the default board, through the player's own route through the menus,
+## reaches a race that is actually racing.
+func _the_new_player(t: TestHarness) -> void:
+	# Whatever the suite set up, put it back exactly as it was found so the
+	# sections after this one are unaffected by anything below.
+	var keep_money := int(Cfg.money)
+	var keep_owned: Array = Array(Cfg.owned_cars)
+	var keep_active := String(Cfg.active_car)
+
+	# The profile a first session gets, from `Cfg`'s own reset rather than a
+	# literal, so this cannot pass by agreeing with a stale copy of the numbers.
+	Cfg._reset_new_game()
+	await tree.process_frame
+
+	t.eq(int(Cfg.money), 500, "a new player is given a wallet")
+	t.gt(float(Cfg.owned_cars.size()), 0.0, "and at least one car to drive (%d)" % Cfg.owned_cars.size())
+	t.ok(Cfg.owns_car(String(Cfg.active_car)),
+		"and the car they are put in is one they own (%s)" % String(Cfg.active_car))
+	t.eq(String(main.player_car.spec.id), String(Cfg.active_car),
+		"and the car in the world is the one the profile names")
+
+	var board: Array = main.menus.races()
+	t.gt(float(board.size()), 0.0, "with routes on the board (%d)" % board.size())
+	for d in board:
+		t.ok(d.valid(), "%s is a route that exists on this map" % String(d.display_name))
+
+	# The board is only a choice if at least one choice is payable. This is the
+	# assertion that a fee rise cannot break without anyone noticing.
+	var wallet := int(Cfg.money)
+	var affordable := 0
+	for d in board:
+		if int(d.entry_fee) <= wallet:
+			affordable += 1
+	t.gt(float(affordable), 0.0,
+		"and at least one of them is affordable for a new player (%d of %d with %d)"
+			% [affordable, board.size(), wallet])
+
+	# The player's own route through the menus, not a signal poked from outside:
+	# the main menu's own button to the board, then the board's own row.
+	main.menus.show_race_select()
+	await tree.process_frame
+	t.eq(String(main.menus.screen_name()), "race_select", "the main menu leads to the board")
+
+	var chosen: RaceDef = null
+	for d in board:
+		if int(d.entry_fee) <= wallet:
+			chosen = d
+			break
+	if chosen == null:
+		# Nothing above is actionable and every later section needs an idle
+		# director, so leave the world as it was found either way.
+		await _restore_cold_boot(keep_money, keep_owned, keep_active)
+		return
+
+	main.menus.race_select().race_chosen.emit(String(chosen.id))
+	await tree.process_frame
+	t.eq(String(main.race.state_name()), "countdown",
+		"a new player can enter %s" % String(chosen.display_name))
+	t.eq(int(Cfg.money), wallet - int(chosen.entry_fee), "paying the entry fee like anyone else")
+	t.eq(main.race.entrants.size(), 2, "against the one rival on the grid")
+	t.fails(main.menus.menu_visible(), "with the menus out of the way")
+	t.ok(main.hud.visible, "and the HUD up")
+
+	# COUNTDOWN_TIME is 3.0 s, so 180 ticks at 60 Hz, not 90.
+	for i in int(RaceDirector.COUNTDOWN_TIME * 60.0) + 30:
+		await t.ticks(1)
+		if main.race.state == RaceDirector.State.RACING:
+			break
+	t.eq(String(main.race.state_name()), "racing",
+		"and the lights go out on a new player's first race")
+
+	await _restore_cold_boot(keep_money, keep_owned, keep_active)
+
+
+## Hand the world back the way `_cold_boot` found it: an idle director, no HUD,
+## the main menu up, and the profile this suite is driving the rest of the run with.
+## The sections after `_the_new_player` assume exactly that state, and a section
+## that leaves a race running under them is how a suite starts failing for reasons
+## that have nothing to do with the thing it is testing.
+func _restore_cold_boot(money: int, owned: Array, active: String) -> void:
+	Cfg.money = money
+	Cfg.owned_cars = owned
+	Cfg.active_car = active
+	if main.race.state != RaceDirector.State.IDLE:
+		main.race.reset()
+	main.hud.visible = false
+	main.menus.show_main_menu()
+	await tree.process_frame
 
 
 ## The garage is a host screen: the flow routes the four menu screens and reports

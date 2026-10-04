@@ -268,6 +268,20 @@ const _SPECS: Dictionary = {
 	# ---- nobody chose is how a street ends up orange.
 	"lamp_lens": {"role": "lamp_lens", "rough": 0.22, "emit": 6.0, "emit_role": "lamp_lens"},
 	"lamp_lens_cool": {"role": "mercury", "rough": 0.22, "emit": 5.0, "emit_role": "mercury"},
+	# The lit face of a shopfront sign fascia - cool white, so the mercury role.
+	# It is NOT `lamp_lens_cool` at a lower setting: that is the luminaire lens
+	# role, whose 5.0 is tuned for a small intense source, and a fascia is a large
+	# flat face that covers several square metres. Emission energy times area is
+	# what a street actually receives, so moving the same 5.0 onto a 4.2 x 0.95 m
+	# panel raised the whole strip's clipping instead of lowering it (measured:
+	# mean 0.167 -> 0.182, clipped 0.057 -> 0.061 across the three poses).
+	#
+	# 2.2 is derived, not chosen. The old bars were 0.52 x 4.6 m (2.39 m2) at
+	# 3.0-3.4 for twelve shops in sixteen and 6.0 for four, averaging 9.63 of
+	# energy-times-area per shop over the sixteen. Holding the three neon accents
+	# at their existing energies, 2.2 on the 3.99 m2 fascia puts the same total
+	# back into the street - so the shape can change without the exposure moving.
+	"sign_face_lit": {"role": "mercury", "rough": 0.22, "emit": 2.2, "emit_role": "mercury"},
 	"neon_cyan": {"role": "neon_cyan", "rough": 0.25, "emit": 3.4, "emit_role": "neon_cyan"},
 	"neon_magenta": {"role": "neon_magenta", "rough": 0.25, "emit": 3.4, "emit_role": "neon_magenta"},
 	"neon_red": {"role": "neon_red", "rough": 0.25, "emit": 3.0, "emit_role": "neon_red"},
