@@ -1,0 +1,126 @@
+{
+  "pillow_available": true,
+  "purpose": "Mean luma of each ingested albedo map. The runtime divides the map by its mean so the texture supplies detail and the palette keeps supplying value.",
+  "schema": "cairns-after-dark/albedo-stats/1",
+  "sets": {
+    "aerial_grass_rock": {
+      "albedo": {
+        "height": 1024,
+        "luma_mean": 96.34012,
+        "luma_p05": 77.123,
+        "luma_p50": 95.2096,
+        "luma_p95": 118.9296,
+        "luma_spread": 0.16395,
+        "mean_rgb": [
+          0.4462,
+          0.38117,
+          0.14306
+        ],
+        "width": 1024
+      },
+      "file": "textures/aerial_grass_rock/aerial_grass_rock_diff.jpg"
+    },
+    "asphalt_01": {
+      "albedo": {
+        "height": 1024,
+        "luma_mean": 81.07577,
+        "luma_p05": 70.4762,
+        "luma_p50": 81.114,
+        "luma_p95": 91.4762,
+        "luma_spread": 0.08235,
+        "mean_rgb": [
+          0.3494,
+          0.31286,
+          0.27573
+        ],
+        "width": 1024
+      },
+      "file": "textures/asphalt_01/asphalt_01_diff.jpg"
+    },
+    "concrete_floor": {
+      "albedo": {
+        "height": 1024,
+        "luma_mean": 138.20373,
+        "luma_p05": 117.7776,
+        "luma_p50": 138.7776,
+        "luma_p95": 156.557,
+        "luma_spread": 0.15208,
+        "mean_rgb": [
+          0.65034,
+          0.52418,
+          0.39921
+        ],
+        "width": 1024
+      },
+      "file": "textures/concrete_floor/concrete_floor_diff.jpg"
+    },
+    "concrete_layers": {
+      "albedo": {
+        "height": 1024,
+        "luma_mean": 101.9431,
+        "luma_p05": 86.055,
+        "luma_p50": 102.408,
+        "luma_p95": 116.055,
+        "luma_spread": 0.11765,
+        "mean_rgb": [
+          0.4257,
+          0.39522,
+          0.36856
+        ],
+        "width": 1024
+      },
+      "file": "textures/concrete_layers/concrete_layers_diff.jpg"
+    },
+    "painted_plaster_wall": {
+      "albedo": {
+        "height": 1024,
+        "luma_mean": 164.29785,
+        "luma_p05": 152.4842,
+        "luma_p50": 164.9054,
+        "luma_p95": 174.4842,
+        "luma_spread": 0.08627,
+        "mean_rgb": [
+          0.66997,
+          0.63848,
+          0.6264
+        ],
+        "width": 1024
+      },
+      "file": "textures/painted_plaster_wall/painted_plaster_wall_diff.jpg"
+    },
+    "palm_bark": {
+      "albedo": {
+        "height": 1024,
+        "luma_mean": 79.14083,
+        "luma_p05": 66.404,
+        "luma_p50": 77.9054,
+        "luma_p95": 96.5404,
+        "luma_spread": 0.11818,
+        "mean_rgb": [
+          0.34584,
+          0.30398,
+          0.26903
+        ],
+        "width": 1024
+      },
+      "file": "textures/palm_bark/palm_bark_diff.jpg"
+    },
+    "red_brick": {
+      "albedo": {
+        "height": 1024,
+        "luma_mean": 109.54093,
+        "luma_p05": 94.404,
+        "luma_p50": 107.9066,
+        "luma_p95": 131.7386,
+        "luma_spread": 0.14641,
+        "mean_rgb": [
+          0.55744,
+          0.4031,
+          0.31523
+        ],
+        "width": 1024
+      },
+      "file": "textures/red_brick/red_brick_diff.jpg"
+    }
+  }
+}
