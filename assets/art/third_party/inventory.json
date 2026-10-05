@@ -1,0 +1,1007 @@
+{
+  "accepted_licenses": [
+    "CC0-1.0"
+  ],
+  "assets": [
+    {
+      "bytes": 666655,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "e920ce36afd0abff000b8366d3d768d3",
+      "path": "textures/aerial_grass_rock/aerial_grass_rock_diff.jpg",
+      "role": "albedo",
+      "set": "aerial_grass_rock",
+      "sha256": "57b8041bfe0d0f01430e4dbaad45e7ddddf0a9fc97317f90dbc51f7b0d9e1b5d",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/aerial_grass_rock",
+        "asset_name": "Aerial Grass Rock",
+        "asset_page": "https://polyhaven.com/a/aerial_grass_rock",
+        "authors": {
+          "Rob Tuytel": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/aerial_grass_rock/aerial_grass_rock_diff_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "moss",
+          "grass",
+          "cliff",
+          "cave",
+          "rock face"
+        ]
+      }
+    },
+    {
+      "bytes": 6366521,
+      "format": "png",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "7f8e7115d05196a294c10e545fa35fd5",
+      "path": "textures/aerial_grass_rock/aerial_grass_rock_nor_gl.png",
+      "role": "normal",
+      "set": "aerial_grass_rock",
+      "sha256": "23bf3adc3f0d2a59eac317718377ca681dab9398fe824eb89925f89a2469f62e",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/aerial_grass_rock",
+        "asset_name": "Aerial Grass Rock",
+        "asset_page": "https://polyhaven.com/a/aerial_grass_rock",
+        "authors": {
+          "Rob Tuytel": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/aerial_grass_rock/aerial_grass_rock_nor_gl_1k.png",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "moss",
+          "grass",
+          "cliff",
+          "cave",
+          "rock face"
+        ]
+      }
+    },
+    {
+      "bytes": 362214,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "f78c5cdc565f990299ae7c5a81f68cf7",
+      "path": "textures/aerial_grass_rock/aerial_grass_rock_rough.jpg",
+      "role": "roughness",
+      "set": "aerial_grass_rock",
+      "sha256": "b9f3f76aba74007f708333c0dbe73c52eb83ea0c4187a13e2e994f888a25114a",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/aerial_grass_rock",
+        "asset_name": "Aerial Grass Rock",
+        "asset_page": "https://polyhaven.com/a/aerial_grass_rock",
+        "authors": {
+          "Rob Tuytel": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/aerial_grass_rock/aerial_grass_rock_rough_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "moss",
+          "grass",
+          "cliff",
+          "cave",
+          "rock face"
+        ]
+      }
+    },
+    {
+      "bytes": 739513,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "43c88946c38109d77a24456686a376f9",
+      "path": "textures/asphalt_01/asphalt_01_diff.jpg",
+      "role": "albedo",
+      "set": "asphalt_01",
+      "sha256": "99b6f6bdfbd09279f3f550ac9593336df541aa2319537566eeb3e737d8512010",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/asphalt_01",
+        "asset_name": "Asphalt 01",
+        "asset_page": "https://polyhaven.com/a/asphalt_01",
+        "authors": {
+          "Charlotte Baglioni": "Photography",
+          "Dario Barresi": "Processing "
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/asphalt_01/asphalt_01_diff_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "dirty",
+          "asphalt",
+          "road",
+          "worn"
+        ]
+      }
+    },
+    {
+      "bytes": 5938626,
+      "format": "png",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "92073fccc4695561000d59383028851e",
+      "path": "textures/asphalt_01/asphalt_01_nor_gl.png",
+      "role": "normal",
+      "set": "asphalt_01",
+      "sha256": "347d6376e7df8b2255b2fb1d998cb57bd276dec313ddbb78b20d0ccffe364531",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/asphalt_01",
+        "asset_name": "Asphalt 01",
+        "asset_page": "https://polyhaven.com/a/asphalt_01",
+        "authors": {
+          "Charlotte Baglioni": "Photography",
+          "Dario Barresi": "Processing "
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/asphalt_01/asphalt_01_nor_gl_1k.png",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "dirty",
+          "asphalt",
+          "road",
+          "worn"
+        ]
+      }
+    },
+    {
+      "bytes": 344964,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "92ffad35bc543f59ffd9860c53a98214",
+      "path": "textures/asphalt_01/asphalt_01_rough.jpg",
+      "role": "roughness",
+      "set": "asphalt_01",
+      "sha256": "147891957807bb03cc565c9daa8a16a4af7713449a0f475c638f78f833ad0646",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/asphalt_01",
+        "asset_name": "Asphalt 01",
+        "asset_page": "https://polyhaven.com/a/asphalt_01",
+        "authors": {
+          "Charlotte Baglioni": "Photography",
+          "Dario Barresi": "Processing "
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/asphalt_01/asphalt_01_rough_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "dirty",
+          "asphalt",
+          "road",
+          "worn"
+        ]
+      }
+    },
+    {
+      "bytes": 927975,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "99b94da291a4f038fa6af93c3993cbec",
+      "path": "textures/concrete_floor/concrete_floor_diff.jpg",
+      "role": "albedo",
+      "set": "concrete_floor",
+      "sha256": "5e06d0fb226f671470f59bf7798954b6965c9ed56dd45084dfd012e15737e444",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/concrete_floor",
+        "asset_name": "Concrete Floor",
+        "asset_page": "https://polyhaven.com/a/concrete_floor",
+        "authors": {
+          "eye-candy.xyz": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_floor/concrete_floor_diff_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "concrete",
+          "floor",
+          "old",
+          "brown",
+          "wall",
+          "dirty",
+          "cement",
+          "worn"
+        ]
+      }
+    },
+    {
+      "bytes": 5633773,
+      "format": "png",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "4cc6e38aad8bc02a8be3c711e8dadeec",
+      "path": "textures/concrete_floor/concrete_floor_nor_gl.png",
+      "role": "normal",
+      "set": "concrete_floor",
+      "sha256": "3b641f7258345b5f5562df5ec61ad8a9d74de86cbc7e60604a2877378cb64569",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/concrete_floor",
+        "asset_name": "Concrete Floor",
+        "asset_page": "https://polyhaven.com/a/concrete_floor",
+        "authors": {
+          "eye-candy.xyz": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/concrete_floor/concrete_floor_nor_gl_1k.png",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "concrete",
+          "floor",
+          "old",
+          "brown",
+          "wall",
+          "dirty",
+          "cement",
+          "worn"
+        ]
+      }
+    },
+    {
+      "bytes": 503981,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "5d9bd1bfd18e5d32a3217e8275dd8271",
+      "path": "textures/concrete_floor/concrete_floor_rough.jpg",
+      "role": "roughness",
+      "set": "concrete_floor",
+      "sha256": "342110e685c07af2c56194662a796b2ab4f2a4d992a9745b8fc55943414faead",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/concrete_floor",
+        "asset_name": "Concrete Floor",
+        "asset_page": "https://polyhaven.com/a/concrete_floor",
+        "authors": {
+          "eye-candy.xyz": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_floor/concrete_floor_rough_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "concrete",
+          "floor",
+          "old",
+          "brown",
+          "wall",
+          "dirty",
+          "cement",
+          "worn"
+        ]
+      }
+    },
+    {
+      "bytes": 666388,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "9384ce7062ae93f065e579cec044931e",
+      "path": "textures/concrete_layers/concrete_layers_diff.jpg",
+      "role": "albedo",
+      "set": "concrete_layers",
+      "sha256": "f9674124394533b6e8284facdfaef396ac3ba7b648a72da0aa2304d46037ff2b",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/concrete_layers",
+        "asset_name": "Concrete Layers",
+        "asset_page": "https://polyhaven.com/a/concrete_layers",
+        "authors": {
+          "Amal Kumar": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_layers/concrete_layers_diff_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "old",
+          "concrete",
+          "cracked",
+          "chipped",
+          "cement",
+          "cracked cement",
+          "worn",
+          "scratched",
+          "wall",
+          "weathered",
+          "exterior",
+          "coarse"
+        ]
+      }
+    },
+    {
+      "bytes": 5539495,
+      "format": "png",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "d993eba9c6f6188f9c4f33125e949593",
+      "path": "textures/concrete_layers/concrete_layers_nor_gl.png",
+      "role": "normal",
+      "set": "concrete_layers",
+      "sha256": "8febcedbc86e79f4eb820b61f8bd0d443333d073c7a0b8622a6d848c945c8b94",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/concrete_layers",
+        "asset_name": "Concrete Layers",
+        "asset_page": "https://polyhaven.com/a/concrete_layers",
+        "authors": {
+          "Amal Kumar": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/concrete_layers/concrete_layers_nor_gl_1k.png",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "old",
+          "concrete",
+          "cracked",
+          "chipped",
+          "cement",
+          "cracked cement",
+          "worn",
+          "scratched",
+          "wall",
+          "weathered",
+          "exterior",
+          "coarse"
+        ]
+      }
+    },
+    {
+      "bytes": 342556,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "e6dbc1c8d200354fcc25865bfeecb6a6",
+      "path": "textures/concrete_layers/concrete_layers_rough.jpg",
+      "role": "roughness",
+      "set": "concrete_layers",
+      "sha256": "89ef4ff1ec63bd416a5e58569833b5e4f56669f7fc9dd5ee7bec3ae4a249011a",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/concrete_layers",
+        "asset_name": "Concrete Layers",
+        "asset_page": "https://polyhaven.com/a/concrete_layers",
+        "authors": {
+          "Amal Kumar": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_layers/concrete_layers_rough_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "old",
+          "concrete",
+          "cracked",
+          "chipped",
+          "cement",
+          "cracked cement",
+          "worn",
+          "scratched",
+          "wall",
+          "weathered",
+          "exterior",
+          "coarse"
+        ]
+      }
+    },
+    {
+      "bytes": 686726,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "15ba8c1f63a5ab412b1eabe31728540a",
+      "path": "textures/painted_plaster_wall/painted_plaster_wall_diff.jpg",
+      "role": "albedo",
+      "set": "painted_plaster_wall",
+      "sha256": "440310f05af089f2c93353167573403cbc3f805948203237b5d26431eeb9e19c",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/painted_plaster_wall",
+        "asset_name": "Painted Plaster Wall",
+        "asset_page": "https://polyhaven.com/a/painted_plaster_wall",
+        "authors": {
+          "Amal Kumar": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/painted_plaster_wall/painted_plaster_wall_diff_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "weathered",
+          "worn",
+          "wall",
+          "discolored",
+          "plaster",
+          "plastered",
+          "damaged",
+          "old",
+          "stained",
+          "dirty",
+          "exterior",
+          "timeworn"
+        ]
+      }
+    },
+    {
+      "bytes": 5688118,
+      "format": "png",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "a040e68bcbc18ce5f9bb84649c877d01",
+      "path": "textures/painted_plaster_wall/painted_plaster_wall_nor_gl.png",
+      "role": "normal",
+      "set": "painted_plaster_wall",
+      "sha256": "dfc363188b3290091601337dc1041e491b3fee5becab82f21ea219b783f12e67",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/painted_plaster_wall",
+        "asset_name": "Painted Plaster Wall",
+        "asset_page": "https://polyhaven.com/a/painted_plaster_wall",
+        "authors": {
+          "Amal Kumar": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/painted_plaster_wall/painted_plaster_wall_nor_gl_1k.png",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "weathered",
+          "worn",
+          "wall",
+          "discolored",
+          "plaster",
+          "plastered",
+          "damaged",
+          "old",
+          "stained",
+          "dirty",
+          "exterior",
+          "timeworn"
+        ]
+      }
+    },
+    {
+      "bytes": 354762,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "e076a6360329a2bc18c7397dc50c074a",
+      "path": "textures/painted_plaster_wall/painted_plaster_wall_rough.jpg",
+      "role": "roughness",
+      "set": "painted_plaster_wall",
+      "sha256": "e0564c297b22ab1cf4ef02a82157b84ce3b92eb4fd49d9c64b7256a8b300af82",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/painted_plaster_wall",
+        "asset_name": "Painted Plaster Wall",
+        "asset_page": "https://polyhaven.com/a/painted_plaster_wall",
+        "authors": {
+          "Amal Kumar": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/painted_plaster_wall/painted_plaster_wall_rough_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "rough",
+          "weathered",
+          "worn",
+          "wall",
+          "discolored",
+          "plaster",
+          "plastered",
+          "damaged",
+          "old",
+          "stained",
+          "dirty",
+          "exterior",
+          "timeworn"
+        ]
+      }
+    },
+    {
+      "bytes": 707281,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "89e6474313f1547e3c12c4b68410ee39",
+      "path": "textures/palm_bark/palm_bark_diff.jpg",
+      "role": "albedo",
+      "set": "palm_bark",
+      "sha256": "80cbe5ee11af799db082cdb342601a70b81a5f54b98eb587e87dcb5bf5e1f395",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/palm_bark",
+        "asset_name": "Palm Bark",
+        "asset_page": "https://polyhaven.com/a/palm_bark",
+        "authors": {
+          "Charlotte Baglioni": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/palm_bark/palm_bark_diff_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "tree",
+          "tree bark",
+          "tree trunk",
+          "palm",
+          "bark texture",
+          "natural",
+          "environment",
+          "tropical",
+          "bark",
+          "trunk",
+          "forestry"
+        ]
+      }
+    },
+    {
+      "bytes": 6024325,
+      "format": "png",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "1ac17d2a05a47cc4e32cc8c707f6edbb",
+      "path": "textures/palm_bark/palm_bark_nor_gl.png",
+      "role": "normal",
+      "set": "palm_bark",
+      "sha256": "b5f2ca2e13a7d90c7e129330c724072411ccd9eba00bb7cf37671bd69d776730",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/palm_bark",
+        "asset_name": "Palm Bark",
+        "asset_page": "https://polyhaven.com/a/palm_bark",
+        "authors": {
+          "Charlotte Baglioni": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/palm_bark/palm_bark_nor_gl_1k.png",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "tree",
+          "tree bark",
+          "tree trunk",
+          "palm",
+          "bark texture",
+          "natural",
+          "environment",
+          "tropical",
+          "bark",
+          "trunk",
+          "forestry"
+        ]
+      }
+    },
+    {
+      "bytes": 240790,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "8ce664df74d422a570ed97cc9cffc2bf",
+      "path": "textures/palm_bark/palm_bark_rough.jpg",
+      "role": "roughness",
+      "set": "palm_bark",
+      "sha256": "04f4507af58a2011f90dba2c69455a8959e52c01e5748f31d1c5b5654839153b",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/palm_bark",
+        "asset_name": "Palm Bark",
+        "asset_page": "https://polyhaven.com/a/palm_bark",
+        "authors": {
+          "Charlotte Baglioni": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/palm_bark/palm_bark_rough_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "tree",
+          "tree bark",
+          "tree trunk",
+          "palm",
+          "bark texture",
+          "natural",
+          "environment",
+          "tropical",
+          "bark",
+          "trunk",
+          "forestry"
+        ]
+      }
+    },
+    {
+      "bytes": 766044,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "269e69449755abd1ede473e634b670e7",
+      "path": "textures/red_brick/red_brick_diff.jpg",
+      "role": "albedo",
+      "set": "red_brick",
+      "sha256": "6dea3a2b5a3185ff48d299d182c405a9f787129d79677792db6de4afd81c47f6",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/red_brick",
+        "asset_name": "Red Brick",
+        "asset_page": "https://polyhaven.com/a/red_brick",
+        "authors": {
+          "Rob Tuytel": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/red_brick/red_brick_diff_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "brick",
+          "bricks",
+          "wall",
+          "red brick",
+          "brick wall",
+          "rough",
+          "exterior"
+        ]
+      }
+    },
+    {
+      "bytes": 2236680,
+      "format": "png",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "f3f92057f5af1b90d747dd01717740ab",
+      "path": "textures/red_brick/red_brick_nor_gl.png",
+      "role": "normal",
+      "set": "red_brick",
+      "sha256": "e1116366df05651cb54edea4977563a4c0d4ee7a523be61a51fb895c279fa9a8",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/red_brick",
+        "asset_name": "Red Brick",
+        "asset_page": "https://polyhaven.com/a/red_brick",
+        "authors": {
+          "Rob Tuytel": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/red_brick/red_brick_nor_gl_1k.png",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "brick",
+          "bricks",
+          "wall",
+          "red brick",
+          "brick wall",
+          "rough",
+          "exterior"
+        ]
+      }
+    },
+    {
+      "bytes": 178614,
+      "format": "jpg",
+      "kind": "texture",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "7ffbf7a7d2e0cff0a9c5f8848f9fada2",
+      "path": "textures/red_brick/red_brick_rough.jpg",
+      "role": "roughness",
+      "set": "red_brick",
+      "sha256": "9bc9ece8264eb53d6f290bd2950ece5e462f83ce9e65b945fb1caf9972973ab9",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/red_brick",
+        "asset_name": "Red Brick",
+        "asset_page": "https://polyhaven.com/a/red_brick",
+        "authors": {
+          "Rob Tuytel": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/red_brick/red_brick_rough_1k.jpg",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "brick",
+          "bricks",
+          "wall",
+          "red brick",
+          "brick wall",
+          "rough",
+          "exterior"
+        ]
+      }
+    },
+    {
+      "bytes": 1443198,
+      "format": "hdr",
+      "kind": "hdri",
+      "license": {
+        "attribute_required": false,
+        "declaration_scope": "provider-wide",
+        "declaration_url": "https://polyhaven.com/license",
+        "declared_by_provider": true,
+        "name": "Creative Commons CC0 1.0 Universal",
+        "per_asset_license_field_available": false,
+        "redistribute": true,
+        "spdx_id": "CC0-1.0",
+        "text_file": "LICENSE-CC0-1.0.txt",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "md5": "1de3d14a041877e0f5472ba73762a72f",
+      "path": "hdri/dikhololo_sunset_1k.hdr",
+      "role": "sky_ibl",
+      "set": "dikhololo_sunset_1k",
+      "sha256": "e8d95ed7e1465d4598c8f977c14d131837a7f7714762c526b56f243dfbc76c45",
+      "source": {
+        "api_url": "https://api.polyhaven.com/files/dikhololo_sunset",
+        "asset_name": "Dikhololo Sunset",
+        "asset_page": "https://polyhaven.com/a/dikhololo_sunset",
+        "authors": {
+          "Greg Zaal": "All"
+        },
+        "file_url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/dikhololo_sunset_1k.hdr",
+        "provider": "Poly Haven",
+        "provider_home": "https://polyhaven.com",
+        "retrieved_utc": null,
+        "tags": [
+          "tree",
+          "bush",
+          "safari",
+          "veld",
+          "grass",
+          "road",
+          "backplates"
+        ]
+      }
+    }
+  ],
+  "counts": {
+    "hdri": 1,
+    "texture": 21,
+    "total": 22
+  },
+  "generated_by": "assets/art/third_party/ingest.py",
+  "generated_utc": "2026-10-05T01:34:49Z",
+  "policy": "Every third-party byte in the tree is listed here with its source URL and hash. `ingest.py --verify` re-checks the tree against this file in both directions and exits nonzero on any asset that is unlicensed, unrecorded, or altered.",
+  "schema": "cairns-after-dark/third-party-inventory/1"
+}

@@ -41,6 +41,124 @@ extends RefCounted
 
 ## Triplanar detail scale for the road: one noise tile per ~16 m.
 const ROAD_UV := 0.0625
+
+## ## Licensed surface sets
+##
+## Which third-party texture set each material wears, and whether it wants one
+## at all. This is the seam between reuse and the procedural kit: a spec that
+## names a set gets a real capture's aggregate, chipping and patching, and a
+## spec that names none keeps its FastNoiseLite exactly as before.
+##
+## Declared as data rather than written inline in `_build` for the same reason
+## `_SPECS` is: `artkit_check.gd` has to be able to read the *intent* - which
+## materials are supposed to be textured - without instantiating a renderer, and
+## then assert that intent was actually carried out. A texture layer with no
+## such assertion is invisible to every test that matters, because a material
+## that quietly falls back is a material that renders fine and looks untouched.
+##
+## The sets are `assets/art/third_party/inventory.json` entries, all CC0. See
+## `ArtKitLicensing` for the provenance rules and the fallback contract.
+const TEXTURED: Dictionary = {
+	# --- the hero surface. Four variants, one set: the *wet* variation is the
+	# --- roughness ramp and the palette role, not four different photographs,
+	# --- because a road that changes photograph per block reads as tiled.
+	"surface_asphalt_wet_a": "asphalt_01",
+	"surface_asphalt_wet_b": "asphalt_01",
+	"surface_asphalt_wet_c": "asphalt_01",
+	"surface_asphalt_wet_d": "asphalt_01",
+	"surface_asphalt_dry": "asphalt_01",
+
+	# --- three concrete pours, two sets. Footpath and kerb must not match, and
+	# --- the drainage channel is the one that is allowed to be the oldest.
+	"concrete_a": "concrete_floor",
+	"concrete_b": "concrete_layers",
+	"concrete_c": "concrete_floor",
+
+	# --- the most-repeated geometry in the world. Four palm species and three
+	# --- trees all wear bark, so this is the texture with the most eyes on it.
+	"bark": "palm_bark",
+
+	# --- rendered walls, and the brick that goes with them.
+	"surface_render_wall_a": "painted_plaster_wall",
+	"surface_render_wall_b": "painted_plaster_wall",
+	"surface_render_wall_c": "painted_plaster_wall",
+	"surface_render_wall_d": "painted_plaster_wall",
+	"surface_render_wall_e": "painted_plaster_wall",
+	"surface_render_wall_f": "painted_plaster_wall",
+	"brick": "red_brick",
+
+	# --- verge ground cover, under the palms.
+	"dirt": "aerial_grass_rock",
+	"grass": "aerial_grass_rock",
+}
+
+## Maps to pull for a textured material, and where each one lands.
+##
+## `normal` and `roughness` are the two that matter most and the two most often
+## skipped, which is a mistake: a photograph's albedo alone gives a road the
+## *colour* of asphalt while leaving it perfectly smooth, and smoothness on a
+## rough surface is the single most obvious tell that a texture was pasted onto
+## a procedural material rather than integrated with it.
+const TEXTURE_SLOTS: Dictionary = {
+	"albedo": "albedo",
+	"normal": "normal",
+	"roughness": "roughness",
+}
+
+## ## Metres per tile, for the licensed captures
+##
+## These are NOT the specs' `uv` values, and reusing them was the first
+## implementation's mistake. `uv` is expressed for **triplanar world-space**
+## sampling: 0.0625 means one 16 m tile, because the shader samples from world
+## position. The prop meshes do not work that way - their UV layer is
+## **per-object and normalised**, measured at a span of ~1.0 unit across a
+## 13 m palm trunk and ~0.25 across its circumference. Feeding them 0.0625
+## magnified the capture to roughly one sixteenth of a tile over the whole trunk,
+## which is a flat grey gradient: the render came back with a 0.58% pixel
+## difference and the texture was, correctly as written, invisible.
+##
+## So the two spaces are kept apart on purpose. `uv` drives the procedural
+## triplanar noise; `TEX_UV` below drives the capture, in metres per tile, which
+## is the unit a photographic capture is authored in - a 1k asphalt scan is a
+## 2 m square of real road, not a 16 m one.
+const TEX_UV: Dictionary = {
+	# The hero surface. 2 m per tile is roughly the scale Poly Haven scans
+	# asphalt at. At 27 km of road it repeats visibly, which is why the four wet
+	# variants differ in roughness ramp and palette role rather than in the
+	# capture, and why the repeat is broken by the wet/dry mask rather than by
+	# the map.
+	"surface_asphalt_wet_a": 2.0,
+	"surface_asphalt_wet_b": 2.0,
+	"surface_asphalt_wet_c": 2.0,
+	"surface_asphalt_wet_d": 2.0,
+	"surface_asphalt_dry": 2.0,
+
+	# Footpath and kerb. Slabs are ~1 m, so a 1.2 m tile puts roughly one slab
+	# of grain under each one.
+	"concrete_a": 1.2,
+	"concrete_b": 1.4,
+	"concrete_c": 1.2,
+
+	# Bark. A palm trunk is a cylinder roughly 0.5 m round with a UV span of
+	# ~0.25, so ~2.9 tiles across the circumference gives visible ring and scar
+	# detail rather than one soft smear up the trunk.
+	"bark": 0.35,
+
+	# Rendered walls and brick: the OSM footprints are extruded in metres with
+	# metre-scale UVs, so these are read close to as authored.
+	"surface_render_wall_a": 1.5,
+	"surface_render_wall_b": 1.5,
+	"surface_render_wall_c": 1.5,
+	"surface_render_wall_d": 1.5,
+	"surface_render_wall_e": 1.5,
+	"surface_render_wall_f": 1.5,
+	"brick": 1.0,
+
+	# Ground cover. Coarser than the walls: nobody looks at a verge from 400 mm.
+	"dirt": 2.5,
+	"grass": 0.8,
+}
+
 ## Corrugation pitch, in metres per UV unit. Real Colorbond is 0.076 m; at the
 ## UV scale below that lands at about one rib per 8 cm on a wall-sized quad.
 const CORRUGATION_UV := 13.0
@@ -677,7 +795,7 @@ const _SPECS: Dictionary = {
 static func _build(key: String) -> StandardMaterial3D:
 	if not _SPECS.has(key):
 		return null
-	return build_spec(_SPECS[key])
+	return build_spec(_SPECS[key], key)
 
 
 ## Build a material from a spec dictionary, uncached.
@@ -688,9 +806,26 @@ static func _build(key: String) -> StandardMaterial3D:
 ## get that would be the wrong trade - it is a shared const table and a cache that is
 ## meant to hold one object per key for the life of the process.
 ##
+## ## `key` is optional, and it is here because of the t181/t194 merge
+##
+## `_apply_licensed()` looks its capture up by material key (`TEXTURED[key]`,
+## `TEX_UV[key]`), not by spec, because the licensed layer keys its metres-per-tile
+## and its capture choice on the *surface name*. Before the merge, all of this lived
+## inside `_build(key)` and the key was simply in scope. t181 split `_build` into
+## `_build` + `build_spec(spec)`, so the merged file had `_apply_licensed(key, ...)`
+## calling a name that no longer existed in that scope - a parse error a text-level
+## three-way merge cannot see, because both sides were each internally valid.
+##
+## It is a defaulted argument rather than a required one on purpose:
+## `artkit/pbr_shot.gd:688` calls `build_spec(stripped)` with one argument, and that
+## file is not part of the t194 transfer, so changing the arity would have broken a
+## caller outside this commit's scope. With the default, a spec with no key simply
+## applies no licensed capture - which is correct, because a keyless spec is a
+## synthetic one built for a before/after ramp comparison.
+##
 ## Deliberately NOT cached: a caller that wants a library material wants `get_()`, and a
 ## caller that wants a mutated one wants a fresh object.
-static func build_spec(spec: Dictionary) -> StandardMaterial3D:
+static func build_spec(spec: Dictionary, key: String = "") -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = ArtKitPalette.color(String(spec.get("role", "")))
 	if spec.has("value"):
@@ -722,6 +857,29 @@ static func build_spec(spec: Dictionary) -> StandardMaterial3D:
 		m.normal_enabled = true
 		m.normal_texture = noise_tex(256, 1.7, 5, int(spec.get("noise_seed", 11)) + 500, true)
 		m.normal_scale = float(spec["normal"])
+
+	# ## Licensed capture, layered over the procedural base
+	#
+	# This runs *after* the procedural texture assignment on purpose. Two orders
+	# are possible and they are not equivalent:
+	#
+	#   * capture first, procedural second -> the noise overwrites the capture,
+	#     and the material ends up exactly as it was before t194. Nothing errors
+	#     and no render changes. This is the trap.
+	#   * procedural first, capture second -> the capture wins on the slots it
+	#     has, and the procedural noise survives only on the slots it does not.
+	#
+	# So a slot is taken over only if the capture actually loaded. `TEXTURE_SLOTS`
+	# decides *which* slots, and each one independently falls back, because a
+	# set with an albedo and no roughness is a real possibility on a partial
+	# ingest and must not blank the whole material.
+	#
+	# UV scale and triplanar stay as the spec set them: the capture is a surface
+	# detail in the same metres-per-tile space as the noise it replaces, so the
+	# two are interchangeable from the material's point of view. The one
+	# exception is the normal map, whose scale comes from the capture because a
+	# photographic normal at the procedural scale reads as sandpaper on a road.
+	_apply_licensed(key, m, spec)
 
 	# Wet asphalt. `ART_DIRECTION.md` asks for "a broken-up roughness noise so
 	# reflections are streaky rather than a sheet of plastic", and that is a
@@ -998,6 +1156,87 @@ static func effective_roughness_of(key: String) -> float:
 	if _SPECS.has(key) and String(_SPECS[key].get("pbr", "")) != "":
 		base *= pbr_mean(String(_SPECS[key]["pbr"]), "r")
 	return base
+
+
+## Take over the slots a licensed capture can fill, leaving the procedural
+## texture in place on every slot it cannot.
+##
+## ## Why "partially textured" is a supported state
+##
+## The tempting simplification is to treat a set as all-or-nothing: if the
+## capture loaded, use all three maps; if not, use none. That is wrong for a
+## concrete reason - a *normal map without an albedo* is still a large visual
+## win, because surface relief survives even when the albedo is unavailable.
+## Requiring all three to be present to apply any of them throws away detail
+## that costs nothing to keep, and it makes a partially-ingested checkout look
+## identical to an un-ingested one, which is exactly the state you want to be
+## able to tell apart in a render.
+##
+## ## Why each slot reports individually
+##
+## `ArtKitLicensing.note_applied` is called per slot, so `TEXTURES_APPLIED` is a
+## count of things the renderer will actually sample. Counting downloaded files
+## would answer "did the download work"; counting applied slots answers "will
+## this look different", which is the question a frame comparison asks.
+static func _apply_licensed(key: String, m: StandardMaterial3D, spec: Dictionary) -> void:
+	if not TEXTURED.has(key):
+		return
+	# ## A key cannot carry two albedos, and `TEXTURES_APPLIED` must not claim it does
+	#
+	# `TEXTURED` (t194, 18 keys) and `_SPECS[key]["pbr"]` (t181, 18 keys) overlap on
+	# 11 keys: concrete_a/b/c, the six render walls, grass and surface_asphalt_dry.
+	# `_apply_licensed()` runs early in `build_spec()` and `_attach_pbr()` runs late, so
+	# before this guard the PBR layer overwrote all 11 licensed captures - and because
+	# `note_applied()` is called at *fill* time, `TEXTURES_APPLIED` still counted them.
+	# Measured: 7 of 18 TEXTURED keys reached the renderer while the check reported 54
+	# applied slots. That is the exact failure the floor exists to prevent, arriving
+	# through the floor: a false pass is worse than no check.
+	#
+	# So the collision is resolved in favour of `pbr`, once, here - and the licensed
+	# capture is not applied at all for those keys rather than applied and discarded.
+	# `pbr` wins because its `rough` scalars were re-derived as multipliers against
+	# *those* maps, and `effective_roughness_of()` reads `_SPECS[key]["pbr"]` to report
+	# the product. Letting the licensed map win instead would leave that function
+	# multiplying by a scan that is no longer attached, which is a lie of exactly the
+	# same shape. t181's bookkeeping is the one that has to stay consistent.
+	#
+	# The 11 sets are still on disk, inventoried and licensed. They are simply not
+	# applied, and `ingest.py --verify` and `_check_licensed_assets` both still cover
+	# them - which is the honest state for an owner decision about which of two
+	# licensed surfaces should own concrete, render walls, grass and dry asphalt.
+	if String(spec.get("pbr", "")) != "":
+		return
+	var set_name := String(TEXTURED[key])
+
+	for slot in TEXTURE_SLOTS.keys():
+		var tex := ArtKitLicensing.texture(set_name, String(TEXTURE_SLOTS[slot]))
+		if tex == null:
+			continue
+		match String(slot):
+			"albedo":
+				m.albedo_texture = tex
+				# Normalised to unit mean by ArtKitLicensing, so the palette role
+				# still decides the value. Left non-triplanar: the capture is
+				# authored for a surface, and triplanar projection of a
+				# photograph puts a palm's bark streaks across a road.
+				m.uv1_triplanar = false
+				# `TEX_UV`, never the spec's `uv`. See the note on that table: `uv`
+				# is metres-per-tile for triplanar world-space sampling and this is
+				# a per-object UV space, so using it here magnified the capture
+				# across most of a palm trunk and made it invisible.
+				var metres := float(TEX_UV.get(key, 1.0))
+				m.uv1_scale = Vector3.ONE / metres
+			"normal":
+				m.normal_enabled = true
+				m.normal_texture = tex
+				# A photographic normal carries its own scale. Reusing the
+				# procedural 0.22-0.55 here turns asphalt into sandpaper, so the
+				# capture's relief is deliberately gentler than the noise's.
+				m.normal_scale = float(spec.get("normal", 0.3)) * 0.6
+			"roughness":
+				m.roughness_texture = tex
+				m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
+		ArtKitLicensing.note_applied(set_name, String(TEXTURE_SLOTS[slot]))
 
 
 ## A radial gradient, white at the rim and `core` at the centre, cached by core.

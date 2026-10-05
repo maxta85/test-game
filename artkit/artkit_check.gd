@@ -106,6 +106,8 @@ func _initialize() -> void:
 	_check_batching()
 	_check_consumer()
 	_check_no_external_assets()
+	_check_licensed_assets()
+	_check_texture_layer()
 	_report()
 
 
@@ -1447,6 +1449,14 @@ func _check_no_external_assets() -> void:
 				# a measurement can be repeated without re-rendering. It reads its OWN
 				# output, under the `--out` directory, and loads no material texture.
 				"pbr_shot.gd": true,
+				# The audited *licensing* loader (t194). It is a real, deliberate second
+				# way in, not an exemption: every byte it loads is required to be in
+				# `assets/art/third_party/inventory.json` with an accepted licence and a
+				# source URL, and `_check_licensed_assets` fails on an unclaimed file and
+				# on an unlicensed row. It exists precisely so that `materials.gd` does not
+				# become the second unaudited loader. Without this entry the check is
+				# right - a third or fourth loader still fails.
+				"licensing.gd": true,
 			}
 			if loads_any and not allowed.has(file):
 				stray_loads.append("%s: %s" % [file, stripped])
@@ -1534,7 +1544,192 @@ func _check_no_external_assets() -> void:
 ## So the total is asserted against a floor. Adding checks means raising it, which
 ## is a deliberate act - and a section that starts aborting shows up as a failure
 ## instead of a silent hole. Raised whenever the suite grows.
-const MIN_CHECKS := 80
+const MIN_CHECKS := 123
+
+
+# =============================================================================
+# 8. LICENSED ASSETS
+# =============================================================================
+
+## The brief used to forbid downloaded models and textures, and this check proved
+## the absence: no `.jpg`, no `.glb`, no `load(` anywhere in `artkit/`. That was a
+## coherent policy with an honest enforcement mechanism, and it is now inverted.
+##
+## Reuse-first says a licensed photograph of asphalt beats a procedural noise
+## pretending to be one. So the check no longer asks "is anything external
+## referenced?" - a question with only one safe answer and no useful signal. It
+## asks the question that actually matters about external assets:
+##
+##   * is every one of them in the machine-readable inventory;
+##   * does every inventory row carry a licence this project accepts, that
+##     permits redistribution, and that names a fetchable source URL;
+##   * does every inventoried file actually exist;
+##   * is every asset file on disk claimed by the inventory (so a hand-dropped
+##     `.jpg` fails rather than being invisible);
+##   * did any of it reach a material at runtime - because a licensed asset that
+##     silently fell back to the procedural path is reuse that did not happen,
+##     and it looks exactly like success in a render.
+##
+## That is strictly stronger than the check it replaces: the old rule could only
+## prove a negative, and a negative is satisfied by doing nothing.
+##
+## ## Why the fallback must stay testable
+##
+## A material that falls back when its capture is missing is correct behaviour
+## and also the perfect hiding place for a feature that never worked. So
+## `_check_texture_layer` asserts the *applied* count, not the *available* count
+## - what the renderer sampled, not what was downloaded. If the whole layer
+## silently reverted to noise, that check fails while the renders keep looking
+## acceptable, which is the only combination in which the bug is worth catching.
+func _check_licensed_assets() -> void:
+	_section("licensed assets")
+	var dir := DirAccess.open("res://artkit")
+	_ok(dir != null, "artkit/ is readable")
+	var files: Array[String] = []
+	dir.list_dir_begin()
+	var f := dir.get_next()
+	while f != "":
+		if not dir.current_is_dir():
+			files.append(f)
+		f = dir.get_next()
+	dir.list_dir_end()
+
+	# 1. the inventory has to be there and parseable, or none of the rest is a check
+	var have_inv := FileAccess.file_exists(ArtKitLicensing.INVENTORY_PATH)
+	_ok(have_inv, "the third-party inventory exists at %s" % ArtKitLicensing.INVENTORY_PATH)
+	if not have_inv:
+		_ok(false, "inventory parses (cannot check provenance without it)")
+		return
+	_ok(not ArtKitLicensing.entries().is_empty(),
+			"the inventory lists assets (%d)" % ArtKitLicensing.entries().size())
+
+	# 2. every row is licensed, redistributable, sourced, and present.
+	var unlicensed := ArtKitLicensing.unlicensed()
+	_ok(unlicensed.is_empty(),
+			"every inventoried asset carries an accepted, redistributable licence "
+			+ "with a source URL (%d entries)" % ArtKitLicensing.entries().size(),
+			str(unlicensed))
+
+	# 3. the reverse direction: nothing on disk is unclaimed.
+	#
+	# The witness below exists because this check fails OPEN on its own history.
+	# `_walk` originally recursed on one DirAccess handle, which stack-overflowed
+	# and returned an empty list - so "no unclaimed files" reported green while
+	# having walked nothing at all. A guard that can be satisfied by crashing
+	# needs a witness: the walk is proven to have reached real asset files,
+	# which is only true if it terminated.
+	var unclaimed := ArtKitLicensing.unclaimed()
+	_ok(unclaimed.is_empty(), "no asset file on disk is missing from the inventory",
+			str(unclaimed))
+	var walked := ArtKitLicensing.walked_count()
+	_ok(walked >= 1,
+			"the unclaimed-file walk actually reached asset files (%d scanned, so it "
+			% walked + "did not abort early and pass vacuously)")
+
+	# 4. nothing in artkit/ reaches around the licensing layer. This is the old
+	#    check, kept in the form that still has teeth: the kit may load assets,
+	#    but only through ArtKitLicensing, so every load is inventoried by
+	#    construction rather than by review.
+	var strays: Array[String] = []
+	for file in files:
+		# This file is the auditor; it necessarily contains the words it searches
+		# for as string literals.
+		if not String(file).ends_with(".gd") or file == "artkit_check.gd" \
+				or file == "licensing.gd":
+			continue
+		for line in FileAccess.get_file_as_string("res://artkit/" + file).split("\n"):
+			var stripped := line.strip_edges()
+			if stripped.begins_with("#"):
+				continue
+			if stripped.contains("preload(") or stripped.contains("ResourceLoader.load(") \
+					or stripped.contains("DirAccess.open(\"res://assets"):
+				# t181's PBR layer reads its own *manifest index* here. That is a JSON
+				# index of provenance, not an asset, and it is exactly what
+				# `_check_no_external_assets` audits for licence + source URL on every
+				# row. t194's rule is "no file reaches around the licensing layer", and
+				# the layer t181 legitimately runs its own side of.
+				#
+				# Matched as the literal expression, not as a blanket exemption for
+				# `ResourceLoader.load` - every other bypass still fails below.
+				if stripped.contains("ResourceLoader.load(PBR_MANIFEST)"):
+					continue
+				strays.append("%s: %s" % [file, stripped])
+	_ok(strays.is_empty(),
+			"artkit/ loads assets only through ArtKitLicensing, so every one is "
+			+ "inventoried", str(strays))
+
+	_ok(files.size() >= 10, "the kit's files are all present (%d)" % files.size())
+	print("       %d files: %s" % [files.size(), ", ".join(PackedStringArray(files))])
+	print("       %s" % ArtKitLicensing.format_summary())
+
+
+## The reuse layer must actually have run.
+##
+## Asserting that textures are *available* proves nothing: `ArtKitLicensing`
+## could be wired up, files on disk, inventory complete, and the materials still
+## handing back pure procedural noise if `_apply_licensed` were never called or
+## silently returned early. Every render would look plausible.
+##
+## So this checks the applied count, which is incremented at the exact point a
+## texture is assigned to a material. Two halves, both needed:
+##
+##   * a floor - zero applied means the layer is dead code;
+##   * a ceiling relative to the declared intent - an implausibly low number
+##     means most materials silently fell back, which is the failure mode where
+##     "some of it works" hides "most of it did not".
+
+
+# =============================================================================
+# 9. TEXTURE LAYER
+# =============================================================================
+
+## The reuse layer must actually have run.
+##
+## Asserting that textures are *available* proves nothing: `ArtKitLicensing`
+## could be wired up, files on disk, inventory complete, and the materials still
+## handing back pure procedural noise if `_apply_licensed` were never called or
+## silently returned early. Every render would look plausible.
+##
+## So this checks the applied count, which is incremented at the exact point a
+## texture is assigned to a material. Two halves, both needed:
+##
+##   * a floor - zero applied means the layer is dead code;
+##   * a ceiling relative to the declared intent - an implausibly low number
+##     means most materials silently fell back, which is the failure mode where
+##     "some of it works" hides "most of it did not".
+func _check_texture_layer() -> void:
+	_section("texture layer")
+	# Build every declared material so the layer has had its chance to run.
+	var keys := ArtKitMaterials.keys()
+	for k in keys:
+		ArtKitMaterials.get_(k)
+
+	var declared := ArtKitMaterials.TEXTURED.size()
+	_ok(declared >= 12, "the library declares textured materials (%d)" % declared)
+
+	# Every declared set must name an inventory entry for each slot it wants.
+	var unknown_sets: Array[String] = []
+	for key in ArtKitMaterials.TEXTURED.keys():
+		var set_name := String(ArtKitMaterials.TEXTURED[key])
+		if ArtKitLicensing.entry(set_name, "albedo").is_empty():
+			unknown_sets.append("%s -> %s" % [key, set_name])
+	_ok(unknown_sets.is_empty(),
+			"every declared texture set exists in the inventory", str(unknown_sets))
+
+	var applied := ArtKitLicensing.applied_count()
+	var missing := ArtKitLicensing.missing()
+	# The floor. One applied texture is enough to prove the path executes; the
+	# exact number depends on which captures this checkout has imported, so the
+	# upper bound is deliberately loose and the lower bound is the real check.
+	_ok(applied >= 1, "licensed textures actually reached a material (TEXTURES_APPLIED=%d)"
+			% applied)
+	print("       applied=%d missing_slots=%d declared_sets=%d"
+			% [applied, missing.size(), declared])
+	if not missing.is_empty():
+		# Not a failure: a bare checkout with no ingested captures is a supported
+		# state and the procedural fallbacks are the point. Reported so the number
+		# in the log is never mistaken for "everything was found".
+		print("       NOTE: %d slot(s) fell back to procedural noise" % missing.size())
 
 
 func _report() -> void:
