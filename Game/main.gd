@@ -30,6 +30,22 @@ const SHOT_MODE := "--shot"
 ## reaching into it. This is that state, asked for by name.
 const DRIVE_MODE := "--drive"
 
+## Time of day. DAY is the default as of t191; NIGHT is one flag away.
+##
+##   godot --path . -- --night
+##
+## WHY DAY IS NOW THE DEFAULT. The owner rejected the night preview at 00:54 on
+## 2026-10-05: the order was night polish on a world nobody had seen in daylight.
+## Daylight is also the honest default for a street racer - a game that only looks
+## right at 1am is a screenshot, not a place.
+##
+## WHAT THIS DOES NOT DO. It does not delete or edit the night. `World/night_env.gd`
+## is byte-identical to the promoted commit, `NightPass` is untouched, `Look` is
+## untouched, and `Tests/test_fix_only.gd` still asserts the night grade against a
+## freshly built `NightEnv`. `--night` swaps this one `new()` call back, so the night
+## phase that follows is a flag, not a re-derivation.
+const NIGHT_MODE := "--night"
+
 ## How far below the world counts as "fell out of the map". Generous, because
 ## kerbs, dips and the odd jump legitimately put the body below zero, and a
 ## recovery that fires while the car is still on the road is worse than none.
@@ -38,6 +54,7 @@ const RECOVER_BELOW_Y := -8.0
 var graph: RoadGraph
 var world: WorldBuilder
 var night: NightEnv
+var day: DayEnv
 var camera: ChaseCamera
 var player_car: CarBody
 var race: RaceDirector
@@ -70,18 +87,32 @@ func _ready() -> void:
 	print("[Boot] road graph: %d junctions, %d edges, %.0f m" % [
 		stats["nodes"], stats["edges"], stats["length_m"]])
 
-	night = NightEnv.new()
-	night.name = "NightEnvironment"
-	add_child(night)
+	if _night_requested():
+		night = NightEnv.new()
+		night.name = "NightEnvironment"
+		add_child(night)
+		print("[Boot] time_of_day=NIGHT (--night)")
+	else:
+		day = DayEnv.new()
+		day.name = "DayEnvironment"
+		add_child(day)
+		print("[Boot] time_of_day=DAY (default; --night for the preserved night)")
 
-	# A weak cool fill from high up. Not moonlight exactly - more like the sky
-	# bouncing city light - but it is what stops the scene going pitch black.
+	# The key light. Under the night this was a weak cool fill standing in for the
+	# sky bouncing city light off cloud; under the day it is the sun, and the sun's
+	# colour, energy and angle all come from `DayEnv` so the light and the sky
+	# cannot be set independently and end up disagreeing.
 	_sun = DirectionalLight3D.new()
-	_sun.light_color = MatLib.MOON
-	_sun.light_energy = 0.55
+	if night != null:
+		_sun.light_color = MatLib.MOON
+		_sun.light_energy = 0.55
+		_sun.rotation_degrees = Vector3(-52, -128, 0)
+	else:
+		_sun.light_color = DayEnv.SUN_COLOUR
+		_sun.light_energy = DayEnv.SUN_ENERGY
+		_sun.transform = DayEnv.sun_transform()
 	_sun.shadow_enabled = true
 	_sun.directional_shadow_max_distance = 180.0
-	_sun.rotation_degrees = Vector3(-52, -128, 0)
 	add_child(_sun)
 
 	# A reflection probe that follows the player. This is what actually puts the
@@ -490,6 +521,11 @@ func _shot_request() -> String:
 
 func _drive_requested() -> bool:
 	return OS.get_cmdline_user_args().has(DRIVE_MODE)
+
+
+## The night is preserved, not deleted: this flag is the whole of the switch.
+func _night_requested() -> bool:
+	return OS.get_cmdline_user_args().has(NIGHT_MODE)
 
 
 ## Frame-grab mode for automated visual checks. Lets the world settle, poses the
