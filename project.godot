@@ -8,7 +8,7 @@ config_version=5
 
 config/name="Cairns After Dark"
 config/description="Underground street racing through a fictionalised Manunda, Cairns QLD."
-config/version="0.2.3"
+config/version="0.2.4"
 run/main_scene="res://Game/main.tscn"
 config/features=PackedStringArray("4.3", "Forward Plus")
 
