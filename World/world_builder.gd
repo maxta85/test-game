@@ -89,6 +89,10 @@ const BUILDING_CLEARANCE := 2.5
 ## but neither can be zero, because a bin in the middle of a lane is a car that
 ## stops for no visible reason.
 const PROP_CLEARANCE := 1.0
+## How many times a failing placement is re-pushed before it is given up on. Each
+## round re-reads the corridor index from the new position, so this is "walk out of
+## however many roads are stacked here", not "try harder".
+const PUSH_ROUNDS := 3
 ## Plants a car is meant to drive through. Matched by name, because the geometry
 ## cannot tell them apart: a rain tree's canopy is a 6 m sphere and a car's is a
 ## 2 m box, and the only thing that says which of the two this one is comes from
@@ -1713,6 +1717,33 @@ func _too_close_to_road(p: Vector2, min_offset: float = -1.0) -> bool:
 
 ## Coconut palms. The single most identifiable thing about a north Queensland
 ## street, and they break up the roofline so the suburb is not a row of boxes.
+##
+## SCREENING (t191). Everything placed here is tested against the road corridor
+## before it is emitted, through the same corner test and the same push-or-drop
+## rule `_screen_placements()` uses for the kit props. Before t191 this function
+## placed 2000+ palms and paperbarks with ONE test between them - `_blocked_by_junction`
+## - and neither that nor the `+ FOOTPATH_WIDTH + 1..3 m` offset is a corridor test:
+## the offset is measured from *this edge's* `width`, so a palm standing beside a
+## service lane can land inside the carriageway of the arterial running past it,
+## and a paperbark's offset (`2.2..3.4 m`) is smaller than the footpath it is
+## supposed to be standing behind on a narrow street. Measured on Hoare Street, that
+## put solid geometry inside the drivable corridor; see `World/corridor_audit.gd`,
+## which recomputes it from the tree rather than trusting this function.
+##
+## The screen is a static flag so a capture harness can turn it OFF and photograph
+## the unscreened world on identical cameras - which is the only way the before and
+## after frames mean anything.
+static var verge_screening := true
+
+## Crown reach of a palm, for reporting only. The crown hangs at `h * 0.5` (3.25 m
+## and up), which is above a car, so it is not a road obstruction and is not screened
+## for - `Look`/`world_builder`'s own note at the frond placement says a car passes
+## under a frond. It is measured anyway, because "the canopy overhangs the road" is
+## a different complaint from "there is a tree in the road" and the two were being
+## conflated.
+const PALM_CROWN_REACH := 3.2
+
+
 func _vegetation() -> void:
 	var trunk_mesh := _palm_trunk_mesh(0.34, 1.0)
 	var frond_mesh := _frond_mesh()
@@ -1723,6 +1754,10 @@ func _vegetation() -> void:
 	var palms := 0
 	var bushes := 0
 	var big_trees := 0
+	# Candidates for the corridor screen: every solid plant, with the box a car
+	# would actually meet. Collected first, emitted after, so the test is applied
+	# once to the final list rather than guessed at per placement.
+	var verge: Array = []
 	# Verge scrub and the street paperbarks go through `ArtKitBatch`, not
 	# `_add`, for two reasons that were both measured in the before frames. The
 	# old scrub was a single `_icosphere(randf_range(1.4, 2.6))` shared by all
@@ -1752,29 +1787,34 @@ func _vegetation() -> void:
 				continue
 			var h := rng.randf_range(6.5, 13.0)
 			var lean := rng.randf_range(-0.09, 0.09)
-			var xf := Transform3D(Basis.from_euler(Vector3(lean, rng.randf() * TAU, 0)), Vector3(p.x, 0, p.y))
-			_add("palms", trunk_mesh, xf.scaled_local(Vector3(1.0, h, 1.0)), "palm_trunk")
-			# The shaft only, not the crown: a car passes under a frond, and a
-			# frond collider is a 7 m sphere over the footpath. The shaft mesh is
-			# unit height centred on its own origin, so `h * 0.5` is where the
-			# drawn trunk actually stops, which is the same place.
-			_solid_post(_solid_prop, p, 0.36, h * 0.5)
-			var frond_count := 9
-			for f in frond_count:
-				var ang := TAU * float(f) / frond_count + rng.randf() * 0.2
-				var droop := rng.randf_range(0.35, 0.75)
-				# h * 0.5, not h. The shaft mesh is a unit height centred on its own
-				# origin, and `scaled_local` then stretches it either side of that
-				# origin, so its top lands at h/2 - not at h. Placing the crown at
-				# h left every palm wearing its fronds a trunk-height in the air.
-				_add("fronds", frond_mesh,
-					Transform3D(Basis.from_euler(Vector3(droop, ang, 0)), Vector3(p.x, h * 0.5, p.y))
-						.scaled_local(Vector3(1.0, 1.0, 1.0)), "palm_frond")
-			palms += 1
+			var yaw := rng.randf() * TAU
+			# Candidate only. Nothing is drawn until the screen has run - the old
+			# order emitted the trunk and its collider here, which is why a palm that
+			# belonged 2 m back on the footpath stayed in the lane.
+			verge.append({
+				"kind": "palm",
+				"prop": "palm_verge",
+				"pos": p,
+				"yaw": yaw,
+				"h": h,
+				"lean": lean,
+				"droop": rng.randf_range(0.35, 0.75),
+				"salt": i,
+				# The box a car meets: the trunk, 0.72 m across, `h` tall, centred
+				# `h * 0.5` above the ground because the shaft mesh is unit height
+				# centred on its own origin. Same number the collider uses (0.36).
+				"size": Vector3(0.72, h, 0.72),
+				"centre": Vector3(0.0, h * 0.5, 0.0),
+			})
 
 		# Low scrub along the verges. Variant comes from the edge id, not the
 		# placement index, so it is stable per run - the memo is keyed on
 		# (name, variant), and the batch needs the same resource every time.
+		#
+		# NOT screened, deliberately. `bush_scrub` is in SOLID_FREE_PROPS: it is a
+		# plant the world means you drive through, and it is drawn with no collider
+		# at all. Screening it would move bushes away from the verge for the sake of
+		# a class of object the car does not collide with.
 		var scrub_n := maxi(int(length / 22.0), 1)
 		for i in scrub_n:
 			var mid2: Vector2 = a.lerp(b, (float(i) + rng.randf() * 0.8) / float(scrub_n))
@@ -1783,11 +1823,17 @@ func _vegetation() -> void:
 				Transform3D(Basis.from_euler(Vector3(0, rng.randf() * TAU, 0)), Vector3(p2.x, 0.4, p2.y)))
 			bushes += 1
 
-		# Street paperbarks. Offset is half the carriageway plus 2.2-3.4 m, and
-		# the crown reaches 2.6-4.1 m out, so on a 14 m road the canopy edge
+		# Street paperbarks. Offset is half the carriageway plus 2.2-3.4 m, and the
+		# crown reaches 2.6-4.1 m out, so on a 14 m road the canopy edge
 		# lands ~1.5 m inside the far kerb line. That overhang is the point: it
 		# is what a 4-lane divided arterial under paperbarks actually looks like,
 		# and it is what the reference frames show.
+		#
+		# The TRUNK is what is screened, and the trunk is not at the offset above:
+		# `tree_paperbark`'s origin is the middle of its canopy, not the foot of
+		# its trunk, so the box measured by `_prop_extent` is centred somewhere in
+		# the air and `_prop_clear` is asked about the wrong point. `_trunk_box()`
+		# below measures the ground-reaching part and re-seats it on y = 0.
 		var tree_n := maxi(int(length / 34.0), 1)
 		for i in tree_n:
 			var mid3: Vector2 = a.lerp(b, (float(i) + 0.35 + rng.randf() * 0.3) / float(tree_n))
@@ -1795,15 +1841,197 @@ func _vegetation() -> void:
 			var p3: Vector2 = mid3 + nrm * (float(graph.edges[e["id"]]["width"]) * 0.5 + rng.randf_range(2.2, 3.4)) * side3
 			if _blocked_by_junction(Vector3(p3.x, 0, p3.y)):
 				continue
-			canopy.add_array(ArtKitProps.variant("tree_paperbark", posmod(i + int(e["id"]), ArtKitProps.VARIANTS)),
-				ArtKitBatch.place(Vector3(p3.x, 0.0, p3.y), rng.randf() * TAU))
+			var tb := _trunk_box("tree_paperbark")
+			if tb.is_empty():
+				continue
+			verge.append({
+				"kind": "paperbark",
+				"prop": "tree_paperbark",
+				"pos": p3,
+				"yaw": rng.randf() * TAU,
+				"salt": i + int(e["id"]),
+				"size": tb["size"],
+				"centre": tb["centre"],
+			})
+
+	# The screen. Once, over the whole map, before a single trunk is drawn.
+	var screened := _screen_verge(verge, "verge")
+	for v in (screened["kept"] as Array):
+		if String(v["kind"]) == "palm":
+			_emit_palm(v, trunk_mesh, frond_mesh)
+			palms += 1
+		else:
+			var vp: Vector2 = v["pos"]
+			canopy.add_array(ArtKitProps.variant("tree_paperbark",
+					posmod(int(v["salt"]), ArtKitProps.VARIANTS)),
+				ArtKitBatch.place(Vector3(vp.x, 0.0, vp.y), float(v["yaw"])))
 			big_trees += 1
 
 	if scrub.instances() > 0:
 		scrub.build(self)
 	if canopy.instances() > 0:
 		canopy.build(self)
-	print("[World] %d palms, %d bushes, %d paperbarks" % [palms, bushes, big_trees])
+	print("[World] %d palms, %d bushes, %d paperbarks (verge screen: %d kept, %d pushed, %d dropped of %d candidates)" % [
+		palms, bushes, big_trees, int(screened["kept"].size()),
+		int(screened["moved"]), int(screened["dropped"]), verge.size()])
+
+
+## Draw one screened palm: shaft, its collider, and the crown.
+func _emit_palm(v: Dictionary, trunk_mesh: ArrayMesh, frond_mesh: ArrayMesh) -> void:
+	var p: Vector2 = v["pos"]
+	var h := float(v["h"])
+	var yaw := float(v["yaw"])
+	var lean := float(v["lean"])
+	_add("palms", trunk_mesh,
+		Transform3D(Basis.from_euler(Vector3(lean, yaw, 0)), Vector3(p.x, 0, p.y))
+			.scaled_local(Vector3(1.0, h, 1.0)), "palm_trunk")
+	# The shaft only, not the crown: a car passes under a frond, and a
+	# frond collider is a 7 m sphere over the footpath. The shaft mesh is
+	# unit height centred on its own origin, so `h * 0.5` is where the
+	# drawn trunk actually stops, which is the same place.
+	_solid_post(_solid_prop, p, 0.36, h * 0.5)
+	var frond_count := 9
+	for f in frond_count:
+		var ang := TAU * float(f) / frond_count + float(v["salt"])
+		var droop := float(v["droop"])
+		# h * 0.5, not h. The shaft mesh is a unit height centred on its own
+		# origin, and `scaled_local` then stretches it either side of that
+		# origin, so its top lands at h/2 - not at h. Placing the crown at
+		# h left every palm wearing its fronds a trunk-height in the air.
+		_add("fronds", frond_mesh,
+			Transform3D(Basis.from_euler(Vector3(droop, ang, 0)), Vector3(p.x, h * 0.5, p.y))
+				.scaled_local(Vector3(1.0, 1.0, 1.0)), "palm_frond")
+
+
+## A tree's ground-reaching box, re-seated so y = 0 is the ground.
+##
+## `_prop_extent()` returns the union box in the MESH's own frame, and
+## `tree_paperbark`'s frame has the origin in the middle of a 15-20 m canopy. Asking
+## `nearest_corridor` about that centre asks about a point several metres in the
+## air, so the trunk's own position is never what gets tested. Returns {} when the
+## prop has no ground-reaching part at all.
+func _trunk_box(name: String) -> Dictionary:
+	var pe := _prop_extent(name)
+	if not bool(pe["solid"]):
+		return {}
+	var centre: Vector3 = pe["centre"]
+	var size: Vector3 = pe["size"]
+	# Drop the box onto the ground: shift the centre down by whatever it floats.
+	var base := centre.y - size.y * 0.5
+	return {"size": size, "centre": Vector3(centre.x, size.y * 0.5, centre.z)}
+
+
+## Holds every solid verge plant off the carriageway, or takes it out.
+##
+## The same test and the same rule as `_screen_placements()`: four rotated corners
+## of the placement's own box, the worst corner decides, and a failure is pushed
+## straight out along the way out of the nearest carriageway and RE-TESTED, so what
+## comes out is verified clear rather than assumed clear. Only a plant whose escape
+## line runs along the road is dropped, and each drop is recorded with a reason and
+## a position.
+##
+## `verge_screening = false` returns the list untouched, which is how
+## `World/hoare_day_capture.gd` photographs the unscreened world.
+## Push ONE placement clear of the carriageway, or say it cannot be done.
+##
+## The single-candidate form of `_screen_verge`'s rule, so there is one implementation
+## of the rule rather than two that can disagree. Returns
+## `{pos, ok, worst_before, worst_after, rounds}`.
+##
+## Re-reads the corridor index from the new position on every round, because Hoare
+## Street carries a service lane and frontage roads running close and roughly parallel
+## to it: one shove off one carriageway can land inside the next, and a single-shot
+## push dropped 421 plants for exactly that reason while still leaving 43 solid posts
+## standing in the lanes.
+func _push_clear(at: Vector2, size: Vector3, centre: Vector3,
+		yaw: float = 0.0) -> Dictionary:
+	var pe: Dictionary = {"size": size, "centre": centre}
+	var roads := _road_grid()
+	var before := _prop_clear(at, pe, yaw, 1.0, roads)
+	if before >= 0.0:
+		return {"pos": at, "ok": true, "worst_before": before,
+			"worst_after": before, "rounds": 0}
+	var reach := _prop_reach(pe, yaw, 1.0)
+	var to := at
+	var rounds := 0
+	for _attempt in PUSH_ROUNDS:
+		rounds += 1
+		var near := OSMBuildings.nearest_corridor(to, roads)
+		var away := to - (near["point"] as Vector2)
+		if away.length() < 0.05:
+			break
+		away = away.normalized()
+		var step_to := to + away * (-_prop_clear(to, pe, yaw, 1.0, roads) + reach
+			+ PROP_CLEARANCE)
+		if step_to.distance_to(to) < 0.01:
+			break
+		to = step_to
+		var after := _prop_clear(to, pe, yaw, 1.0, roads)
+		if after >= 0.0:
+			return {"pos": to, "ok": true, "worst_before": before,
+				"worst_after": after, "rounds": rounds}
+	# Kept for the single-placement callers (lamp standards) that must be able to say
+	# "no" rather than be handed a plant that is still in the road.
+	return {"pos": at, "ok": false, "worst_before": before,
+		"worst_after": _prop_clear(at, pe, yaw, 1.0, roads), "rounds": rounds}
+
+
+func _screen_verge(candidates: Array, slot: String = "verge") -> Dictionary:
+	var kept: Array = []
+	var moved := 0
+	var dropped := 0
+	var reasons: Array[String] = []
+	var worst_before := 0.0
+	var worst_after := 0.0
+	if not verge_screening:
+		# Report the unscreened numbers anyway. A flag that silently returns the
+		# input would make the before picture unmeasurable, and the before picture
+		# is the evidence for the change.
+		for c in candidates:
+			var pe0 := {"size": c["size"], "centre": c["centre"]}
+			var g0 := _prop_clear(c["pos"], pe0, float(c["yaw"]), 1.0, _road_grid())
+			if g0 < worst_before:
+				worst_before = g0
+		_solid[slot + "_screen"] = {"on": false, "slot": slot, "kept": candidates.size(),
+			"moved": 0, "dropped": 0, "reasons": reasons as Array,
+			"worst_intrusion_m": worst_before}
+		for c in candidates:
+			kept.append(c)
+		return {"kept": kept, "moved": 0, "dropped": 0, "reasons": reasons}
+
+	var roads := _road_grid()
+	for c in candidates:
+		var kind := String(c["kind"])
+		var pe: Dictionary = {"size": c["size"], "centre": c["centre"]}
+		var here: Vector2 = c["pos"]
+		var yaw := float(c["yaw"])
+		var worst := _prop_clear(here, pe, yaw, 1.0, roads)
+		if worst < worst_before:
+			worst_before = worst
+		if worst >= 0.0:
+			kept.append(c)
+			continue
+
+		# One implementation of the push rule, shared with the lamp standards.
+		var site := _push_clear(here, pe["size"], pe["centre"], yaw)
+		if not bool(site["ok"]):
+			dropped += 1
+			reasons.append("%s at %.0f,%.0f could not be moved clear of the carriageway" % [kind, here.x, here.y])
+			continue
+		var to: Vector2 = site["pos"]
+		moved += 1
+		var fixed: Dictionary = c.duplicate()
+		fixed["pos"] = to
+		var after := _prop_clear(to, pe, yaw, 1.0, roads)
+		if after < worst_after:
+			worst_after = after
+		kept.append(fixed)
+
+	_solid[slot + "_screen"] = {"on": true, "slot": slot, "kept": kept.size(),
+		"moved": moved, "dropped": dropped, "reasons": reasons as Array,
+		"worst_intrusion_before_m": worst_before,
+		"worst_intrusion_after_m": worst_after}
+	return {"kept": kept, "moved": moved, "dropped": dropped, "reasons": reasons}
 
 
 func _streetlights() -> void:
@@ -1859,6 +2087,21 @@ func _streetlights() -> void:
 						break
 				if not slid:
 					continue
+			# t191: the standard goes through the corridor screen, at the point of
+			# placement, with the same push the verge planting uses. Its offset is
+			# `width * 0.5 + 1.2` from THIS edge, which is 1.2 m of footpath and is not
+			# a clearance test; against the neighbouring arterial the audit found 26
+			# lamp standards standing up to 7 m inside Hoare's carriageway.
+			#
+			# WHAT THIS DOES NOT TOUCH. No lamp ENERGY, range, attenuation, cone, aim
+			# or colour is read or written here - those belong to `Look` and
+			# `NightPass` and this pass does not go near them. Only WHERE the standard
+			# stands changes, and only for the standards that were in a traffic lane.
+			# It IS a visible change to the night and is flagged as such in t191.
+			var site := _push_clear(p, Vector3(0.30, 7.0, 0.30), Vector3(0.0, 3.5, 0.0))
+			if not bool(site["ok"]):
+				continue
+			p = site["pos"]
 			var h := 7.0
 			var base := Vector3(p.x, KERB_HEIGHT, p.y)
 			_add("poles", pole, Transform3D(Basis(), base).scaled_local(Vector3(1.0, h, 1.0)), "pole")
@@ -1961,6 +2204,12 @@ func _power_lines() -> void:
 	_materials["wire"] = MatLib.wall(Color(0.05, 0.05, 0.05))
 
 	var pole_positions: Array = []
+	# t191: timber poles go through the same corridor screen as the verge planting.
+	# They always had a solid 0.2 m collider, and the offset is measured from THIS
+	# edge's width, so on Hoare Street - 14 m wide by road class, with a service lane
+	# beside it - the audit found 17 of them standing up to 7.1 m inside the
+	# carriageway. See `World/corridor_audit.gd`.
+	var cands: Array = []
 	for e in graph.edges:
 		var a: Vector2 = graph.node_pos(int(e["a"]))
 		var b: Vector2 = graph.node_pos(int(e["b"]))
@@ -1977,10 +2226,19 @@ func _power_lines() -> void:
 			var p := mid + nrm * (float(e["width"]) * 0.5 + 2.6) * side
 			if _blocked_by_junction(Vector3(p.x, 0, p.y)):
 				continue
-			var h := 9.5
-			_add("poles_wood", pole, Transform3D(Basis(), Vector3(p.x, 0, p.y)).scaled_local(Vector3(1.0, h, 1.0)), "pole_wood")
-			pole_positions.append(Vector3(p.x, h - 0.8, p.y))
-			_solid_post(_solid_prop, p, 0.2, h * 0.5)
+			cands.append({"kind": "pole", "pos": p, "yaw": 0.0, "h": 9.5,
+				"lean": 0.0, "droop": 0.0, "salt": i + int(e["id"]),
+				"size": Vector3(0.40, 9.5, 0.40), "centre": Vector3(0.0, 4.75, 0.0)})
+
+	# The wires are strung between the poles that SURVIVED, so a moved pole takes its
+	# span with it instead of leaving a wire hanging in mid-air.
+	for c in (_screen_verge(cands, "poles")["kept"] as Array):
+		var pp: Vector2 = c["pos"]
+		var ph := float(c["h"])
+		_add("poles_wood", pole, Transform3D(Basis(), Vector3(pp.x, 0, pp.y))
+			.scaled_local(Vector3(1.0, ph, 1.0)), "pole_wood")
+		pole_positions.append(Vector3(pp.x, ph - 0.8, pp.y))
+		_solid_post(_solid_prop, pp, 0.2, ph * 0.5)
 	_connect_wires(pole_positions)
 
 
