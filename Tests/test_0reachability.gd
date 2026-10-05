@@ -37,7 +37,7 @@ extends RefCounted
 ## scene. The geometry-returning entry points are in SHIPPED_GEOMETRY below.
 const SHIPPED := [
 	{"id": "world builder", "script": "res://World/world_builder.gd"},
-	{"id": "night environment", "script": "res://World/night_env.gd"},
+	{"id": "day environment", "script": "res://World/day_env.gd"},
 	{"id": "car body", "script": "res://Systems/vehicle/car_body.gd"},
 	{"id": "car visual", "script": "res://Systems/vehicle/car_visual.gd"},
 	{"id": "chase camera", "script": "res://Systems/camera/chase_camera.gd"},
@@ -85,6 +85,12 @@ const SHIPPED_GEOMETRY := [
 ## node once wired. `nodes` are node names, for the subsystems whose entry point
 ## is a static function that returns geometry rather than a node of its own.
 const NOT_SHIPPED := [
+	{
+		"id": "night environment",
+		"module": "res://World/night_env.gd",
+		"scripts": ["res://World/night_env.gd"],
+		"why": "t191 day-first: the owner rejected the night preview at 00:54, so DAY is the default and --night is the switch. The file is preserved verbatim and still unit-tested by Tests/test_fix_only.gd; this entry fails the moment someone wires it back, which is the point",
+	},
 	{
 		"id": "osm water",
 		"module": "res://World/osm_water.gd",
