@@ -226,6 +226,12 @@ def main():
 
     token = get_token()
 
+    # The script pushes HEAD:main. Run from the main checkout only - an
+    # integration worktree's HEAD is in-flight work, not a release.
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch != "main":
+        fail("checked-out branch is %r, not 'main' - run from the main checkout" % branch)
+
     # Stage under the canonical asset name so the identity gate's
     # manifest.asset == basename(artefact) check is meaningful.
     staged = exe.parent / ASSET_NAME
