@@ -222,11 +222,14 @@ func _car_models(t: TestHarness) -> void:
 				cylinders += 1
 		t.eq(cylinders, 0, "%s %s uses scanned wheel geometry, not a cylinder" % [vis.spec.id, String(w["name"])])
 
-	# The car's origin sits at hub height, so a model fitted to stand on y=0 has
-	# to be lifted by a tyre radius or it sinks into the road.
+	# The car's origin sits at hub height, so the road is a tyre radius BELOW it
+	# and a model fitted to stand on y=0 has to be dropped by that radius. This
+	# asserted the opposite sign, and the car it blessed floated a whole tyre
+	# radius: measured, the imported body sat 0.50 m above the road on the Supra
+	# and every tyre with it.
 	var fit: Dictionary = CarFit.ALL[CarVisual.MODELS["kairo_s13"]]
-	t.near(model.position.y, float(fit["offset"].y) + vis.spec.tyre_radius, 0.001,
-		"the model is lifted by a tyre radius so it stands on the ground")
+	t.near(model.position.y, float(fit["offset"].y) - vis.spec.tyre_radius, 0.001,
+		"the model is dropped by a tyre radius, so its tyres stand on the road")
 	var source_nose: Dictionary = preload("res://Tools/check_car_facing.gd").SOURCE_NOSE
 	for car_id in CarVisual.MODELS:
 		var fitted_car := spawn(world, car_id)

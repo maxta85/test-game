@@ -62,6 +62,7 @@ var _tail_lens: Array[MeshInstance3D] = []
 var _reverse_lens: Array[MeshInstance3D] = []
 var _lights: Node3D              ## children of this that are Light3D
 var _holder: Node3D              ## the "Model" node from _build_model
+var _holder_rest_y: float = 0.0  ## its y before the springs squash the car
 var _model: Node                 ## the instantiated gltf scene
 
 
@@ -127,15 +128,19 @@ func _build_model() -> bool:
 
 	var holder := Node3D.new()
 	holder.name = "Model"
-	# The car's origin sits at hub height rather than on the ground, so a model
-	# fitted to stand on y=0 has to be lifted by a tyre radius or it sinks.
+	# The body's origin sits at hub height, so the road is a tyre radius BELOW it
+	# and a model fitted to stand on y=0 has to be dropped by that radius. It used
+	# to be lifted by one instead, which left every scanned car - and all four of
+	# its tyres - a whole tyre radius in the air: measured, the imported body sat
+	# 0.50 m above the road on the Supra and 0.42 m on the S15.
 	holder.transform = Transform3D(
 		basis,
-		Vector3(fit["offset"]) + Vector3(0.0, spec.tyre_radius, 0.0)
+		Vector3(fit["offset"]) - Vector3(0.0, spec.tyre_radius, 0.0)
 	)
 	add_child(holder)
 	holder.add_child(scene)
 	_holder = holder
+	_holder_rest_y = holder.position.y
 	_model = scene
 	return true
 
@@ -193,6 +198,13 @@ static var _scan_cache: Dictionary = {}
 ## Builds the steer/spin rig for a scanned model. Returns false when the scan has
 ## no usable per-corner wheel geometry, so the caller can fall back to the
 ## procedural wheels rather than leave the car on baked-in tyres.
+##
+## The steer node hangs on the strut's mount, at hub height, and the wheel
+## geometry is baked relative to the corner's own hub - so the node's position is
+## the wheel's position. It used to be baked in absolute car space and hung on
+## the same node, which put every wheel out twice its own axle offset: measured on
+## the player's S13 the front hubs landed 2.00 m from their struts, at the tail,
+## a metre in the air.
 func _rig_scanned_wheels() -> bool:
 	if _holder == null or _model == null:
 		return false
@@ -207,9 +219,10 @@ func _rig_scanned_wheels() -> bool:
 		return false
 
 	for corner in SCAN_CORNERS:
+		var base := _axle(corner, 0.0)
 		var steer := Node3D.new()
 		steer.name = "Steer_" + corner
-		steer.position = _axle(corner, float(rig["hub"][corner]))
+		steer.position = base
 		add_child(steer)
 		var spin := Node3D.new()
 		spin.name = "Spin"
@@ -219,7 +232,7 @@ func _rig_scanned_wheels() -> bool:
 			mi.name = String(part["name"])
 			mi.mesh = part["mesh"]
 			spin.add_child(mi)
-		_wheels.append({"name": corner, "steer": steer, "spin": spin})
+		_wheels.append({"name": corner, "steer": steer, "spin": spin, "base": base})
 
 	# Whatever the corners did not claim is rebuilt in place, so only the wheel
 	# geometry itself needs hiding - and it is hidden per car, not once per
@@ -337,7 +350,7 @@ func _scan_wheels() -> Dictionary:
 		if not m.has("taken"):
 			continue
 		hidden.append(m["path"])
-		var parts := _split_mesh(m, m["taken"])
+		var parts := _split_mesh(m, m["taken"], axles, hub)
 		for n in SCAN_CORNERS.size():
 			var corner: String = SCAN_CORNERS[n]
 			if not m["taken"].has(corner):
@@ -523,7 +536,13 @@ func _corner_span(mine: Array) -> Vector3:
 ## only the triangles whose three vertices all belong to the same destination.
 ## Every destination ends up with exactly the geometry it should, so the original
 ## can be hidden without the car losing a panel.
-func _split_mesh(m: Dictionary, claimed: Dictionary) -> Dictionary:
+##
+## A corner's geometry is rebased onto its own hub, because that is the node it
+## ends up under: `Steer_FL` sits on the strut mount, so baking in absolute car
+## space would offset the wheel by its own axle twice. `SCAN_REST` keeps car
+## space, because those parts are re-added under the model holder, which applies
+## the fit transform again.
+func _split_mesh(m: Dictionary, claimed: Dictionary, axles: Dictionary, hub: Dictionary) -> Dictionary:
 	var pos: PackedVector3Array = m["pos"]
 	var total: int = pos.size()
 	var dest := PackedInt32Array()
@@ -544,9 +563,14 @@ func _split_mesh(m: Dictionary, claimed: Dictionary) -> Dictionary:
 
 	var parts := {}
 	for n in corners + [SCAN_REST]:
+		var origin := Vector3.ZERO
+		if n != SCAN_REST:
+			var corner: String = SCAN_CORNERS[n]
+			var axle: Vector3 = axles[corner]
+			origin = Vector3(axle.x, float(hub[corner]), axle.z)
 		var sets: Array = []
 		for surf in m["surfaces"]:
-			var built := _emit_surface(surf, dest, n, m["pos"], m["normal_basis"])
+			var built := _emit_surface(surf, dest, n, m["pos"], m["normal_basis"], origin)
 			if built != null:
 				sets.append(built)
 		parts[n] = sets
@@ -555,7 +579,7 @@ func _split_mesh(m: Dictionary, claimed: Dictionary) -> Dictionary:
 
 ## Builds one surface of one destination. Returns an ArrayMesh, or an empty
 ## dictionary when that destination has no geometry in this surface.
-func _emit_surface(surf: Dictionary, dest: PackedInt32Array, which: int, pos: PackedVector3Array, nrm: Basis) -> ArrayMesh:
+func _emit_surface(surf: Dictionary, dest: PackedInt32Array, which: int, pos: PackedVector3Array, nrm: Basis, origin: Vector3) -> ArrayMesh:
 	var arrays: Array = surf["arrays"]
 	var start: int = int(surf["start"])
 	var count: int = int(surf["count"])
@@ -604,7 +628,7 @@ func _emit_surface(surf: Dictionary, dest: PackedInt32Array, which: int, pos: Pa
 		var at: int = remap[j]
 		if at < 0:
 			continue
-		verts.append(pos[start + j])
+		verts.append(pos[start + j] - origin)
 		if src_norm != null:
 			norms.append(nrm * src_norm[j])
 		if src_tan != null and j * 4 + 3 < src_tan.size():
@@ -725,7 +749,8 @@ func _build_wheels() -> void:
 		# Protrudes 10 mm proud of the tyre on each side, so from the chase camera
 		# the wheel reads as a wheel and not a black disc.
 		_add_cylinder(spin, r * 0.56, 0.235, rim_mat, "Rim")
-		_wheels.append({"name": String(item["name"]), "steer": steer, "spin": spin})
+		_wheels.append({"name": String(item["name"]), "steer": steer, "spin": spin,
+			"base": item["pos"] as Vector3})
 
 
 func _build_lights() -> void:
@@ -842,13 +867,37 @@ func _process(_delta: float) -> void:
 
 ## Copies the physics state onto the exterior: wheels follow their own struts,
 ## brake lights follow the brake pedal, reverse lights follow the gear.
+##
+## The strut's compression moves the wheel up by exactly that much, because the
+## body drops by it and the road does not move. Without it every car - scanned or
+## procedural - sits with its tyres buried: the springs carry the car's weight by
+## compressing, so the body origin settles about 60 mm below the height a tyre
+## radius would give, and the wheel geometry was pinned to the origin and went
+## with it. `compression` is already the signed distance from the mount to the
+## contact point (0 when the wheel is off the ground, i.e. at full droop), so this
+## needs no raycast of its own.
+##
+## The imported body gets the same correction as the wheels, as the MEAN of the
+## four: the fit convention puts the model's lowest vertex on the road at the
+## car's uncompressed ride height, so without this the shell sat 60 mm into the
+## tarmac while its wheels stood on top of it.
 func sync(car: CarBody) -> void:
+	var squash := 0.0
+	var counted := 0
 	for w in _wheels:
 		var src: Dictionary = car.get_wheel(String(w["name"]))
 		if src.is_empty():
 			continue
-		(w["steer"] as Node3D).rotation.y = float(src["steer_angle"])
+		var steer: Node3D = w["steer"]
+		steer.rotation.y = float(src["steer_angle"])
 		(w["spin"] as Node3D).rotation.x = float(src["spin_vis"])
+		var compression: float = float(src["compression"])
+		if w.has("base"):
+			steer.position = (w["base"] as Vector3) + Vector3(0.0, compression, 0.0)
+			squash += compression
+			counted += 1
+	if _holder != null and counted > 0:
+		_holder.position.y = _holder_rest_y + squash / float(counted)
 
 	if _tail_mat == null:
 		return
